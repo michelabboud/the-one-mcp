@@ -325,6 +325,21 @@ pub fn update_project_config(
     Ok(config_path)
 }
 
+/// Returns the global state directory without requiring a project root.
+/// Falls back gracefully: THE_ONE_HOME > $HOME/.the-one > .the-one
+pub fn global_state_dir_or_default() -> PathBuf {
+    if let Ok(path) = env::var("THE_ONE_HOME") {
+        let path = PathBuf::from(path);
+        if path.is_absolute() {
+            return path;
+        }
+    }
+    if let Ok(home) = env::var("HOME") {
+        return PathBuf::from(home).join(".the-one");
+    }
+    PathBuf::from(".the-one")
+}
+
 fn global_state_dir() -> Result<PathBuf, CoreError> {
     if let Ok(path) = env::var("THE_ONE_HOME") {
         let path = PathBuf::from(path);

@@ -33,9 +33,12 @@ use crate::api::{
     DocsUpdateRequest, DocsUpdateResponse, MemoryFetchChunkRequest, MemoryFetchChunkResponse,
     MemorySearchItem, MemorySearchRequest, MemorySearchResponse, MetricsSnapshotResponse,
     ProjectInitRequest, ProjectInitResponse, ProjectProfileGetRequest, ProjectProfileGetResponse,
-    ProjectRefreshRequest, ProjectRefreshResponse, ToolEnableRequest, ToolEnableResponse,
-    ToolRunRequest, ToolRunResponse, ToolSearchRequest, ToolSearchResponse, ToolSuggestItem,
-    ToolSuggestRequest, ToolSuggestResponse,
+    ProjectRefreshRequest, ProjectRefreshResponse, ToolAddRequest, ToolAddResponse,
+    ToolDisableRequest, ToolDisableResponse, ToolEnableRequest, ToolEnableResponse,
+    ToolInfoRequest, ToolInstallRequest, ToolInstallResponse, ToolListRequest, ToolListResponse,
+    ToolRemoveRequest, ToolRemoveResponse, ToolRunRequest, ToolRunResponse, ToolSearchRequest,
+    ToolSearchResponse, ToolSuggestItem, ToolSuggestRequest, ToolSuggestResponse,
+    ToolUpdateResponse,
 };
 
 pub struct McpBroker {
@@ -47,9 +50,10 @@ pub struct McpBroker {
     policy: PolicyEngine,
     session_approvals: RwLock<HashSet<String>>,
     metrics: BrokerMetrics,
+    catalog: std::sync::Mutex<Option<the_one_core::tool_catalog::ToolCatalog>>,
 }
 
-// Manual Debug impl since MemoryEngine and DocsManager don't implement Debug
+// Manual Debug impl since MemoryEngine, DocsManager, and ToolCatalog don't implement Debug
 impl std::fmt::Debug for McpBroker {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("McpBroker")
@@ -102,6 +106,7 @@ impl McpBroker {
             policy,
             session_approvals: RwLock::new(HashSet::new()),
             metrics: BrokerMetrics::default(),
+            catalog: std::sync::Mutex::new(None),
         }
     }
 
@@ -526,15 +531,280 @@ impl McpBroker {
         })
     }
 
+    // -----------------------------------------------------------------------
+    // Catalog helpers
+    // -----------------------------------------------------------------------
+
+    fn ensure_catalog(&self) -> Result<(), CoreError> {
+        {
+            let guard = self
+                .catalog
+                .lock()
+                .map_err(|e| CoreError::Catalog(format!("catalog lock poisoned: {e}")))?;
+            if guard.is_some() {
+                return Ok(());
+            }
+        }
+        let global_dir = the_one_core::config::global_state_dir_or_default();
+        let catalog = the_one_core::tool_catalog::ToolCatalog::open(&global_dir)?;
+
+        // Import catalog files if catalog is empty
+        if catalog.tool_count()? == 0 {
+            let catalog_dir = Self::find_catalog_data_dir();
+            if let Some(dir) = catalog_dir {
+                let _ = catalog.import_catalog_dir(&dir);
+            }
+            let _ = catalog.scan_system_inventory();
+        }
+
+        let mut guard = self
+            .catalog
+            .lock()
+            .map_err(|e| CoreError::Catalog(format!("catalog lock poisoned: {e}")))?;
+        *guard = Some(catalog);
+        Ok(())
+    }
+
+    fn find_catalog_data_dir() -> Option<PathBuf> {
+        let global = the_one_core::config::global_state_dir_or_default();
+        let candidates = [
+            PathBuf::from("tools/catalog"),
+            global.join("catalog"),
+        ];
+        candidates
+            .into_iter()
+            .find(|p| p.exists() && p.is_dir())
+    }
+
+    // -----------------------------------------------------------------------
+    // Tool lifecycle methods (catalog-backed)
+    // -----------------------------------------------------------------------
+
+    #[instrument(skip_all)]
+    pub async fn tool_add(
+        &self,
+        request: ToolAddRequest,
+    ) -> Result<ToolAddResponse, CoreError> {
+        self.ensure_catalog()?;
+        let guard = self.catalog.lock().map_err(|e| CoreError::Catalog(format!("catalog lock poisoned: {e}")))?;
+        let cat = guard
+            .as_ref()
+            .ok_or_else(|| CoreError::Catalog("catalog not initialized".into()))?;
+
+        let entry = the_one_core::tool_catalog::CatalogToolEntry {
+            id: request.id.clone(),
+            name: request.name,
+            tool_type: request.tool_type,
+            category: request.category,
+            languages: request.languages,
+            description: request.description,
+            when_to_use: String::new(),
+            what_it_finds: String::new(),
+            install: Some(the_one_core::tool_catalog::CatalogInstall {
+                command: request.install_command,
+                binary_name: String::new(),
+            }),
+            run: Some(the_one_core::tool_catalog::CatalogRun {
+                command: request.run_command,
+            }),
+            risk_level: request.risk_level.unwrap_or_else(|| "low".to_string()),
+            tags: request.tags,
+            github: request.github.unwrap_or_default(),
+            trust_level: "user".to_string(),
+        };
+        cat.add_user_tool(&entry)?;
+        Ok(ToolAddResponse {
+            added: true,
+            id: request.id,
+        })
+    }
+
+    #[instrument(skip_all)]
+    pub async fn tool_remove(
+        &self,
+        request: ToolRemoveRequest,
+    ) -> Result<ToolRemoveResponse, CoreError> {
+        self.ensure_catalog()?;
+        let guard = self.catalog.lock().map_err(|e| CoreError::Catalog(format!("catalog lock poisoned: {e}")))?;
+        let cat = guard
+            .as_ref()
+            .ok_or_else(|| CoreError::Catalog("catalog not initialized".into()))?;
+        let removed = cat.remove_user_tool(&request.tool_id)?;
+        Ok(ToolRemoveResponse { removed })
+    }
+
+    #[instrument(skip_all)]
+    pub async fn tool_disable(
+        &self,
+        request: ToolDisableRequest,
+    ) -> Result<ToolDisableResponse, CoreError> {
+        self.ensure_catalog()?;
+        let guard = self.catalog.lock().map_err(|e| CoreError::Catalog(format!("catalog lock poisoned: {e}")))?;
+        let cat = guard
+            .as_ref()
+            .ok_or_else(|| CoreError::Catalog("catalog not initialized".into()))?;
+        cat.disable_tool(&request.tool_id, "default", &request.project_root)?;
+        Ok(ToolDisableResponse { disabled: true })
+    }
+
+    #[instrument(skip_all)]
+    pub async fn tool_install(
+        &self,
+        request: ToolInstallRequest,
+    ) -> Result<ToolInstallResponse, CoreError> {
+        self.ensure_catalog()?;
+        let guard = self.catalog.lock().map_err(|e| CoreError::Catalog(format!("catalog lock poisoned: {e}")))?;
+        let cat = guard
+            .as_ref()
+            .ok_or_else(|| CoreError::Catalog("catalog not initialized".into()))?;
+
+        let tool = cat
+            .get_tool(&request.tool_id)?
+            .ok_or_else(|| CoreError::Catalog(format!("tool not found: {}", request.tool_id)))?;
+
+        // Execute install command
+        let output = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(&tool.install_command)
+            .output()
+            .await
+            .map_err(|e| CoreError::Catalog(format!("install exec: {e}")))?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let combined = format!("{stdout}{stderr}");
+
+        if output.status.success() {
+            // Re-scan inventory to pick up the new binary
+            let _ = cat.scan_system_inventory();
+            // Auto-enable
+            let _ = cat.enable_tool(&request.tool_id, "default", &request.project_root);
+
+            let info = cat.get_tool(&request.tool_id)?;
+            Ok(ToolInstallResponse {
+                installed: true,
+                binary_path: info.as_ref().and_then(|t| t.installed_path.clone()),
+                version: info.as_ref().and_then(|t| t.installed_version.clone()),
+                auto_enabled: true,
+                output: combined,
+            })
+        } else {
+            Ok(ToolInstallResponse {
+                installed: false,
+                binary_path: None,
+                version: None,
+                auto_enabled: false,
+                output: combined,
+            })
+        }
+    }
+
+    #[instrument(skip_all)]
+    pub async fn tool_info(
+        &self,
+        request: ToolInfoRequest,
+    ) -> Result<Option<the_one_core::tool_catalog::ToolFullInfo>, CoreError> {
+        self.ensure_catalog()?;
+        let guard = self.catalog.lock().map_err(|e| CoreError::Catalog(format!("catalog lock poisoned: {e}")))?;
+        let cat = guard
+            .as_ref()
+            .ok_or_else(|| CoreError::Catalog("catalog not initialized".into()))?;
+        cat.get_tool(&request.tool_id)
+    }
+
+    #[instrument(skip_all)]
+    pub async fn tool_catalog_update(&self) -> Result<ToolUpdateResponse, CoreError> {
+        self.ensure_catalog()?;
+        let guard = self.catalog.lock().map_err(|e| CoreError::Catalog(format!("catalog lock poisoned: {e}")))?;
+        let cat = guard
+            .as_ref()
+            .ok_or_else(|| CoreError::Catalog("catalog not initialized".into()))?;
+
+        let version_before = cat.catalog_version()?;
+
+        // Re-import from catalog dir
+        let catalog_dir = Self::find_catalog_data_dir();
+        let mut tools_added = 0;
+        if let Some(dir) = catalog_dir {
+            tools_added = cat.import_catalog_dir(&dir)?;
+        }
+
+        // Re-scan system
+        let system_found = cat.scan_system_inventory()?;
+
+        let version_after = cat.catalog_version()?;
+
+        Ok(ToolUpdateResponse {
+            catalog_version_before: version_before,
+            catalog_version_after: version_after,
+            tools_added,
+            tools_updated: 0,
+            system_tools_found: system_found,
+        })
+    }
+
+    #[instrument(skip_all)]
+    pub async fn tool_list(
+        &self,
+        request: ToolListRequest,
+    ) -> Result<ToolListResponse, CoreError> {
+        self.ensure_catalog()?;
+        let guard = self.catalog.lock().map_err(|e| CoreError::Catalog(format!("catalog lock poisoned: {e}")))?;
+        let cat = guard
+            .as_ref()
+            .ok_or_else(|| CoreError::Catalog("catalog not initialized".into()))?;
+
+        let result = cat.suggest(&[], None, None, "default", &request.project_root, 1000)?;
+
+        let all: Vec<the_one_core::tool_catalog::ToolSummary> = result
+            .enabled
+            .into_iter()
+            .chain(result.available)
+            .chain(result.recommended)
+            .collect();
+
+        // Filter by state if requested
+        let tools = if let Some(ref state_filter) = request.state {
+            all.into_iter()
+                .filter(|t| t.state == *state_filter)
+                .collect()
+        } else {
+            all
+        };
+
+        Ok(ToolListResponse { tools })
+    }
+
     #[instrument(skip_all)]
     pub async fn tool_suggest(&self, request: ToolSuggestRequest) -> ToolSuggestResponse {
+        let limit = self.policy.clamp_suggestions(request.max);
+
+        // Try catalog-based search first
+        if self.ensure_catalog().is_ok() {
+            if let Ok(guard) = self.catalog.lock() {
+                if let Some(cat) = guard.as_ref() {
+                    if let Ok(results) = cat.search_fts(&request.query, limit as u32) {
+                        if !results.is_empty() {
+                            let suggestions = results
+                                .into_iter()
+                                .map(|r| ToolSuggestItem {
+                                    id: r.id,
+                                    title: r.name,
+                                    reason: format!("[{}] {}", r.source, r.description),
+                                })
+                                .take(limit)
+                                .collect();
+                            return ToolSuggestResponse { suggestions };
+                        }
+                    }
+                }
+            }
+        }
+
+        // Fallback to old registry-based suggest
         let suggestions = self
             .registry
-            .suggest(
-                &request.query,
-                RiskLevel::Medium,
-                self.policy.clamp_suggestions(request.max),
-            )
+            .suggest(&request.query, RiskLevel::Medium, limit)
             .into_iter()
             .map(|s| ToolSuggestItem {
                 id: s.id,
@@ -548,6 +818,31 @@ impl McpBroker {
 
     #[instrument(skip_all)]
     pub async fn tool_search(&self, request: ToolSearchRequest) -> ToolSearchResponse {
+        let limit = self.policy.clamp_suggestions(request.max);
+
+        // Try catalog FTS first
+        if self.ensure_catalog().is_ok() {
+            if let Ok(guard) = self.catalog.lock() {
+                if let Some(cat) = guard.as_ref() {
+                    if let Ok(results) = cat.search_fts(&request.query, limit as u32) {
+                        if !results.is_empty() {
+                            let matches = results
+                                .into_iter()
+                                .map(|r| ToolSuggestItem {
+                                    id: r.id,
+                                    title: r.name,
+                                    reason: format!("[{}] {}", r.source, r.description),
+                                })
+                                .take(limit)
+                                .collect();
+                            return ToolSearchResponse { matches };
+                        }
+                    }
+                }
+            }
+        }
+
+        // Fallback to registry
         let response = self
             .tool_suggest(ToolSuggestRequest {
                 query: request.query,
