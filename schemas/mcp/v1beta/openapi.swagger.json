@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "the-one.mcp.v1beta.openapi.swagger",
+  "openapi": "3.0.3",
+  "info": {
+    "title": "The-One MCP API",
+    "version": "v1beta",
+    "description": "Broker API contracts for project lifecycle, memory/docs retrieval, tooling policy, and operations."
+  },
+  "paths": {
+    "/project/init": {
+      "post": {
+        "summary": "Initialize project state"
+      }
+    },
+    "/project/refresh": {
+      "post": {
+        "summary": "Refresh project profile"
+      }
+    },
+    "/memory/search": {
+      "post": {
+        "summary": "Search project memory"
+      }
+    },
+    "/tool/run": {
+      "post": {
+        "summary": "Run tool under policy"
+      }
+    },
+    "/config/export": {
+      "post": {
+        "summary": "Export effective config"
+      }
+    }
+  }
+}

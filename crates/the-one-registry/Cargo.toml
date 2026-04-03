@@ -1,0 +1,13 @@
+[package]
+name = "the-one-registry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+the-one-core = { path = "../the-one-core" }
+
+[dev-dependencies]
+tempfile = "3.27"

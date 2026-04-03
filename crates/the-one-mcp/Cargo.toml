@@ -1,0 +1,21 @@
+[package]
+name = "the-one-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["embed-swagger"]
+embed-swagger = []
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+the-one-core = { path = "../the-one-core" }
+the-one-memory = { path = "../the-one-memory" }
+the-one-registry = { path = "../the-one-registry" }
+the-one-router = { path = "../the-one-router" }
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile = "3.27"

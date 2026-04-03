@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "the-one.mcp.v1beta.config.export.response",
+  "title": "config.export response",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "provider",
+    "log_level",
+    "qdrant_url",
+    "qdrant_auth_configured",
+    "qdrant_ca_cert_path",
+    "qdrant_tls_insecure",
+    "qdrant_strict_auth",
+    "nano_provider",
+    "nano_model"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "provider": {
+      "type": "string",
+      "minLength": 1
+    },
+    "log_level": {
+      "type": "string",
+      "minLength": 1
+    },
+    "qdrant_url": {
+      "type": "string",
+      "minLength": 1
+    },
+    "qdrant_auth_configured": {
+      "type": "boolean"
+    },
+    "qdrant_ca_cert_path": {
+      "type": ["string", "null"]
+    },
+    "qdrant_tls_insecure": {
+      "type": "boolean"
+    },
+    "qdrant_strict_auth": {
+      "type": "boolean"
+    },
+    "nano_provider": {
+      "type": "string",
+      "enum": ["rules", "api", "ollama", "lmstudio"]
+    },
+    "nano_model": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "the-one.mcp.v1beta.docs.get_section.response",
+  "title": "docs.get_section response",
+  "type": "object",
+  "required": ["path", "heading", "content"],
+  "properties": {
+    "path": {
+      "type": "string",
+      "minLength": 1
+    },
+    "heading": {
+      "type": "string",
+      "minLength": 1
+    },
+    "content": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false
+}

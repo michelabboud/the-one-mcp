@@ -1,0 +1,26 @@
+[workspace]
+members = [
+    "crates/the-one-claude",
+    "crates/the-one-codex",
+    "crates/the-one-core",
+    "crates/the-one-mcp",
+    "crates/the-one-memory",
+    "crates/the-one-registry",
+    "crates/the-one-router",
+    "crates/the-one-ui",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://example.invalid/the-one-mcp"
+version = "0.1.0"
+
+[workspace.dependencies]
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }

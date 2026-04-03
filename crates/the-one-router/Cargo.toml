@@ -1,0 +1,10 @@
+[package]
+name = "the-one-router"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+the-one-core = { path = "../the-one-core" }
+tracing.workspace = true

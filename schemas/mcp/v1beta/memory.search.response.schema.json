@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "the-one.mcp.v1beta.memory.search.response",
+  "title": "memory.search response",
+  "type": "object",
+  "required": [
+    "hits",
+    "route",
+    "rationale",
+    "provider_path",
+    "confidence_percent",
+    "fallback_used",
+    "timeout_ms_bound",
+    "retries_bound",
+    "last_error"
+  ],
+  "properties": {
+    "hits": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "source_path", "score"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "source_path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "score": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "route": {
+      "type": "string",
+      "minLength": 1
+    },
+    "rationale": {
+      "type": "string",
+      "minLength": 1
+    },
+    "provider_path": {
+      "type": "string",
+      "minLength": 1
+    },
+    "confidence_percent": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "fallback_used": {
+      "type": "boolean"
+    },
+    "timeout_ms_bound": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "retries_bound": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "last_error": {
+      "type": ["string", "null"]
+    }
+  },
+  "additionalProperties": false
+}
