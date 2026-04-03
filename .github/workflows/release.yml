@@ -110,8 +110,6 @@ jobs:
       TARGET: ${{ matrix.target }}
       PLATFORM_NAME: ${{ matrix.name }}
       EXT: ${{ matrix.ext }}
-      SCCACHE_GHA_ENABLED: true
-      RUSTC_WRAPPER: sccache
 
     steps:
       - uses: actions/checkout@v4
@@ -121,13 +119,12 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      # ── sccache ──
-      - uses: mozilla-actions/sccache-action@v0.0.7
-
       # ── Cross tool (Linux ARM64 only) ──
       - name: Install cross
         if: matrix.cross
-        run: cargo install cross --git https://github.com/cross-rs/cross
+        run: |
+          curl -fsSL https://github.com/cross-rs/cross/releases/latest/download/cross-x86_64-unknown-linux-gnu.tar.gz | tar xz -C /usr/local/bin
+          cross --version
 
       # ── Build MCP server (with swagger) ──
       - name: Build MCP server (with swagger)
