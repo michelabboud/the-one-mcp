@@ -1,0 +1,137 @@
+[
+  {
+    "id": "project.init",
+    "title": "Initialize Project",
+    "capability_type": "McpTool",
+    "family": "project",
+    "visibility_mode": "Core",
+    "risk_level": "Low",
+    "description": "Detect project languages, frameworks, and risk profile. Creates .the-one/ state directory."
+  },
+  {
+    "id": "project.refresh",
+    "title": "Refresh Project",
+    "capability_type": "McpTool",
+    "family": "project",
+    "visibility_mode": "Core",
+    "risk_level": "Low",
+    "description": "Re-fingerprint project files and refresh profile if changed."
+  },
+  {
+    "id": "memory.search",
+    "title": "Search Memory",
+    "capability_type": "McpTool",
+    "family": "memory",
+    "visibility_mode": "Core",
+    "risk_level": "Low",
+    "description": "Semantic search across all indexed project documentation."
+  },
+  {
+    "id": "docs.create",
+    "title": "Create Document",
+    "capability_type": "McpTool",
+    "family": "docs",
+    "visibility_mode": "Core",
+    "risk_level": "Low",
+    "description": "Create a new managed markdown document. Persists knowledge across sessions."
+  },
+  {
+    "id": "docs.get",
+    "title": "Get Document",
+    "capability_type": "McpTool",
+    "family": "docs",
+    "visibility_mode": "Core",
+    "risk_level": "Low",
+    "description": "Retrieve the full content of a managed or external document."
+  },
+  {
+    "id": "docs.list",
+    "title": "List Documents",
+    "capability_type": "McpTool",
+    "family": "docs",
+    "visibility_mode": "Core",
+    "risk_level": "Low",
+    "description": "List all indexed documentation files with sizes and timestamps."
+  },
+  {
+    "id": "docs.update",
+    "title": "Update Document",
+    "capability_type": "McpTool",
+    "family": "docs",
+    "visibility_mode": "Core",
+    "risk_level": "Low",
+    "description": "Update an existing managed markdown document."
+  },
+  {
+    "id": "docs.delete",
+    "title": "Delete Document",
+    "capability_type": "McpTool",
+    "family": "docs",
+    "visibility_mode": "Project",
+    "risk_level": "Medium",
+    "description": "Soft-delete a document to trash. Recoverable via docs.trash.restore."
+  },
+  {
+    "id": "docs.get_section",
+    "title": "Get Document Section",
+    "capability_type": "McpTool",
+    "family": "docs",
+    "visibility_mode": "Core",
+    "risk_level": "Low",
+    "description": "Extract a specific section from a document by heading name."
+  },
+  {
+    "id": "docs.reindex",
+    "title": "Reindex Documents",
+    "capability_type": "McpTool",
+    "family": "docs",
+    "visibility_mode": "Project",
+    "risk_level": "Low",
+    "description": "Force full re-ingestion of all documents into the RAG index."
+  },
+  {
+    "id": "tool.suggest",
+    "title": "Suggest Tools",
+    "capability_type": "McpTool",
+    "family": "tools",
+    "visibility_mode": "Core",
+    "risk_level": "Low",
+    "description": "Get capability suggestions matching a natural-language query."
+  },
+  {
+    "id": "tool.run",
+    "title": "Run Tool",
+    "capability_type": "McpTool",
+    "family": "tools",
+    "visibility_mode": "Core",
+    "risk_level": "High",
+    "description": "Execute a tool action with policy-gated approval."
+  },
+  {
+    "id": "config.export",
+    "title": "Export Config",
+    "capability_type": "McpTool",
+    "family": "config",
+    "visibility_mode": "Core",
+    "risk_level": "Low",
+    "description": "Export the current project configuration including limits."
+  },
+  {
+    "id": "metrics.snapshot",
+    "title": "Metrics Snapshot",
+    "capability_type": "McpTool",
+    "family": "observability",
+    "visibility_mode": "Project",
+    "risk_level": "Low",
+    "description": "View broker metrics: call counts, router stats, provider health."
+  },
+  {
+    "id": "audit.events",
+    "title": "Audit Events",
+    "capability_type": "McpTool",
+    "family": "observability",
+    "visibility_mode": "Project",
+    "risk_level": "Low",
+    "description": "Query the audit trail of recent tool executions."
+  }
+]
