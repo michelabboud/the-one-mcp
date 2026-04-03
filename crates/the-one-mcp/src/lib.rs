@@ -2,6 +2,7 @@ pub mod adapter_core;
 pub mod api;
 pub mod broker;
 pub mod swagger;
+pub mod transport;
 
 pub const MCP_SCHEMA_VERSION: &str = "v1beta";
 

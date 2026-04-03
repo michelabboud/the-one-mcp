@@ -29,13 +29,13 @@ use crate::api::{
     DocsDeleteRequest, DocsDeleteResponse, DocsGetRequest, DocsGetResponse, DocsGetSectionRequest,
     DocsGetSectionResponse, DocsListRequest, DocsListResponse, DocsMoveRequest, DocsMoveResponse,
     DocsReindexRequest, DocsReindexResponse, DocsTrashEmptyRequest, DocsTrashEmptyResponse,
-    DocsTrashListRequest, DocsTrashListResponse, DocsTrashRestoreRequest,
-    DocsTrashRestoreResponse, DocsUpdateRequest, DocsUpdateResponse, MemoryFetchChunkRequest,
-    MemoryFetchChunkResponse, MemorySearchItem, MemorySearchRequest, MemorySearchResponse,
-    MetricsSnapshotResponse, ProjectInitRequest, ProjectInitResponse, ProjectProfileGetRequest,
-    ProjectProfileGetResponse, ProjectRefreshRequest, ProjectRefreshResponse, ToolEnableRequest,
-    ToolEnableResponse, ToolRunRequest, ToolRunResponse, ToolSuggestItem, ToolSuggestRequest,
-    ToolSuggestResponse, ToolSearchRequest, ToolSearchResponse,
+    DocsTrashListRequest, DocsTrashListResponse, DocsTrashRestoreRequest, DocsTrashRestoreResponse,
+    DocsUpdateRequest, DocsUpdateResponse, MemoryFetchChunkRequest, MemoryFetchChunkResponse,
+    MemorySearchItem, MemorySearchRequest, MemorySearchResponse, MetricsSnapshotResponse,
+    ProjectInitRequest, ProjectInitResponse, ProjectProfileGetRequest, ProjectProfileGetResponse,
+    ProjectRefreshRequest, ProjectRefreshResponse, ToolEnableRequest, ToolEnableResponse,
+    ToolRunRequest, ToolRunResponse, ToolSearchRequest, ToolSearchResponse, ToolSuggestItem,
+    ToolSuggestRequest, ToolSuggestResponse,
 };
 
 pub struct McpBroker {
@@ -350,14 +350,11 @@ impl McpBroker {
                 let memory = memories.get_mut(&key).ok_or_else(|| {
                     CoreError::InvalidProjectConfig("project memory not indexed".to_string())
                 })?;
-                memory
-                    .ingest_markdown_tree(docs_root)
-                    .await
-                    .map_err(|e2| {
-                        CoreError::Embedding(format!(
-                            "ingest failed with qdrant ({e}) and local ({e2})"
-                        ))
-                    })
+                memory.ingest_markdown_tree(docs_root).await.map_err(|e2| {
+                    CoreError::Embedding(format!(
+                        "ingest failed with qdrant ({e}) and local ({e2})"
+                    ))
+                })
             }
         }
     }
@@ -430,10 +427,7 @@ impl McpBroker {
             let memories = self.memory_by_project.read().await;
             if let Some(memory) = memories.get(&key) {
                 memory
-                    .search(&EngineSearchRequest {
-                        query,
-                        top_k,
-                    })
+                    .search(&EngineSearchRequest { query, top_k })
                     .await
                     .into_iter()
                     .map(|item| MemorySearchItem {
@@ -573,7 +567,9 @@ impl McpBroker {
         request: ToolRunRequest,
     ) -> Result<ToolRunResponse, CoreError> {
         self.metrics.tool_run_calls.fetch_add(1, Ordering::Relaxed);
-        let routed = self.route_tool_action(project_root, &request.action_key).await;
+        let routed = self
+            .route_tool_action(project_root, &request.action_key)
+            .await;
         self.metrics
             .router_decision_latency_ms_total
             .fetch_add(routed.telemetry.latency_ms, Ordering::Relaxed);
@@ -835,10 +831,7 @@ impl McpBroker {
     }
 
     #[instrument(skip_all)]
-    pub async fn docs_move(
-        &self,
-        request: DocsMoveRequest,
-    ) -> Result<DocsMoveResponse, CoreError> {
+    pub async fn docs_move(&self, request: DocsMoveRequest) -> Result<DocsMoveResponse, CoreError> {
         let project_root = PathBuf::from(&request.project_root);
         let from = request.from.clone();
         let to = request.to.clone();
