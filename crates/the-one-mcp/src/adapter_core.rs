@@ -18,60 +18,73 @@ impl AdapterCore {
         Self { broker }
     }
 
-    pub fn project_init(
+    pub async fn project_init(
         &self,
         project_root: &Path,
         project_id: &str,
     ) -> Result<ProjectInitResponse, CoreError> {
-        self.broker.project_init(ProjectInitRequest {
-            project_root: project_root.display().to_string(),
-            project_id: project_id.to_string(),
-        })
+        self.broker
+            .project_init(ProjectInitRequest {
+                project_root: project_root.display().to_string(),
+                project_id: project_id.to_string(),
+            })
+            .await
     }
 
-    pub fn project_refresh(
+    pub async fn project_refresh(
         &self,
         project_root: &Path,
         project_id: &str,
     ) -> Result<ProjectRefreshResponse, CoreError> {
-        self.broker.project_refresh(ProjectRefreshRequest {
-            project_root: project_root.display().to_string(),
-            project_id: project_id.to_string(),
-        })
+        self.broker
+            .project_refresh(ProjectRefreshRequest {
+                project_root: project_root.display().to_string(),
+                project_id: project_id.to_string(),
+            })
+            .await
     }
 
-    pub fn config_export(&self, project_root: &Path) -> Result<ConfigExportResponse, CoreError> {
-        self.broker.config_export(project_root)
+    pub async fn config_export(
+        &self,
+        project_root: &Path,
+    ) -> Result<ConfigExportResponse, CoreError> {
+        self.broker.config_export(project_root).await
     }
 
-    pub fn audit_events(
+    pub async fn audit_events(
         &self,
         project_root: &Path,
         project_id: &str,
         limit: usize,
     ) -> Result<AuditEventsResponse, CoreError> {
-        self.broker.audit_events(AuditEventsRequest {
-            project_root: project_root.display().to_string(),
-            project_id: project_id.to_string(),
-            limit,
-        })
+        self.broker
+            .audit_events(AuditEventsRequest {
+                project_root: project_root.display().to_string(),
+                project_id: project_id.to_string(),
+                limit,
+            })
+            .await
     }
 
-    pub fn ingest_docs(
+    pub async fn ingest_docs(
         &self,
         project_root: &Path,
         project_id: &str,
         docs_root: &Path,
     ) -> Result<usize, CoreError> {
-        self.broker.ingest_docs(project_root, project_id, docs_root)
+        self.broker
+            .ingest_docs(project_root, project_id, docs_root)
+            .await
     }
 
-    pub fn tool_run(
+    pub async fn tool_run(
         &self,
         project_root: &Path,
         project_id: &str,
         request: ToolRunRequest,
     ) -> Result<ToolRunResponse, CoreError> {
-        self.broker.tool_run(project_root, project_id, request)
+        self.broker
+            .tool_run(project_root, project_id, request)
+            .await
     }
 }

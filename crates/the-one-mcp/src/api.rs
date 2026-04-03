@@ -34,14 +34,14 @@ pub struct MemorySearchRequest {
     pub top_k: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MemorySearchItem {
     pub id: String,
     pub source_path: String,
-    pub score: usize,
+    pub score: f32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MemorySearchResponse {
     pub hits: Vec<MemorySearchItem>,
     pub route: String,
@@ -222,6 +222,121 @@ pub struct AuditEventsRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AuditEventsResponse {
     pub events: Vec<AuditEventItem>,
+}
+
+// ---------------------------------------------------------------------------
+// Docs CRUD types
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocsCreateRequest {
+    pub project_root: String,
+    pub project_id: String,
+    pub path: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocsCreateResponse {
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocsUpdateRequest {
+    pub project_root: String,
+    pub project_id: String,
+    pub path: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocsUpdateResponse {
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocsDeleteRequest {
+    pub project_root: String,
+    pub project_id: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocsDeleteResponse {
+    pub deleted: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocsMoveRequest {
+    pub project_root: String,
+    pub project_id: String,
+    pub from: String,
+    pub to: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocsMoveResponse {
+    pub from: String,
+    pub to: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocsTrashListRequest {
+    pub project_root: String,
+    pub project_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocsTrashListResponse {
+    pub entries: Vec<the_one_core::docs_manager::DocEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocsTrashRestoreRequest {
+    pub project_root: String,
+    pub project_id: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocsTrashRestoreResponse {
+    pub restored: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocsTrashEmptyRequest {
+    pub project_root: String,
+    pub project_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocsTrashEmptyResponse {
+    pub emptied: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocsReindexRequest {
+    pub project_root: String,
+    pub project_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocsReindexResponse {
+    pub new: usize,
+    pub updated: usize,
+    pub removed: usize,
+    pub unchanged: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfigUpdateRequest {
+    pub project_root: String,
+    pub update: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfigUpdateResponse {
+    pub path: String,
 }
 
 #[cfg(test)]

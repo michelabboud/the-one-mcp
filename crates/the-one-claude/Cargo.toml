@@ -11,3 +11,4 @@ the-one-mcp = { path = "../the-one-mcp" }
 [dev-dependencies]
 tempfile = "3.27"
 the-one-codex = { path = "../the-one-codex" }
+tokio.workspace = true

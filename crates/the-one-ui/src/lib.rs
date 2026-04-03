@@ -257,6 +257,7 @@ async fn dashboard_handler(State(state): State<EmbeddedUiState>) -> impl IntoRes
     match state
         .admin
         .health_report(&state.project_root, &state.project_id)
+        .await
     {
         Ok(report) => Html(render_dashboard_html(&report)).into_response(),
         Err(err) => (
@@ -271,6 +272,7 @@ async fn health_handler(State(state): State<EmbeddedUiState>) -> impl IntoRespon
     match state
         .admin
         .health_report(&state.project_root, &state.project_id)
+        .await
     {
         Ok(report) => Json(serde_json::json!({
             "schema_version": report.config.schema_version,
@@ -325,6 +327,7 @@ async fn audit_page_handler(State(state): State<EmbeddedUiState>) -> impl IntoRe
     match state
         .admin
         .view_audit_events(&state.project_root, &state.project_id, 50)
+        .await
     {
         Ok(events) => {
             let rows = events
@@ -358,6 +361,7 @@ async fn config_page_handler(State(state): State<EmbeddedUiState>) -> impl IntoR
     match state
         .admin
         .health_report(&state.project_root, &state.project_id)
+        .await
     {
         Ok(report) => {
             let nano_model = html_escape(&report.config.nano_model);
@@ -475,26 +479,30 @@ impl AdminUi {
         Self { broker }
     }
 
-    pub fn trigger_project_refresh(
+    pub async fn trigger_project_refresh(
         &self,
         project_root: &Path,
         project_id: &str,
     ) -> Result<ProjectRefreshResponse, the_one_core::error::CoreError> {
-        self.broker.project_refresh(ProjectRefreshRequest {
-            project_root: project_root.display().to_string(),
-            project_id: project_id.to_string(),
-        })
+        self.broker
+            .project_refresh(ProjectRefreshRequest {
+                project_root: project_root.display().to_string(),
+                project_id: project_id.to_string(),
+            })
+            .await
     }
 
-    pub fn trigger_project_init(
+    pub async fn trigger_project_init(
         &self,
         project_root: &Path,
         project_id: &str,
     ) -> Result<ProjectInitResponse, the_one_core::error::CoreError> {
-        self.broker.project_init(ProjectInitRequest {
-            project_root: project_root.display().to_string(),
-            project_id: project_id.to_string(),
-        })
+        self.broker
+            .project_init(ProjectInitRequest {
+                project_root: project_root.display().to_string(),
+                project_id: project_id.to_string(),
+            })
+            .await
     }
 
     pub fn trigger_manual_backup(
@@ -513,35 +521,41 @@ impl AdminUi {
         restore_project_state(project_root, backup_root)
     }
 
-    pub fn trigger_reindex_docs(
+    pub async fn trigger_reindex_docs(
         &self,
         project_root: &Path,
         project_id: &str,
         docs_root: &Path,
     ) -> Result<usize, the_one_core::error::CoreError> {
-        self.broker.ingest_docs(project_root, project_id, docs_root)
+        self.broker
+            .ingest_docs(project_root, project_id, docs_root)
+            .await
     }
 
-    pub fn view_project_profile(
+    pub async fn view_project_profile(
         &self,
         project_root: &Path,
         project_id: &str,
     ) -> Result<Option<ProjectProfileGetResponse>, the_one_core::error::CoreError> {
-        self.broker.project_profile_get(ProjectProfileGetRequest {
-            project_root: project_root.display().to_string(),
-            project_id: project_id.to_string(),
-        })
+        self.broker
+            .project_profile_get(ProjectProfileGetRequest {
+                project_root: project_root.display().to_string(),
+                project_id: project_id.to_string(),
+            })
+            .await
     }
 
-    pub fn enable_capability_family(
+    pub async fn enable_capability_family(
         &self,
         project_root: &Path,
         family: &str,
     ) -> Result<ToolEnableResponse, the_one_core::error::CoreError> {
-        self.broker.tool_enable(ToolEnableRequest {
-            project_root: project_root.display().to_string(),
-            family: family.to_string(),
-        })
+        self.broker
+            .tool_enable(ToolEnableRequest {
+                project_root: project_root.display().to_string(),
+                family: family.to_string(),
+            })
+            .await
     }
 
     pub fn set_provider_model_config(
@@ -586,31 +600,36 @@ impl AdminUi {
         Ok(())
     }
 
-    pub fn view_audit_events(
+    pub async fn view_audit_events(
         &self,
         project_root: &Path,
         project_id: &str,
         limit: usize,
     ) -> Result<AuditEventsResponse, the_one_core::error::CoreError> {
-        self.broker.audit_events(AuditEventsRequest {
-            project_root: project_root.display().to_string(),
-            project_id: project_id.to_string(),
-            limit,
-        })
+        self.broker
+            .audit_events(AuditEventsRequest {
+                project_root: project_root.display().to_string(),
+                project_id: project_id.to_string(),
+                limit,
+            })
+            .await
     }
 
-    pub fn health_report(
+    pub async fn health_report(
         &self,
         project_root: &Path,
         project_id: &str,
     ) -> Result<AdminHealthReport, the_one_core::error::CoreError> {
-        let config = self.broker.config_export(project_root)?;
+        let config = self.broker.config_export(project_root).await?;
         let metrics = self.broker.metrics_snapshot();
-        let events = self.broker.audit_events(AuditEventsRequest {
-            project_root: project_root.display().to_string(),
-            project_id: project_id.to_string(),
-            limit: 20,
-        })?;
+        let events = self
+            .broker
+            .audit_events(AuditEventsRequest {
+                project_root: project_root.display().to_string(),
+                project_id: project_id.to_string(),
+                limit: 20,
+            })
+            .await?;
 
         Ok(AdminHealthReport {
             config,
@@ -619,21 +638,24 @@ impl AdminUi {
         })
     }
 
-    pub fn simulate_tool_run_for_audit(
+    pub async fn simulate_tool_run_for_audit(
         &self,
         project_root: &Path,
         project_id: &str,
         action_key: &str,
     ) -> Result<(), the_one_core::error::CoreError> {
-        let _ = self.broker.tool_run(
-            project_root,
-            project_id,
-            ToolRunRequest {
-                action_key: action_key.to_string(),
-                interactive: false,
-                approval_scope: None,
-            },
-        )?;
+        let _ = self
+            .broker
+            .tool_run(
+                project_root,
+                project_id,
+                ToolRunRequest {
+                    action_key: action_key.to_string(),
+                    interactive: false,
+                    approval_scope: None,
+                },
+            )
+            .await?;
         Ok(())
     }
 }
@@ -713,23 +735,26 @@ mod tests {
         assert_eq!(restored, "db");
     }
 
-    #[test]
-    fn test_audit_events_view_flow() {
+    #[tokio::test]
+    async fn test_audit_events_view_flow() {
         let temp = tempfile::tempdir().expect("tempdir should be created");
         let project = temp.path().join("repo");
         fs::create_dir_all(&project).expect("project dir should exist");
 
         let ui = AdminUi::new(McpBroker::new());
         ui.simulate_tool_run_for_audit(&project, "project-1", "tool.run:danger")
+            .await
             .expect("simulate tool run should succeed");
 
         let events = ui
             .view_audit_events(&project, "project-1", 10)
+            .await
             .expect("audit events should load");
         assert!(!events.events.is_empty());
 
         let report = ui
             .health_report(&project, "project-1")
+            .await
             .expect("health report should load");
         assert!(report.recent_audit_events >= 1);
         assert_eq!(report.config.schema_version, "v1beta");
@@ -739,8 +764,8 @@ mod tests {
         assert!(html.contains("recent_audit_events"));
     }
 
-    #[test]
-    fn test_admin_ui_project_ops_and_config_flow() {
+    #[tokio::test]
+    async fn test_admin_ui_project_ops_and_config_flow() {
         let temp = tempfile::tempdir().expect("tempdir should be created");
         let project = temp.path().join("repo");
         let docs = temp.path().join("docs");
@@ -753,21 +778,25 @@ mod tests {
         let ui = AdminUi::new(McpBroker::new());
         let init = ui
             .trigger_project_init(&project, "project-1")
+            .await
             .expect("init should work");
         assert_eq!(init.project_id, "project-1");
 
         let ingested = ui
             .trigger_reindex_docs(&project, "project-1", &docs)
+            .await
             .expect("reindex should work");
         assert!(ingested >= 1);
 
         let profile = ui
             .view_project_profile(&project, "project-1")
+            .await
             .expect("profile should load");
         assert!(profile.is_some());
 
         let enabled = ui
             .enable_capability_family(&project, "docs")
+            .await
             .expect("enable should work");
         assert!(enabled.enabled_families.contains(&"docs".to_string()));
 
@@ -781,6 +810,7 @@ mod tests {
 
         let report = ui
             .health_report(&project, "project-1")
+            .await
             .expect("report should work");
         assert_eq!(report.config.provider, "hosted");
         assert_eq!(report.config.nano_provider, "api");
@@ -797,6 +827,7 @@ mod tests {
         let admin = Arc::new(AdminUi::new(McpBroker::new()));
         admin
             .trigger_project_init(&project, "project-1")
+            .await
             .expect("init should work");
 
         let runtime = start_embedded_ui_runtime(

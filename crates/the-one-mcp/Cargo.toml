@@ -9,12 +9,14 @@ default = ["embed-swagger"]
 embed-swagger = []
 
 [dependencies]
+async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 the-one-core = { path = "../the-one-core" }
 the-one-memory = { path = "../the-one-memory" }
 the-one-registry = { path = "../the-one-registry" }
 the-one-router = { path = "../the-one-router" }
+tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]

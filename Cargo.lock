@@ -3401,6 +3401,7 @@ dependencies = [
  "the-one-codex",
  "the-one-core",
  "the-one-mcp",
+ "tokio",
 ]
 
 [[package]]
@@ -3410,6 +3411,7 @@ dependencies = [
  "tempfile",
  "the-one-core",
  "the-one-mcp",
+ "tokio",
 ]
 
 [[package]]
@@ -3431,6 +3433,7 @@ dependencies = [
 name = "the-one-mcp"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "serde",
  "serde_json",
  "tempfile",
@@ -3438,6 +3441,7 @@ dependencies = [
  "the-one-memory",
  "the-one-registry",
  "the-one-router",
+ "tokio",
  "tracing",
 ]
 

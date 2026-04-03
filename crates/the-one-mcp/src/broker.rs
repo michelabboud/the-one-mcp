@@ -1,12 +1,15 @@
-use std::collections::HashMap;
-use std::path::Path;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
 
+use tokio::sync::RwLock;
 use tracing::instrument;
 
-use the_one_core::config::{AppConfig, NanoProviderKind, RuntimeOverrides};
+use the_one_core::config::{
+    update_project_config, AppConfig, NanoProviderKind, ProjectConfigUpdate, RuntimeOverrides,
+};
 use the_one_core::contracts::{ApprovalScope, Capability, RiskLevel};
+use the_one_core::docs_manager::DocsManager;
 use the_one_core::error::CoreError;
 use the_one_core::manifests::{
     load_overrides_manifest, project_state_paths, save_overrides_manifest, MANIFEST_SCHEMA_VERSION,
@@ -14,31 +17,49 @@ use the_one_core::manifests::{
 use the_one_core::policy::PolicyEngine;
 use the_one_core::project::{project_init, project_refresh, RefreshMode};
 use the_one_core::storage::sqlite::ProjectDatabase;
-use the_one_memory::{MemoryEngine, MemorySearchRequest as EngineSearchRequest, QdrantHttpOptions};
+use the_one_memory::qdrant::QdrantOptions;
+use the_one_memory::{MemoryEngine, MemorySearchRequest as EngineSearchRequest};
 use the_one_registry::CapabilityRegistry;
 use the_one_router::providers::{ApiNanoProvider, LmStudioNanoProvider, OllamaNanoProvider};
 use the_one_router::{NanoBudget, RouteTelemetry, RoutedDecision, Router};
 
 use crate::api::{
-    AuditEventItem, AuditEventsRequest, AuditEventsResponse, ConfigExportResponse, DocsGetRequest,
-    DocsGetResponse, DocsGetSectionRequest, DocsGetSectionResponse, DocsListRequest,
-    DocsListResponse, MemoryFetchChunkRequest, MemoryFetchChunkResponse, MemorySearchItem,
-    MemorySearchRequest, MemorySearchResponse, MetricsSnapshotResponse, ProjectInitRequest,
-    ProjectInitResponse, ProjectProfileGetRequest, ProjectProfileGetResponse,
-    ProjectRefreshRequest, ProjectRefreshResponse, ToolEnableRequest, ToolEnableResponse,
-    ToolRunRequest, ToolRunResponse, ToolSearchRequest, ToolSearchResponse, ToolSuggestItem,
-    ToolSuggestRequest, ToolSuggestResponse,
+    AuditEventItem, AuditEventsRequest, AuditEventsResponse, ConfigExportResponse,
+    ConfigUpdateRequest, ConfigUpdateResponse, DocsCreateRequest, DocsCreateResponse,
+    DocsDeleteRequest, DocsDeleteResponse, DocsGetRequest, DocsGetResponse, DocsGetSectionRequest,
+    DocsGetSectionResponse, DocsListRequest, DocsListResponse, DocsMoveRequest, DocsMoveResponse,
+    DocsReindexRequest, DocsReindexResponse, DocsTrashEmptyRequest, DocsTrashEmptyResponse,
+    DocsTrashListRequest, DocsTrashListResponse, DocsTrashRestoreRequest,
+    DocsTrashRestoreResponse, DocsUpdateRequest, DocsUpdateResponse, MemoryFetchChunkRequest,
+    MemoryFetchChunkResponse, MemorySearchItem, MemorySearchRequest, MemorySearchResponse,
+    MetricsSnapshotResponse, ProjectInitRequest, ProjectInitResponse, ProjectProfileGetRequest,
+    ProjectProfileGetResponse, ProjectRefreshRequest, ProjectRefreshResponse, ToolEnableRequest,
+    ToolEnableResponse, ToolRunRequest, ToolRunResponse, ToolSuggestItem, ToolSuggestRequest,
+    ToolSuggestResponse, ToolSearchRequest, ToolSearchResponse,
 };
 
-#[derive(Debug)]
 pub struct McpBroker {
     router: Router,
     registry: CapabilityRegistry,
-    memory_by_project: Mutex<HashMap<String, MemoryEngine>>,
-    global_registry_path: Option<std::path::PathBuf>,
+    memory_by_project: RwLock<HashMap<String, MemoryEngine>>,
+    docs_by_project: RwLock<HashMap<String, DocsManager>>,
+    global_registry_path: Option<PathBuf>,
     policy: PolicyEngine,
-    session_approvals: Mutex<std::collections::HashSet<String>>,
+    session_approvals: RwLock<HashSet<String>>,
     metrics: BrokerMetrics,
+}
+
+// Manual Debug impl since MemoryEngine and DocsManager don't implement Debug
+impl std::fmt::Debug for McpBroker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpBroker")
+            .field("router", &self.router)
+            .field("registry", &self.registry)
+            .field("global_registry_path", &self.global_registry_path)
+            .field("policy", &self.policy)
+            .field("metrics", &self.metrics)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Default)]
@@ -75,10 +96,11 @@ impl McpBroker {
         Self {
             router: Router::new(true),
             registry,
-            memory_by_project: Mutex::new(HashMap::new()),
+            memory_by_project: RwLock::new(HashMap::new()),
+            docs_by_project: RwLock::new(HashMap::new()),
             global_registry_path,
             policy,
-            session_approvals: Mutex::new(std::collections::HashSet::new()),
+            session_approvals: RwLock::new(HashSet::new()),
             metrics: BrokerMetrics::default(),
         }
     }
@@ -97,17 +119,14 @@ impl McpBroker {
         format!("{}::{}", root.display(), project_id)
     }
 
-    fn with_project_memory<R>(
+    async fn with_project_memory<R>(
         &self,
         project_root: &Path,
         project_id: &str,
         f: impl FnOnce(&MemoryEngine) -> R,
     ) -> Result<R, CoreError> {
         let key = Self::project_memory_key(project_root, project_id);
-        let memories = self
-            .memory_by_project
-            .lock()
-            .map_err(|_| CoreError::PolicyDenied("project memory lock poisoned".to_string()))?;
+        let memories = self.memory_by_project.read().await;
         let memory = memories.get(&key).ok_or_else(|| {
             CoreError::InvalidProjectConfig("project memory not indexed".to_string())
         })?;
@@ -120,46 +139,74 @@ impl McpBroker {
         project_id: &str,
     ) -> Result<MemoryEngine, CoreError> {
         let config = AppConfig::load(project_root, RuntimeOverrides::default())?;
-        let state_dir = project_root.join(".the-one");
-        let hosted_embeddings = config.provider == "hosted";
 
-        if config.qdrant_url.starts_with("http://") || config.qdrant_url.starts_with("https://") {
-            let remote = !(config.qdrant_url.contains("localhost")
-                || config.qdrant_url.starts_with("http://127.0.0.1"));
-            if remote && config.qdrant_strict_auth && config.qdrant_api_key.is_none() {
-                return Err(CoreError::InvalidProjectConfig(
-                    "remote qdrant requires api key when strict auth is enabled".to_string(),
-                ));
-            }
-            if let Ok(engine) = MemoryEngine::with_qdrant_http(
+        let max_chunk_tokens = config.limits.max_chunk_tokens;
+
+        // Determine embedding + qdrant setup from config
+        if config.embedding_provider == "api" {
+            // API embeddings + Qdrant
+            MemoryEngine::new_api(
+                config.embedding_api_base_url.as_deref().unwrap_or(""),
+                config.embedding_api_key.as_deref(),
+                &config.embedding_model,
+                config.embedding_dimensions,
                 &config.qdrant_url,
                 project_id,
-                hosted_embeddings,
-                QdrantHttpOptions {
+                QdrantOptions {
                     api_key: config.qdrant_api_key.clone(),
-                    ca_cert_path: config.qdrant_ca_cert_path.clone(),
+                    ca_cert_path: config
+                        .qdrant_ca_cert_path
+                        .as_ref()
+                        .map(|p| p.to_string_lossy().to_string()),
                     tls_insecure: config.qdrant_tls_insecure,
                 },
-            ) {
-                return Ok(engine);
+                max_chunk_tokens,
+            )
+            .map_err(CoreError::Embedding)
+        } else {
+            // Local fastembed
+            let qdrant_url = &config.qdrant_url;
+            if qdrant_url.starts_with("http") {
+                // Check strict auth for remote qdrant
+                let remote = !(qdrant_url.contains("localhost")
+                    || qdrant_url.starts_with("http://127.0.0.1"));
+                if remote && config.qdrant_strict_auth && config.qdrant_api_key.is_none() {
+                    return Err(CoreError::InvalidProjectConfig(
+                        "remote qdrant requires api key when strict auth is enabled".to_string(),
+                    ));
+                }
+
+                // Try qdrant, fall back to pure local if it fails
+                match MemoryEngine::new_with_qdrant(
+                    &config.embedding_model,
+                    qdrant_url,
+                    project_id,
+                    QdrantOptions {
+                        api_key: config.qdrant_api_key.clone(),
+                        ca_cert_path: config
+                            .qdrant_ca_cert_path
+                            .as_ref()
+                            .map(|p| p.to_string_lossy().to_string()),
+                        tls_insecure: config.qdrant_tls_insecure,
+                    },
+                    max_chunk_tokens,
+                ) {
+                    Ok(engine) => Ok(engine),
+                    Err(_) => {
+                        // Qdrant unavailable, fall back to local-only
+                        MemoryEngine::new_local(&config.embedding_model, max_chunk_tokens)
+                            .map_err(CoreError::Embedding)
+                    }
+                }
+            } else {
+                // Pure local, no Qdrant
+                MemoryEngine::new_local(&config.embedding_model, max_chunk_tokens)
+                    .map_err(CoreError::Embedding)
             }
         }
-
-        if config.qdrant_url.starts_with("local://")
-            || config.qdrant_url.contains("localhost")
-            || config.qdrant_url.starts_with("http://127.0.0.1")
-        {
-            if let Ok(engine) =
-                MemoryEngine::with_qdrant_local(&state_dir, project_id, hosted_embeddings)
-            {
-                return Ok(engine);
-            }
-        }
-
-        Ok(MemoryEngine::new())
     }
 
-    fn route_query(&self, project_root: &Path, query: &str) -> RoutedDecision {
+    async fn route_query(&self, project_root: &Path, query: &str) -> RoutedDecision {
         let config = match AppConfig::load(project_root, RuntimeOverrides::default()) {
             Ok(config) => config,
             Err(_) => {
@@ -215,7 +262,7 @@ impl McpBroker {
         }
     }
 
-    fn route_tool_action(&self, project_root: &Path, action_key: &str) -> RoutedDecision {
+    async fn route_tool_action(&self, project_root: &Path, action_key: &str) -> RoutedDecision {
         let request = format!("run {action_key}");
         let config = match AppConfig::load(project_root, RuntimeOverrides::default()) {
             Ok(config) => config,
@@ -272,17 +319,14 @@ impl McpBroker {
         }
     }
 
-    pub fn ingest_docs(
+    pub async fn ingest_docs(
         &self,
         project_root: &Path,
         project_id: &str,
         docs_root: &Path,
     ) -> Result<usize, CoreError> {
         let key = Self::project_memory_key(project_root, project_id);
-        let mut memories = self
-            .memory_by_project
-            .lock()
-            .map_err(|_| CoreError::PolicyDenied("project memory lock poisoned".to_string()))?;
+        let mut memories = self.memory_by_project.write().await;
         if !memories.contains_key(&key) {
             let engine = self.build_memory_engine(project_root, project_id)?;
             memories.insert(key.clone(), engine);
@@ -290,11 +334,36 @@ impl McpBroker {
         let memory = memories.get_mut(&key).ok_or_else(|| {
             CoreError::InvalidProjectConfig("project memory not indexed".to_string())
         })?;
-        Ok(memory.ingest_markdown_tree(docs_root)?)
+
+        match memory.ingest_markdown_tree(docs_root).await {
+            Ok(count) => Ok(count),
+            Err(e) => {
+                // If qdrant-backed engine failed (e.g. qdrant unreachable),
+                // rebuild as local-only and retry
+                let config = AppConfig::load(project_root, RuntimeOverrides::default())?;
+                let fallback = MemoryEngine::new_local(
+                    &config.embedding_model,
+                    config.limits.max_chunk_tokens,
+                )
+                .map_err(CoreError::Embedding)?;
+                memories.insert(key.clone(), fallback);
+                let memory = memories.get_mut(&key).ok_or_else(|| {
+                    CoreError::InvalidProjectConfig("project memory not indexed".to_string())
+                })?;
+                memory
+                    .ingest_markdown_tree(docs_root)
+                    .await
+                    .map_err(|e2| {
+                        CoreError::Embedding(format!(
+                            "ingest failed with qdrant ({e}) and local ({e2})"
+                        ))
+                    })
+            }
+        }
     }
 
     #[instrument(skip_all)]
-    pub fn project_init(
+    pub async fn project_init(
         &self,
         request: ProjectInitRequest,
     ) -> Result<ProjectInitResponse, CoreError> {
@@ -310,7 +379,7 @@ impl McpBroker {
     }
 
     #[instrument(skip_all)]
-    pub fn project_refresh(
+    pub async fn project_refresh(
         &self,
         request: ProjectRefreshRequest,
     ) -> Result<ProjectRefreshResponse, CoreError> {
@@ -330,11 +399,13 @@ impl McpBroker {
     }
 
     #[instrument(skip_all)]
-    pub fn memory_search(&self, request: MemorySearchRequest) -> MemorySearchResponse {
+    pub async fn memory_search(&self, request: MemorySearchRequest) -> MemorySearchResponse {
         self.metrics
             .memory_search_calls
             .fetch_add(1, Ordering::Relaxed);
-        let route = self.route_query(Path::new(&request.project_root), &request.query);
+        let route = self
+            .route_query(Path::new(&request.project_root), &request.query)
+            .await;
         self.metrics
             .router_decision_latency_ms_total
             .fetch_add(route.telemetry.latency_ms, Ordering::Relaxed);
@@ -355,9 +426,15 @@ impl McpBroker {
         let query = request.query;
 
         let hits = if route.decision.requires_memory_search {
-            self.with_project_memory(project_root, &project_id, |memory| {
+            let key = Self::project_memory_key(project_root, &project_id);
+            let memories = self.memory_by_project.read().await;
+            if let Some(memory) = memories.get(&key) {
                 memory
-                    .search(&EngineSearchRequest { query, top_k })
+                    .search(&EngineSearchRequest {
+                        query,
+                        top_k,
+                    })
+                    .await
                     .into_iter()
                     .map(|item| MemorySearchItem {
                         id: item.chunk.id,
@@ -365,8 +442,9 @@ impl McpBroker {
                         score: item.score,
                     })
                     .collect::<Vec<_>>()
-            })
-            .unwrap_or_default()
+            } else {
+                Vec::new()
+            }
         } else {
             Vec::new()
         };
@@ -385,7 +463,7 @@ impl McpBroker {
     }
 
     #[instrument(skip_all)]
-    pub fn memory_fetch_chunk(
+    pub async fn memory_fetch_chunk(
         &self,
         request: MemoryFetchChunkRequest,
     ) -> Option<MemoryFetchChunkResponse> {
@@ -394,6 +472,7 @@ impl McpBroker {
             &request.project_id,
             |memory| memory.fetch_chunk(&request.id),
         )
+        .await
         .ok()
         .flatten()
         .map(|chunk| MemoryFetchChunkResponse {
@@ -404,24 +483,26 @@ impl McpBroker {
     }
 
     #[instrument(skip_all)]
-    pub fn docs_list(&self, request: DocsListRequest) -> DocsListResponse {
+    pub async fn docs_list(&self, request: DocsListRequest) -> DocsListResponse {
         let docs = self
             .with_project_memory(
                 Path::new(&request.project_root),
                 &request.project_id,
                 MemoryEngine::docs_list,
             )
+            .await
             .unwrap_or_default();
         DocsListResponse { docs }
     }
 
     #[instrument(skip_all)]
-    pub fn docs_get(&self, request: DocsGetRequest) -> Option<DocsGetResponse> {
+    pub async fn docs_get(&self, request: DocsGetRequest) -> Option<DocsGetResponse> {
         self.with_project_memory(
             Path::new(&request.project_root),
             &request.project_id,
             |memory| memory.docs_get(&request.path),
         )
+        .await
         .ok()
         .flatten()
         .map(|content| DocsGetResponse {
@@ -431,7 +512,7 @@ impl McpBroker {
     }
 
     #[instrument(skip_all)]
-    pub fn docs_get_section(
+    pub async fn docs_get_section(
         &self,
         request: DocsGetSectionRequest,
     ) -> Option<DocsGetSectionResponse> {
@@ -441,6 +522,7 @@ impl McpBroker {
             &request.project_id,
             |memory| memory.docs_get_section(&request.path, &request.heading, max_bytes),
         )
+        .await
         .ok()
         .flatten()
         .map(|content| DocsGetSectionResponse {
@@ -451,7 +533,7 @@ impl McpBroker {
     }
 
     #[instrument(skip_all)]
-    pub fn tool_suggest(&self, request: ToolSuggestRequest) -> ToolSuggestResponse {
+    pub async fn tool_suggest(&self, request: ToolSuggestRequest) -> ToolSuggestResponse {
         let suggestions = self
             .registry
             .suggest(
@@ -471,25 +553,27 @@ impl McpBroker {
     }
 
     #[instrument(skip_all)]
-    pub fn tool_search(&self, request: ToolSearchRequest) -> ToolSearchResponse {
-        let response = self.tool_suggest(ToolSuggestRequest {
-            query: request.query,
-            max: request.max,
-        });
+    pub async fn tool_search(&self, request: ToolSearchRequest) -> ToolSearchResponse {
+        let response = self
+            .tool_suggest(ToolSuggestRequest {
+                query: request.query,
+                max: request.max,
+            })
+            .await;
         ToolSearchResponse {
             matches: response.suggestions,
         }
     }
 
     #[instrument(skip_all)]
-    pub fn tool_run(
+    pub async fn tool_run(
         &self,
         project_root: &Path,
         project_id: &str,
         request: ToolRunRequest,
     ) -> Result<ToolRunResponse, CoreError> {
         self.metrics.tool_run_calls.fetch_add(1, Ordering::Relaxed);
-        let routed = self.route_tool_action(project_root, &request.action_key);
+        let routed = self.route_tool_action(project_root, &request.action_key).await;
         self.metrics
             .router_decision_latency_ms_total
             .fetch_add(routed.telemetry.latency_ms, Ordering::Relaxed);
@@ -516,8 +600,8 @@ impl McpBroker {
         if !request.interactive {
             if self
                 .session_approvals
-                .lock()
-                .map_err(|_| CoreError::PolicyDenied("session lock poisoned".to_string()))?
+                .read()
+                .await
                 .contains(&request.action_key)
             {
                 db.record_audit_event(
@@ -557,8 +641,8 @@ impl McpBroker {
             ApprovalScope::Once => {}
             ApprovalScope::Session => {
                 self.session_approvals
-                    .lock()
-                    .map_err(|_| CoreError::PolicyDenied("session lock poisoned".to_string()))?
+                    .write()
+                    .await
                     .insert(request.action_key.clone());
             }
             ApprovalScope::Forever => {
@@ -577,7 +661,10 @@ impl McpBroker {
     }
 
     #[instrument(skip_all)]
-    pub fn config_export(&self, project_root: &Path) -> Result<ConfigExportResponse, CoreError> {
+    pub async fn config_export(
+        &self,
+        project_root: &Path,
+    ) -> Result<ConfigExportResponse, CoreError> {
         let config = AppConfig::load(project_root, RuntimeOverrides::default())?;
         Ok(ConfigExportResponse {
             schema_version: crate::schema_version().to_string(),
@@ -597,7 +684,7 @@ impl McpBroker {
     }
 
     #[instrument(skip_all)]
-    pub fn project_profile_get(
+    pub async fn project_profile_get(
         &self,
         request: ProjectProfileGetRequest,
     ) -> Result<Option<ProjectProfileGetResponse>, CoreError> {
@@ -610,7 +697,10 @@ impl McpBroker {
     }
 
     #[instrument(skip_all)]
-    pub fn tool_enable(&self, request: ToolEnableRequest) -> Result<ToolEnableResponse, CoreError> {
+    pub async fn tool_enable(
+        &self,
+        request: ToolEnableRequest,
+    ) -> Result<ToolEnableResponse, CoreError> {
         let paths = project_state_paths(Path::new(&request.project_root));
         let mut overrides = load_overrides_manifest(&paths.overrides_json)?;
         if !overrides.enabled_families.contains(&request.family) {
@@ -647,7 +737,7 @@ impl McpBroker {
     }
 
     #[instrument(skip_all)]
-    pub fn audit_events(
+    pub async fn audit_events(
         &self,
         request: AuditEventsRequest,
     ) -> Result<AuditEventsResponse, CoreError> {
@@ -667,6 +757,254 @@ impl McpBroker {
 
         Ok(AuditEventsResponse { events })
     }
+
+    // -----------------------------------------------------------------------
+    // Docs CRUD — delegated to DocsManager per-project
+    // -----------------------------------------------------------------------
+
+    async fn with_docs_manager<R>(
+        &self,
+        project_root: &Path,
+        f: impl FnOnce(&DocsManager) -> Result<R, CoreError>,
+    ) -> Result<R, CoreError> {
+        let key = project_root
+            .canonicalize()
+            .unwrap_or_else(|_| project_root.to_path_buf())
+            .to_string_lossy()
+            .to_string();
+        {
+            let managers = self.docs_by_project.read().await;
+            if let Some(dm) = managers.get(&key) {
+                return f(dm);
+            }
+        }
+        let dm = DocsManager::new(project_root)?;
+        let result = f(&dm);
+        let mut managers = self.docs_by_project.write().await;
+        managers.entry(key).or_insert(dm);
+        result
+    }
+
+    #[instrument(skip_all)]
+    pub async fn docs_create(
+        &self,
+        request: DocsCreateRequest,
+    ) -> Result<DocsCreateResponse, CoreError> {
+        let project_root = PathBuf::from(&request.project_root);
+        let config = AppConfig::load(&project_root, RuntimeOverrides::default())?;
+        let max_doc_bytes = config.limits.max_doc_size_bytes;
+        let max_docs = config.limits.max_managed_docs;
+        let path = request.path.clone();
+        let content = request.content.clone();
+        self.with_docs_manager(&project_root, move |dm| {
+            dm.create(&path, &content, max_doc_bytes, max_docs)?;
+            Ok(DocsCreateResponse { path })
+        })
+        .await
+    }
+
+    #[instrument(skip_all)]
+    pub async fn docs_update(
+        &self,
+        request: DocsUpdateRequest,
+    ) -> Result<DocsUpdateResponse, CoreError> {
+        let project_root = PathBuf::from(&request.project_root);
+        let config = AppConfig::load(&project_root, RuntimeOverrides::default())?;
+        let max_doc_bytes = config.limits.max_doc_size_bytes;
+        let path = request.path.clone();
+        let content = request.content.clone();
+        self.with_docs_manager(&project_root, move |dm| {
+            dm.update(&path, &content, max_doc_bytes)?;
+            Ok(DocsUpdateResponse { path })
+        })
+        .await
+    }
+
+    #[instrument(skip_all)]
+    pub async fn docs_delete(
+        &self,
+        request: DocsDeleteRequest,
+    ) -> Result<DocsDeleteResponse, CoreError> {
+        let project_root = PathBuf::from(&request.project_root);
+        let path = request.path.clone();
+        self.with_docs_manager(&project_root, move |dm| {
+            dm.delete(&path)?;
+            Ok(DocsDeleteResponse { deleted: true })
+        })
+        .await
+    }
+
+    #[instrument(skip_all)]
+    pub async fn docs_move(
+        &self,
+        request: DocsMoveRequest,
+    ) -> Result<DocsMoveResponse, CoreError> {
+        let project_root = PathBuf::from(&request.project_root);
+        let from = request.from.clone();
+        let to = request.to.clone();
+        self.with_docs_manager(&project_root, move |dm| {
+            dm.move_doc(&from, &to)?;
+            Ok(DocsMoveResponse { from, to })
+        })
+        .await
+    }
+
+    #[instrument(skip_all)]
+    pub async fn docs_trash_list(
+        &self,
+        request: DocsTrashListRequest,
+    ) -> Result<DocsTrashListResponse, CoreError> {
+        let project_root = PathBuf::from(&request.project_root);
+        self.with_docs_manager(&project_root, |dm| {
+            let entries = dm.trash_list()?;
+            Ok(DocsTrashListResponse { entries })
+        })
+        .await
+    }
+
+    #[instrument(skip_all)]
+    pub async fn docs_trash_restore(
+        &self,
+        request: DocsTrashRestoreRequest,
+    ) -> Result<DocsTrashRestoreResponse, CoreError> {
+        let project_root = PathBuf::from(&request.project_root);
+        let path = request.path.clone();
+        self.with_docs_manager(&project_root, move |dm| {
+            dm.trash_restore(&path)?;
+            Ok(DocsTrashRestoreResponse { restored: true })
+        })
+        .await
+    }
+
+    #[instrument(skip_all)]
+    pub async fn docs_trash_empty(
+        &self,
+        request: DocsTrashEmptyRequest,
+    ) -> Result<DocsTrashEmptyResponse, CoreError> {
+        let project_root = PathBuf::from(&request.project_root);
+        self.with_docs_manager(&project_root, |dm| {
+            dm.trash_empty()?;
+            Ok(DocsTrashEmptyResponse { emptied: true })
+        })
+        .await
+    }
+
+    #[instrument(skip_all)]
+    pub async fn docs_reindex(
+        &self,
+        request: DocsReindexRequest,
+    ) -> Result<DocsReindexResponse, CoreError> {
+        let project_root = PathBuf::from(&request.project_root);
+        let project_id = request.project_id.clone();
+        let config = AppConfig::load(&project_root, RuntimeOverrides::default())?;
+
+        // Ensure DocsManager exists for the project (creates managed docs dir)
+        let managed_root = {
+            let key = project_root
+                .canonicalize()
+                .unwrap_or_else(|_| project_root.clone())
+                .to_string_lossy()
+                .to_string();
+            {
+                let managers = self.docs_by_project.read().await;
+                if let Some(dm) = managers.get(&key) {
+                    dm.managed_root().to_path_buf()
+                } else {
+                    drop(managers);
+                    let dm = DocsManager::new(&project_root)?;
+                    let root = dm.managed_root().to_path_buf();
+                    let mut managers = self.docs_by_project.write().await;
+                    managers.entry(key).or_insert(dm);
+                    root
+                }
+            }
+        };
+
+        // Ingest managed docs via the fallback-aware ingest_docs
+        let managed_count = self
+            .ingest_docs(&project_root, &project_id, &managed_root)
+            .await?;
+
+        // Ingest external docs root if configured
+        let mut external_count = 0;
+        if let Some(ext_root) = &config.external_docs_root {
+            external_count = self
+                .ingest_docs(&project_root, &project_id, ext_root)
+                .await?;
+        }
+
+        let total_new = managed_count + external_count;
+
+        Ok(DocsReindexResponse {
+            new: total_new,
+            updated: 0,
+            removed: 0,
+            unchanged: 0,
+        })
+    }
+
+    #[instrument(skip_all)]
+    pub async fn config_update(
+        &self,
+        request: ConfigUpdateRequest,
+    ) -> Result<ConfigUpdateResponse, CoreError> {
+        let project_root = PathBuf::from(&request.project_root);
+        let obj = request.update.as_object().ok_or_else(|| {
+            CoreError::InvalidProjectConfig("config update must be a JSON object".to_string())
+        })?;
+
+        let mut update = ProjectConfigUpdate::default();
+        if let Some(v) = obj.get("provider").and_then(|v| v.as_str()) {
+            update.provider = Some(v.to_string());
+        }
+        if let Some(v) = obj.get("log_level").and_then(|v| v.as_str()) {
+            update.log_level = Some(v.to_string());
+        }
+        if let Some(v) = obj.get("qdrant_url").and_then(|v| v.as_str()) {
+            update.qdrant_url = Some(v.to_string());
+        }
+        if let Some(v) = obj.get("nano_provider").and_then(|v| v.as_str()) {
+            update.nano_provider = Some(v.to_string());
+        }
+        if let Some(v) = obj.get("nano_model").and_then(|v| v.as_str()) {
+            update.nano_model = Some(v.to_string());
+        }
+        if let Some(v) = obj.get("qdrant_api_key").and_then(|v| v.as_str()) {
+            update.qdrant_api_key = Some(v.to_string());
+        }
+        if let Some(v) = obj.get("qdrant_ca_cert_path").and_then(|v| v.as_str()) {
+            update.qdrant_ca_cert_path = Some(v.to_string());
+        }
+        if let Some(v) = obj.get("qdrant_tls_insecure").and_then(|v| v.as_bool()) {
+            update.qdrant_tls_insecure = Some(v);
+        }
+        if let Some(v) = obj.get("qdrant_strict_auth").and_then(|v| v.as_bool()) {
+            update.qdrant_strict_auth = Some(v);
+        }
+        if let Some(v) = obj.get("embedding_provider").and_then(|v| v.as_str()) {
+            update.embedding_provider = Some(v.to_string());
+        }
+        if let Some(v) = obj.get("embedding_model").and_then(|v| v.as_str()) {
+            update.embedding_model = Some(v.to_string());
+        }
+        if let Some(v) = obj.get("embedding_api_base_url").and_then(|v| v.as_str()) {
+            update.embedding_api_base_url = Some(v.to_string());
+        }
+        if let Some(v) = obj.get("embedding_api_key").and_then(|v| v.as_str()) {
+            update.embedding_api_key = Some(v.to_string());
+        }
+        if let Some(v) = obj.get("embedding_dimensions").and_then(|v| v.as_u64()) {
+            update.embedding_dimensions = Some(v as usize);
+        }
+        if let Some(v) = obj.get("external_docs_root").and_then(|v| v.as_str()) {
+            update.external_docs_root = Some(v.to_string());
+        }
+
+        let path = update_project_config(&project_root, update)?;
+        Ok(ConfigUpdateResponse {
+            path: path.display().to_string(),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -679,13 +1017,15 @@ mod tests {
 
     use super::McpBroker;
     use crate::api::{
-        AuditEventsRequest, DocsGetSectionRequest, DocsListRequest, MemorySearchRequest,
+        AuditEventsRequest, DocsCreateRequest, DocsDeleteRequest, DocsGetSectionRequest,
+        DocsListRequest, DocsMoveRequest, DocsReindexRequest, DocsTrashEmptyRequest,
+        DocsTrashListRequest, DocsTrashRestoreRequest, DocsUpdateRequest, MemorySearchRequest,
         ProjectInitRequest, ProjectProfileGetRequest, ProjectRefreshRequest, ToolEnableRequest,
         ToolRunRequest, ToolSuggestRequest,
     };
 
-    #[test]
-    fn test_project_init_and_refresh_flow() {
+    #[tokio::test]
+    async fn test_project_init_and_refresh_flow() {
         let temp = tempfile::tempdir().expect("tempdir should be created");
         let root = temp.path().join("repo");
         fs::create_dir_all(&root).expect("project dir should exist");
@@ -698,6 +1038,7 @@ mod tests {
                 project_root: root.display().to_string(),
                 project_id: "project-1".to_string(),
             })
+            .await
             .expect("init should succeed");
         assert_eq!(init.project_id, "project-1");
 
@@ -706,12 +1047,13 @@ mod tests {
                 project_root: root.display().to_string(),
                 project_id: "project-1".to_string(),
             })
+            .await
             .expect("refresh should succeed");
         assert_eq!(refresh.mode, "cached");
     }
 
-    #[test]
-    fn test_memory_search_and_tool_suggest() {
+    #[tokio::test]
+    async fn test_memory_search_and_tool_suggest() {
         let temp = tempfile::tempdir().expect("tempdir should be created");
         let root = temp.path().join("repo");
         let docs = temp.path().join("docs");
@@ -735,35 +1077,44 @@ mod tests {
         });
         broker
             .ingest_docs(&root, "project-1", &docs)
+            .await
             .expect("ingest should succeed");
 
-        let search = broker.memory_search(MemorySearchRequest {
-            project_root: root.display().to_string(),
-            project_id: "project-1".to_string(),
-            query: "search docs".to_string(),
-            top_k: 5,
-        });
+        let search = broker
+            .memory_search(MemorySearchRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-1".to_string(),
+                query: "search docs".to_string(),
+                top_k: 5,
+            })
+            .await;
         assert_eq!(search.hits.len(), 1);
         assert!(!search.provider_path.is_empty());
 
-        let docs = broker.docs_list(DocsListRequest {
-            project_root: root.display().to_string(),
-            project_id: "project-1".to_string(),
-        });
-        assert_eq!(docs.docs.len(), 1);
-        let section = broker.docs_get_section(DocsGetSectionRequest {
-            project_root: root.display().to_string(),
-            project_id: "project-1".to_string(),
-            path: docs.docs[0].clone(),
-            heading: "Intro".to_string(),
-            max_bytes: 64,
-        });
+        let docs_list = broker
+            .docs_list(DocsListRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-1".to_string(),
+            })
+            .await;
+        assert_eq!(docs_list.docs.len(), 1);
+        let section = broker
+            .docs_get_section(DocsGetSectionRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-1".to_string(),
+                path: docs_list.docs[0].clone(),
+                heading: "Intro".to_string(),
+                max_bytes: 64,
+            })
+            .await;
         assert!(section.is_some());
 
-        let suggest = broker.tool_suggest(ToolSuggestRequest {
-            query: "docs".to_string(),
-            max: 5,
-        });
+        let suggest = broker
+            .tool_suggest(ToolSuggestRequest {
+                query: "docs".to_string(),
+                max: 5,
+            })
+            .await;
         assert!(suggest
             .suggestions
             .iter()
@@ -772,8 +1123,8 @@ mod tests {
         std::env::remove_var("THE_ONE_HOME");
     }
 
-    #[test]
-    fn test_memory_search_uses_nano_provider_and_reports_telemetry() {
+    #[tokio::test]
+    async fn test_memory_search_uses_nano_provider_and_reports_telemetry() {
         let temp = tempfile::tempdir().expect("tempdir should be created");
         let root = temp.path().join("repo");
         let docs = temp.path().join("docs");
@@ -791,22 +1142,25 @@ mod tests {
         let broker = McpBroker::new();
         broker
             .ingest_docs(&root, "project-1", &docs)
+            .await
             .expect("ingest should succeed");
 
-        let search = broker.memory_search(MemorySearchRequest {
-            project_root: root.display().to_string(),
-            project_id: "project-1".to_string(),
-            query: "search docs".to_string(),
-            top_k: 5,
-        });
+        let search = broker
+            .memory_search(MemorySearchRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-1".to_string(),
+                query: "search docs".to_string(),
+                top_k: 5,
+            })
+            .await;
 
         assert_eq!(search.route, "RuleWithNano");
         assert_eq!(search.provider_path, "api-nano");
         assert!(!search.fallback_used);
     }
 
-    #[test]
-    fn test_ingest_docs_creates_qdrant_local_index_file() {
+    #[tokio::test]
+    async fn test_ingest_docs_builds_memory_engine_from_config() {
         let temp = tempfile::tempdir().expect("tempdir should be created");
         let root = temp.path().join("repo");
         let docs = temp.path().join("docs");
@@ -814,23 +1168,17 @@ mod tests {
         fs::create_dir_all(&state_dir).expect("state dir should exist");
         fs::create_dir_all(&docs).expect("docs dir should exist");
         fs::write(docs.join("x.md"), "# Intro\nqdrant test").expect("doc write should work");
-        fs::write(
-            state_dir.join("config.json"),
-            r#"{"provider":"local","qdrant_url":"http://127.0.0.1:6334"}"#,
-        )
-        .expect("config write should succeed");
 
         let broker = McpBroker::new();
-        broker
+        let count = broker
             .ingest_docs(&root, "project-1", &docs)
+            .await
             .expect("ingest should succeed");
-
-        let index = state_dir.join("qdrant").join("project-1.index.json");
-        assert!(index.exists());
+        assert!(count >= 1);
     }
 
-    #[test]
-    fn test_remote_qdrant_strict_auth_rejects_missing_api_key() {
+    #[tokio::test]
+    async fn test_remote_qdrant_strict_auth_rejects_missing_api_key() {
         let temp = tempfile::tempdir().expect("tempdir should be created");
         let root = temp.path().join("repo");
         let docs = temp.path().join("docs");
@@ -847,12 +1195,13 @@ mod tests {
         let broker = McpBroker::new();
         let err = broker
             .ingest_docs(&root, "project-1", &docs)
+            .await
             .expect_err("ingest should fail without api key");
         assert!(err.to_string().contains("remote qdrant requires api key"));
     }
 
-    #[test]
-    fn test_memory_search_reports_fallback_when_nano_fails() {
+    #[tokio::test]
+    async fn test_memory_search_reports_fallback_when_nano_fails() {
         let temp = tempfile::tempdir().expect("tempdir should be created");
         let root = temp.path().join("repo");
         let docs = temp.path().join("docs");
@@ -870,14 +1219,17 @@ mod tests {
         let broker = McpBroker::new();
         broker
             .ingest_docs(&root, "project-1", &docs)
+            .await
             .expect("ingest should succeed");
 
-        let search = broker.memory_search(MemorySearchRequest {
-            project_root: root.display().to_string(),
-            project_id: "project-1".to_string(),
-            query: "search docs nano-fail".to_string(),
-            top_k: 5,
-        });
+        let search = broker
+            .memory_search(MemorySearchRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-1".to_string(),
+                query: "search docs nano-fail".to_string(),
+                top_k: 5,
+            })
+            .await;
         assert!(search.fallback_used);
         assert!(search.last_error.is_some());
         assert!(search.retries_bound <= 3);
@@ -886,8 +1238,8 @@ mod tests {
         assert!(metrics.router_fallback_calls >= 1);
     }
 
-    #[test]
-    fn test_tool_run_headless_requires_prior_approval() {
+    #[tokio::test]
+    async fn test_tool_run_headless_requires_prior_approval() {
         let temp = tempfile::tempdir().expect("tempdir should be created");
         let root = temp.path().join("repo");
         fs::create_dir_all(&root).expect("project dir should exist");
@@ -903,6 +1255,7 @@ mod tests {
                     approval_scope: None,
                 },
             )
+            .await
             .expect("tool run should complete");
         assert!(!denied.allowed);
 
@@ -916,6 +1269,7 @@ mod tests {
                     approval_scope: Some("forever".to_string()),
                 },
             )
+            .await
             .expect("tool run should complete");
         assert!(approved.allowed);
 
@@ -929,12 +1283,13 @@ mod tests {
                     approval_scope: None,
                 },
             )
+            .await
             .expect("tool run should complete");
         assert!(headless_after.allowed);
     }
 
-    #[test]
-    fn test_config_export_returns_defaults() {
+    #[tokio::test]
+    async fn test_config_export_returns_defaults() {
         let temp = tempfile::tempdir().expect("tempdir should be created");
         let root = temp.path().join("repo");
         fs::create_dir_all(&root).expect("project dir should exist");
@@ -942,6 +1297,7 @@ mod tests {
         let broker = McpBroker::new();
         let config = broker
             .config_export(&root)
+            .await
             .expect("config export should work");
         assert_eq!(config.schema_version, "v1beta");
         assert_eq!(config.provider, "local");
@@ -952,8 +1308,8 @@ mod tests {
         assert_eq!(config.nano_model, "none");
     }
 
-    #[test]
-    fn test_tool_route_uses_project_nano_provider_config() {
+    #[tokio::test]
+    async fn test_tool_route_uses_project_nano_provider_config() {
         let temp = tempfile::tempdir().expect("tempdir should be created");
         let root = temp.path().join("repo");
         let state_dir = root.join(".the-one");
@@ -965,13 +1321,13 @@ mod tests {
         .expect("project config should write");
 
         let broker = McpBroker::new();
-        let decision = broker.route_tool_action(&root, "tool.run:danger");
+        let decision = broker.route_tool_action(&root, "tool.run:danger").await;
 
         assert!(decision.decision.rationale.contains("ollama"));
     }
 
-    #[test]
-    fn test_session_approval_allows_headless_in_same_broker_session() {
+    #[tokio::test]
+    async fn test_session_approval_allows_headless_in_same_broker_session() {
         let temp = tempfile::tempdir().expect("tempdir should be created");
         let root = temp.path().join("repo");
         fs::create_dir_all(&root).expect("project dir should exist");
@@ -987,6 +1343,7 @@ mod tests {
                     approval_scope: Some("session".to_string()),
                 },
             )
+            .await
             .expect("interactive approval should work");
         assert!(interactive.allowed);
 
@@ -1000,12 +1357,13 @@ mod tests {
                     approval_scope: None,
                 },
             )
+            .await
             .expect("headless run should work");
         assert!(headless.allowed);
     }
 
-    #[test]
-    fn test_tool_enable_and_profile_get_and_metrics() {
+    #[tokio::test]
+    async fn test_tool_enable_and_profile_get_and_metrics() {
         let temp = tempfile::tempdir().expect("tempdir should be created");
         let root = temp.path().join("repo");
         fs::create_dir_all(&root).expect("project dir should exist");
@@ -1018,6 +1376,7 @@ mod tests {
                 project_root: root.display().to_string(),
                 project_id: "project-1".to_string(),
             })
+            .await
             .expect("init should succeed");
 
         let enabled = broker
@@ -1025,6 +1384,7 @@ mod tests {
                 project_root: root.display().to_string(),
                 family: "docs".to_string(),
             })
+            .await
             .expect("tool enable should succeed");
         assert!(enabled.enabled_families.contains(&"docs".to_string()));
 
@@ -1033,6 +1393,7 @@ mod tests {
                 project_root: root.display().to_string(),
                 project_id: "project-1".to_string(),
             })
+            .await
             .expect("profile get should succeed");
         assert!(profile.is_some());
 
@@ -1040,8 +1401,8 @@ mod tests {
         assert!(metrics.project_init_calls >= 1);
     }
 
-    #[test]
-    fn test_policy_limits_bound_suggestions_and_search_hits() {
+    #[tokio::test]
+    async fn test_policy_limits_bound_suggestions_and_search_hits() {
         let temp = tempfile::tempdir().expect("tempdir should be created");
         let root = temp.path().join("repo");
         let docs = temp.path().join("docs");
@@ -1077,26 +1438,33 @@ mod tests {
         });
         broker
             .ingest_docs(&root, "project-1", &docs)
+            .await
             .expect("ingest should work");
 
-        let suggestions = broker.tool_suggest(ToolSuggestRequest {
-            query: "docs".to_string(),
-            max: 10,
-        });
+        let suggestions = broker
+            .tool_suggest(ToolSuggestRequest {
+                query: "docs".to_string(),
+                max: 10,
+            })
+            .await;
         assert_eq!(suggestions.suggestions.len(), 1);
 
-        let hits = broker.memory_search(MemorySearchRequest {
-            project_root: root.display().to_string(),
-            project_id: "project-1".to_string(),
-            query: "search".to_string(),
-            top_k: 10,
-        });
+        let hits = broker
+            .memory_search(MemorySearchRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-1".to_string(),
+                query: "search".to_string(),
+                top_k: 10,
+            })
+            .await;
         assert_eq!(hits.hits.len(), 1);
 
-        let docs_list = broker.docs_list(DocsListRequest {
-            project_root: root.display().to_string(),
-            project_id: "project-1".to_string(),
-        });
+        let docs_list = broker
+            .docs_list(DocsListRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-1".to_string(),
+            })
+            .await;
 
         let section = broker
             .docs_get_section(DocsGetSectionRequest {
@@ -1106,12 +1474,13 @@ mod tests {
                 heading: "Intro".to_string(),
                 max_bytes: 100,
             })
+            .await
             .expect("section should exist");
         assert!(section.content.len() <= 1024);
     }
 
-    #[test]
-    fn test_tool_enable_respects_max_enabled_families() {
+    #[tokio::test]
+    async fn test_tool_enable_respects_max_enabled_families() {
         let temp = tempfile::tempdir().expect("tempdir should be created");
         let root = temp.path().join("repo");
         fs::create_dir_all(&root).expect("project dir should exist");
@@ -1131,6 +1500,7 @@ mod tests {
                 project_root: root.display().to_string(),
                 project_id: "project-1".to_string(),
             })
+            .await
             .expect("init should succeed");
 
         broker
@@ -1138,12 +1508,14 @@ mod tests {
                 project_root: root.display().to_string(),
                 family: "a".to_string(),
             })
+            .await
             .expect("enable a");
         broker
             .tool_enable(ToolEnableRequest {
                 project_root: root.display().to_string(),
                 family: "b".to_string(),
             })
+            .await
             .expect("enable b");
 
         let err = broker
@@ -1151,14 +1523,15 @@ mod tests {
                 project_root: root.display().to_string(),
                 family: "c".to_string(),
             })
+            .await
             .expect_err("enable c should fail");
         assert!(err
             .to_string()
             .contains("enabled families exceed policy limit"));
     }
 
-    #[test]
-    fn test_audit_events_endpoint_returns_recent_entries() {
+    #[tokio::test]
+    async fn test_audit_events_endpoint_returns_recent_entries() {
         let temp = tempfile::tempdir().expect("tempdir should be created");
         let root = temp.path().join("repo");
         fs::create_dir_all(&root).expect("project dir should exist");
@@ -1174,6 +1547,7 @@ mod tests {
                     approval_scope: None,
                 },
             )
+            .await
             .expect("tool run should complete");
 
         let events = broker
@@ -1182,13 +1556,14 @@ mod tests {
                 project_id: "project-1".to_string(),
                 limit: 10,
             })
+            .await
             .expect("audit events should load");
         assert!(!events.events.is_empty());
         assert_eq!(events.events[0].event_type, "tool_run");
     }
 
-    #[test]
-    fn test_router_fallback_metrics_increment_on_provider_failure() {
+    #[tokio::test]
+    async fn test_router_fallback_metrics_increment_on_provider_failure() {
         let temp = tempfile::tempdir().expect("tempdir should be created");
         let root = temp.path().join("repo");
         let state = root.join(".the-one");
@@ -1210,6 +1585,7 @@ mod tests {
                     approval_scope: None,
                 },
             )
+            .await
             .expect("tool run should complete");
 
         let metrics = broker.metrics_snapshot();
@@ -1218,8 +1594,8 @@ mod tests {
         assert_eq!(metrics.router_provider_error_calls, 1);
     }
 
-    #[test]
-    fn test_project_refresh_soak_keeps_cached_mode_when_unchanged() {
+    #[tokio::test]
+    async fn test_project_refresh_soak_keeps_cached_mode_when_unchanged() {
         let temp = tempfile::tempdir().expect("tempdir should be created");
         let root = temp.path().join("repo");
         fs::create_dir_all(&root).expect("project dir should exist");
@@ -1232,6 +1608,7 @@ mod tests {
                 project_root: root.display().to_string(),
                 project_id: "project-1".to_string(),
             })
+            .await
             .expect("init should succeed");
 
         for _ in 0..50 {
@@ -1240,11 +1617,165 @@ mod tests {
                     project_root: root.display().to_string(),
                     project_id: "project-1".to_string(),
                 })
+                .await
                 .expect("refresh should succeed");
             assert_eq!(refresh.mode, "cached");
         }
 
         let metrics = broker.metrics_snapshot();
         assert!(metrics.project_refresh_calls >= 50);
+    }
+
+    #[tokio::test]
+    async fn test_docs_crud_create_update_delete_move() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let root = temp.path().join("repo");
+        fs::create_dir_all(&root).expect("project dir should exist");
+
+        let broker = McpBroker::new();
+
+        // Create
+        let created = broker
+            .docs_create(DocsCreateRequest {
+                project_root: root.display().to_string(),
+                project_id: "p1".to_string(),
+                path: "hello.md".to_string(),
+                content: "# Hello\nWorld".to_string(),
+            })
+            .await
+            .expect("create should succeed");
+        assert_eq!(created.path, "hello.md");
+
+        // Update
+        let updated = broker
+            .docs_update(DocsUpdateRequest {
+                project_root: root.display().to_string(),
+                project_id: "p1".to_string(),
+                path: "hello.md".to_string(),
+                content: "# Hello\nUpdated".to_string(),
+            })
+            .await
+            .expect("update should succeed");
+        assert_eq!(updated.path, "hello.md");
+
+        // Move
+        let moved = broker
+            .docs_move(DocsMoveRequest {
+                project_root: root.display().to_string(),
+                project_id: "p1".to_string(),
+                from: "hello.md".to_string(),
+                to: "renamed.md".to_string(),
+            })
+            .await
+            .expect("move should succeed");
+        assert_eq!(moved.from, "hello.md");
+        assert_eq!(moved.to, "renamed.md");
+
+        // Delete (soft)
+        let deleted = broker
+            .docs_delete(DocsDeleteRequest {
+                project_root: root.display().to_string(),
+                project_id: "p1".to_string(),
+                path: "renamed.md".to_string(),
+            })
+            .await
+            .expect("delete should succeed");
+        assert!(deleted.deleted);
+
+        // Trash list
+        let trash = broker
+            .docs_trash_list(DocsTrashListRequest {
+                project_root: root.display().to_string(),
+                project_id: "p1".to_string(),
+            })
+            .await
+            .expect("trash list should succeed");
+        assert_eq!(trash.entries.len(), 1);
+
+        // Trash restore
+        let restored = broker
+            .docs_trash_restore(DocsTrashRestoreRequest {
+                project_root: root.display().to_string(),
+                project_id: "p1".to_string(),
+                path: "renamed.md".to_string(),
+            })
+            .await
+            .expect("restore should succeed");
+        assert!(restored.restored);
+
+        // Delete again + empty trash
+        broker
+            .docs_delete(DocsDeleteRequest {
+                project_root: root.display().to_string(),
+                project_id: "p1".to_string(),
+                path: "renamed.md".to_string(),
+            })
+            .await
+            .expect("delete again should succeed");
+        let emptied = broker
+            .docs_trash_empty(DocsTrashEmptyRequest {
+                project_root: root.display().to_string(),
+                project_id: "p1".to_string(),
+            })
+            .await
+            .expect("empty should succeed");
+        assert!(emptied.emptied);
+    }
+
+    #[tokio::test]
+    async fn test_docs_reindex() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let root = temp.path().join("repo");
+        fs::create_dir_all(&root).expect("project dir should exist");
+
+        let broker = McpBroker::new();
+
+        // Create a doc first
+        broker
+            .docs_create(DocsCreateRequest {
+                project_root: root.display().to_string(),
+                project_id: "p1".to_string(),
+                path: "test.md".to_string(),
+                content: "# Test\nReindex content".to_string(),
+            })
+            .await
+            .expect("create should succeed");
+
+        let result = broker
+            .docs_reindex(DocsReindexRequest {
+                project_root: root.display().to_string(),
+                project_id: "p1".to_string(),
+            })
+            .await
+            .expect("reindex should succeed");
+        assert!(result.new >= 1);
+    }
+
+    #[tokio::test]
+    async fn test_config_update() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let root = temp.path().join("repo");
+        fs::create_dir_all(&root).expect("project dir should exist");
+
+        let broker = McpBroker::new();
+        let result = broker
+            .config_update(crate::api::ConfigUpdateRequest {
+                project_root: root.display().to_string(),
+                update: serde_json::json!({
+                    "nano_provider": "ollama",
+                    "nano_model": "tiny"
+                }),
+            })
+            .await
+            .expect("config update should succeed");
+        assert!(result.path.contains("config.json"));
+
+        // Verify the config was actually updated
+        let config = broker
+            .config_export(&root)
+            .await
+            .expect("export should work");
+        assert_eq!(config.nano_provider, "ollama");
+        assert_eq!(config.nano_model, "tiny");
     }
 }
