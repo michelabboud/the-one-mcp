@@ -1,87 +1,88 @@
 # The-One MCP Quickstart
 
-This is the shortest path to run and verify `the-one-mcp` locally.
+Shortest path to build, run, and connect the MCP server.
 
-For full documentation, see:
-
-- `docs/guides/the-one-mcp-complete-guide.md`
-
-## 1) Verify Toolchain
+## 1. Build
 
 ```bash
-cargo --version
-rustc --version
-```
-
-## 2) Validate Workspace
-
-```bash
-cargo fmt --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-```
-
-## 3) Build the MCP Binary
-
-```bash
-# Build the MCP server binary
 cargo build --release -p the-one-mcp --bin the-one-mcp
-
-# Full workspace build (includes all crates)
-cargo build --release --workspace
-
-# Optional: build MCP without embedded swagger
-cargo build --release -p the-one-mcp --no-default-features
 ```
 
-## 4) Run as MCP Server
+## 2. Run
 
 ```bash
-# Stdio transport (default, for Claude Code / Codex)
+# Stdio transport (default — for Claude Code / Codex)
 ./target/release/the-one-mcp serve
 
-# SSE transport
+# SSE transport (for web clients)
 ./target/release/the-one-mcp serve --transport sse --port 3000
 
 # Streamable HTTP transport
 ./target/release/the-one-mcp serve --transport stream --port 3000
 ```
 
-### Add to Claude Code
+## 3. Connect to Claude Code
 
 ```bash
-claude mcp add the-one-mcp -- ./target/release/the-one-mcp serve
+claude mcp add the-one-mcp -- /absolute/path/to/the-one-mcp serve
 ```
 
-## 5) Launch Embedded UI
+## 4. Verify
 
 ```bash
-THE_ONE_PROJECT_ROOT="$(pwd)" THE_ONE_PROJECT_ID="demo" cargo run -p the-one-ui --bin embedded-ui
+# Send an initialize request via stdio
+echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' | ./target/release/the-one-mcp serve
+
+# List available tools
+echo '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' | ./target/release/the-one-mcp serve
 ```
 
-You can also set defaults in JSON config (`${THE_ONE_HOME:-$HOME/.the-one}/config.json` or `<project>/.the-one/config.json`) with keys:
+## 5. Configure (Optional)
 
-- `project_root`
-- `project_id`
-- `ui_bind`
+Create `~/.the-one/config.json` for global settings, or `<project>/.the-one/config.json` for project-specific:
 
-Open:
+```json
+{
+  "embedding_provider": "local",
+  "embedding_model": "all-MiniLM-L6-v2",
+  "nano_routing_policy": "priority",
+  "nano_providers": [
+    {
+      "name": "ollama",
+      "base_url": "http://localhost:11434/v1",
+      "model": "qwen2:0.5b",
+      "api_key": null,
+      "timeout_ms": 500,
+      "enabled": true
+    }
+  ],
+  "limits": {
+    "max_search_hits": 10,
+    "max_chunk_tokens": 512
+  }
+}
+```
 
-- `http://127.0.0.1:8787/dashboard`
-- `http://127.0.0.1:8787/api/health`
-- `http://127.0.0.1:8787/swagger` (Swagger UI, 404 if built without `embed-swagger`)
-- `http://127.0.0.1:8787/api/swagger` (raw OpenAPI JSON)
-- `http://127.0.0.1:8787/audit`
-- `http://127.0.0.1:8787/config` (editable config form with limits, saved via `/api/config`)
-
-## 6) Run Release Gate
+## 6. Admin UI (Optional)
 
 ```bash
+THE_ONE_PROJECT_ROOT="$(pwd)" THE_ONE_PROJECT_ID="demo" \
+  cargo run -p the-one-ui --bin embedded-ui
+```
+
+Open: `http://127.0.0.1:8787/dashboard`
+
+## 7. Quality Gate
+
+```bash
+cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
 bash scripts/release-gate.sh
 ```
 
-## 7) Next Docs
+## What's Next
 
-- Operations: `docs/ops/operator-runbook.md`
-- Release notes: `docs/releases/v1beta-upgrade-notes.md`
-- ADRs: `docs/adr/`
+- [Complete Guide](the-one-mcp-complete-guide.md) — full configuration, embeddings, provider pool, limits
+- [Operator Runbook](../ops/operator-runbook.md) — backup/restore, incident triage
+- [Architecture](../plans/the-one-mcp-architecture-prompt.md) — design rationale

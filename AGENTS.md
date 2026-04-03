@@ -1,139 +1,149 @@
 # AGENTS.md - The-One MCP Development Guide
 
-This is a Rust-based MCP broker system. All agents should follow these guidelines.
+Rust MCP broker system (v0.2.0). All agents should follow these guidelines.
 
 ## Build Commands
 
 ```bash
-# Build entire workspace
-cargo build
-
-# Build specific crate
-cargo build -p the-one-core
-
-# Run in debug mode
-cargo run
-
-# Release build
-cargo build --release
-
-# Run a single test
-cargo test --package <package-name> <test-name>
-
-# Example: run only the registry tests
-cargo test -p the-one-registry
-
-# Run all tests
-cargo test
-
-# Run doc tests
-cargo test --doc
-
-# Check (fast, no build)
-cargo check
-
-# Format check
+# Full validation (run before every commit)
 cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
 
-# Lint with clippy
-cargo clippy -- -D warnings
+# Build release binary
+cargo build --release -p the-one-mcp --bin the-one-mcp
 
-# Full check (fmt + clippy + test)
-cargo fmt && cargo clippy && cargo test
+# Build entire workspace
+cargo build --release --workspace
+
+# Run specific crate tests
+cargo test -p the-one-core
+cargo test -p the-one-memory
+cargo test -p the-one-router
+cargo test -p the-one-mcp
+
+# Release gate
+bash scripts/release-gate.sh
 ```
 
 ## Workspace Structure
 
 ```
-the-one/
-├── core/               # Shared business logic
-│   ├── registry/       # Capability registry
-│   ├── profiler/       # Project profiler
-│   ├── router/         # Request router
-│   ├── memory/         # Memory/RAG ingestion
-│   ├── docs/           # Document management
-│   ├── policy/         # Policy engine
-│   ├── cache/          # In-memory cache
-│   └── schemas/        # Data schemas
-├── mcp-server/         # MCP protocol server
-├── ui/                 # Embedded web UI
-└── adapters/           # CLI-specific adapters
+the-one-mcp/
+├── crates/
+│   ├── the-one-core/          # Config, storage, policy, profiler, docs manager, limits
+│   │   └── src/
+│   │       ├── config.rs      # 5-layer config system
+│   │       ├── limits.rs      # 12 configurable limits with validation bounds
+│   │       ├── docs_manager.rs # Managed docs CRUD + soft-delete + trash
+│   │       ├── policy.rs      # Policy engine with configurable limits
+│   │       ├── storage/sqlite.rs # SQLite with WAL + migrations
+│   │       ├── profiler.rs    # Project detection + fingerprinting
+│   │       ├── project.rs     # Init/refresh lifecycle
+│   │       ├── manifests.rs   # .the-one/ manifest management
+│   │       ├── backup.rs      # Backup/restore operations
+│   │       ├── contracts.rs   # Shared data types + enums
+│   │       ├── error.rs       # CoreError with 8 variants
+│   │       └── telemetry.rs   # Structured logging setup
+│   ├── the-one-mcp/           # Async broker + transport + CLI
+│   │   └── src/
+│   │       ├── broker.rs      # McpBroker (async, 24 tool methods)
+│   │       ├── api.rs         # Request/response types
+│   │       ├── adapter_core.rs # Shared adapter logic
+│   │       ├── swagger.rs     # OpenAPI embedding
+│   │       ├── transport/
+│   │       │   ├── jsonrpc.rs # JSON-RPC 2.0 dispatch
+│   │       │   ├── tools.rs   # 24 MCP tool definitions
+│   │       │   ├── stdio.rs   # Stdio transport
+│   │       │   ├── sse.rs     # SSE HTTP transport
+│   │       │   └── stream.rs  # Streamable HTTP transport
+│   │       └── bin/
+│   │           └── the-one-mcp.rs  # CLI binary (clap)
+│   ├── the-one-memory/        # RAG: chunker + embeddings + Qdrant
+│   │   └── src/
+│   │       ├── lib.rs         # Async MemoryEngine
+│   │       ├── chunker.rs     # Heading-aware markdown chunker
+│   │       ├── embeddings.rs  # fastembed (ONNX) + API provider
+│   │       └── qdrant.rs      # Async Qdrant HTTP backend
+│   ├── the-one-router/        # Routing + provider pool
+│   │   └── src/
+│   │       ├── lib.rs         # Router (sync + async)
+│   │       ├── providers.rs   # OpenAI-compatible HTTP provider
+│   │       ├── provider_pool.rs # Multi-provider pool (3 policies)
+│   │       └── health.rs      # Per-provider health tracking
+│   ├── the-one-registry/      # Capability catalog
+│   ├── the-one-claude/        # Claude Code adapter
+│   ├── the-one-codex/         # Codex adapter
+│   └── the-one-ui/            # Embedded admin UI
+├── schemas/mcp/v1beta/        # 49 JSON Schema files
+├── docs/                      # Guides, ADRs, runbooks, specs
+├── scripts/release-gate.sh    # Release validation
+└── .github/workflows/ci.yml   # CI pipeline
 ```
 
-## Code Style Guidelines
+## MCP Tool Surface (24 tools)
 
-### Formatting
+### Project Lifecycle
+- `project.init` — detect project, create state, index docs
+- `project.refresh` — re-fingerprint, sync docs, refresh profile
+- `project.profile.get` — return cached project profile
+
+### Knowledge (RAG)
+- `memory.search` — semantic search across indexed docs
+- `memory.fetch_chunk` — fetch specific chunk by ID
+
+### Documents (Managed CRUD)
+- `docs.create` — create markdown in managed folder
+- `docs.update` — update existing markdown
+- `docs.delete` — soft-delete to .trash/
+- `docs.get` — return full original file
+- `docs.get_section` — return bounded heading section
+- `docs.list` — folder tree listing
+- `docs.move` — rename/move within managed folder
+
+### Trash
+- `docs.trash.list` — list trash contents
+- `docs.trash.restore` — restore from trash
+- `docs.trash.empty` — permanently empty trash
+
+### Re-index
+- `docs.reindex` — force full re-indexing
+
+### Tools
+- `tool.suggest` — suggest capabilities by query
+- `tool.search` — search capabilities
+- `tool.enable` — enable tool family
+- `tool.run` — execute tool with approval gate
+
+### Config & Observability
+- `config.export` — full config with limits
+- `config.update` — update project config
+- `metrics.snapshot` — broker + provider metrics
+- `audit.events` — query audit trail
+
+## Code Style
+
 - Run `cargo fmt` before every commit
-- Use 4 spaces for indentation
-- Maximum line length: 100 characters
-- Use trailing commas in multi-line structs/arrays
+- 4 spaces indentation, 100 char max line width
+- `thiserror` for library errors, `anyhow` for binary
+- `tokio` async runtime, `async/await` throughout
+- Tests: `#[tokio::test]` for async, `#[test]` for sync
+- Imports: std -> external -> internal
 
-### Imports
-- Use absolute paths for crate modules: `crate::core::registry`
-- Group imports: std → external → internal
-- Use `use` for items used more than once; use path prefixes otherwise
+## Architecture Principles
 
-### Types
-- Prefer explicit type annotations in public APIs
-- Use `Result<T, Error>` with custom error types, not `Box<dyn Error>`
-- Define error types with `thiserror` for library code
-- Use `anyhow` for application/bin code
-
-### Naming
-- `snake_case` for variables, functions, methods
-- `SCREAMING_SNAKE_CASE` for consts
-- `PascalCase` for types, traits, enums
-- `kebab-case` for file names
-
-### Error Handling
-- Use `?` operator for propagation
-- Never silently ignore errors
-- Return context-rich errors using `thiserror` or `anyhow`
-- Use `Result` for fallible operations, `Option` for optionality
-
-### Async
-- Use `tokio` for async runtime
-- Prefer async/await over manual futures
-- Use `#[tokio::main]` for binary entry points
-
-### Testing
-- Unit tests go in `mod tests` at module end
-- Integration tests in `tests/` directory
-- Use `#[cfg(test)]` guards
-- Follow Arrange-Act-Assert pattern
-- Name tests descriptively: `fn test_<what>_<expected_behavior>`
-
-### Documentation
-- Document public APIs with doc comments
-- Include examples for complex functions
-- Use `///` for documentation, `//` for implementation comments
-
-## Architecture Principles (from architecture-prompt.md)
-
-1. **Token efficiency first**: Keep always-loaded instructions tiny
-2. **Progressive tool exposure**: Expose minimal MCP surface by default
-3. **Local-first**: SQLite + Qdrant in `~/.the-one/`, project data in `<repo>/.the-one/`
-4. **Rules-first routing**: Nano model is optional enhancement, not primary brain
+1. **Token efficiency first** — keep always-loaded context tiny
+2. **Progressive tool exposure** — expose minimal MCP surface by default
+3. **Local-first** — SQLite + fastembed + Qdrant local, API optional
+4. **Rules-first routing** — nano LLM is optional enhancement
 5. **RAG for discovery, raw markdown for precision**
-6. **Single shared backend** with thin CLI satellites
+6. **Single shared backend** with thin CLI adapters
 
-## Storage Strategy
+## Key Decisions
 
-- **Global**: `~/.the-one/` - SQLite DB, Qdrant data, embeddings, logs, registry
-- **Project**: `<repo>/.the-one/` - `project.json`, `overrides.json`, `fingerprint.json`
-
-## MCP Tool Surface (expected)
-
-- `project.init`, `project.refresh`, `project.profile.get`
-- `memory.search`, `memory.fetch_chunk`
-- `docs.list`, `docs.get`, `docs.get_section`
-- `tool.search`, `tool.suggest`, `tool.enable`, `tool.run`
-- `config.export`
-
-## Important Notes
-
-- Do NOT preload hundreds of tools into the client
-- Do NOT store heavy docs in AGENTS.md/CLAUDE.md (keep them tiny)
-- Do NOT dump giant raw docs or search payloads by default
-- Use fingerprinting for project profile caching
-- Separate detected state from user choices in storage
+- All broker methods are async (tokio)
+- Embeddings: fastembed (384-dim ONNX) local, OpenAI-compatible API optional
+- Provider pool: up to 5 OpenAI-compatible endpoints with health checks
+- Docs: managed folder with soft-delete to .trash/
+- Limits: 12 configurable parameters with validation bounds
+- Transports: stdio (default), SSE, streamable HTTP
