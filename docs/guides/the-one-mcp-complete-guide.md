@@ -2,7 +2,9 @@
 
 ## 1. Overview
 
-`the-one-mcp` is a Rust MCP broker that acts as a smart intermediary between AI coding assistants (Claude Code, Codex) and your project. It provides:
+`the-one-mcp` is a Rust MCP broker that acts as a smart intermediary between AI coding assistants and your project. Works with **Claude Code**, **Gemini CLI**, **OpenCode**, and **Codex** — same server, same protocol, client-aware tool loading.
+
+It provides:
 
 - **Project lifecycle** — detect languages, frameworks, and risk profile; cache results via fingerprinting
 - **Semantic memory** — production-grade RAG with fastembed (384-dim ONNX) or API embeddings over Qdrant
@@ -24,6 +26,17 @@
 | `the-one-codex` | Codex adapter (thin async wrapper, parity-tested with Claude adapter) |
 | `the-one-ui` | Embedded admin UI: dashboard, config editor with limits, audit explorer, Swagger UI |
 
+### Supported AI Assistants
+
+| CLI | Tested | Registration |
+|-----|--------|-------------|
+| Claude Code | Yes | `claude mcp add` |
+| Gemini CLI | Yes | `gemini mcp add` or `settings.json` |
+| OpenCode | Yes | `opencode mcp add` |
+| Codex | Yes | Manual MCP config |
+
+All four connect via the same stdio JSON-RPC 2.0 protocol. The server reads `clientInfo` from the MCP handshake to load client-specific custom tools.
+
 ## 2. Prerequisites
 
 **Required:**
@@ -36,6 +49,24 @@
 - An OpenAI-compatible embeddings endpoint (fastembed local works without it)
 
 ## 3. Installation
+
+### One-Command Install (Recommended)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/michelabboud/the-one-mcp/main/scripts/install.sh | bash
+```
+
+The installer:
+1. Detects your OS (Linux/macOS/Windows) and architecture (x86-64/ARM64)
+2. Downloads the latest release binary
+3. Creates `~/.the-one/` with default config
+4. Downloads recommended tools catalog
+5. Auto-detects Claude Code, Gemini CLI, OpenCode, Codex and registers the MCP
+6. Validates with a smoke test
+
+Options: `--version v0.2.0`, `--lean` (no swagger), `--local ./target/release`, `--uninstall`
+
+### Build from Source
 
 ```bash
 git clone <repo-url>
@@ -60,10 +91,22 @@ The binary is at `./target/release/the-one-mcp`.
 ./target/release/the-one-mcp serve
 ```
 
-Add to Claude Code:
+### Register with AI Assistants
+
 ```bash
-claude mcp add the-one-mcp -- /absolute/path/to/the-one-mcp serve
+# Claude Code
+claude mcp add the-one-mcp -- ~/.the-one/bin/the-one-mcp serve
+
+# Gemini CLI
+gemini mcp add the-one-mcp ~/.the-one/bin/the-one-mcp serve
+
+# OpenCode
+opencode mcp add --name the-one-mcp --command ~/.the-one/bin/the-one-mcp --args serve
+
+# Codex — add to your MCP config manually
 ```
+
+Or use the installer: `bash scripts/install.sh` — it registers with all detected CLIs automatically.
 
 ### SSE Transport (for web clients)
 
@@ -232,12 +275,27 @@ All limits are configurable via config file, environment variables, or admin UI.
 
 ### Local Embeddings (default)
 
-Uses [fastembed-rs](https://github.com/Anush008/fastembed-rs) with ONNX Runtime. No API calls, no cost, fully offline.
+Uses [fastembed-rs](https://github.com/Anush008/fastembed-rs) with ONNX Runtime. No API calls, no cost, fully offline. First run downloads the model (cached in `~/.the-one/.fastembed_cache/`).
 
-- Model: `all-MiniLM-L6-v2` (384 dimensions)
-- Alternative: `BGE-small-en-v1.5` (384 dimensions)
-- First run downloads the model (~30MB, cached in `.fastembed_cache/`)
-- CPU-bound inference runs in `spawn_blocking`
+#### Tiered Model Selection
+
+Use a tier alias or full model name in config:
+
+| Tier | Model | Dims | Download | Speed | Use Case |
+|------|-------|------|----------|-------|----------|
+| `fast` (default) | all-MiniLM-L6-v2 | 384 | ~23MB | ~30ms | Getting started, fast iteration |
+| `balanced` | BGE-base-en-v1.5 | 768 | ~50MB | ~60ms | **Production recommended** |
+| `quality` | BGE-large-en-v1.5 | 1024 | ~130MB | ~120ms | Best local quality |
+| `multilingual` | multilingual-e5-large | 1024 | ~220MB | ~150ms | Non-English / mixed-language |
+
+Config: `"embedding_model": "balanced"` or `"embedding_model": "BGE-base-en-v1.5"`
+
+#### Additional Models
+
+All 15+ fastembed models supported by full name:
+`all-MiniLM-L12-v2`, `BGE-small-en-v1.5`, `nomic-embed-text-v1.5`, `mxbai-embed-large-v1`, `gte-base-en-v1.5`, `gte-large-en-v1.5`, `multilingual-e5-small`, `multilingual-e5-base`, `paraphrase-ml-minilm-l12-v2`
+
+Quantized variants (smaller download, slight quality trade-off): append `-q` to tier name or model name — `fast-q`, `balanced-q`, `quality-q`, `bge-base-en-v1.5-q`
 
 ### API Embeddings
 
@@ -373,7 +431,52 @@ Creates `.the-one/` with manifests, SQLite database, and profile.
 
 Computes SHA-256 fingerprint of signal files. If unchanged, returns cached profile. If changed, recomputes and syncs document index.
 
-## 12. Policy and Approvals
+## 12. Custom Tools (Per-CLI)
+
+The tool catalog supports three layers, loaded in order:
+
+```
+~/.the-one/registry/
+├── recommended.json         # Universal baseline (auto-updated from GitHub)
+├── custom.json              # Your shared tools (loaded for ALL clients)
+├── custom-claude.json       # Loaded only when Claude Code connects
+├── custom-gemini.json       # Loaded only when Gemini CLI connects
+├── custom-opencode.json     # Loaded only when OpenCode connects
+└── custom-codex.json        # Loaded only when Codex connects
+```
+
+### How Client Detection Works
+
+The MCP protocol's `initialize` handshake includes a `clientInfo.name` field. The broker reads this to determine which CLI is connecting and loads the appropriate custom tools file.
+
+### Adding Custom Tools
+
+Edit the appropriate file (JSON array of tool objects):
+
+```json
+[
+  {
+    "id": "my-custom-tool",
+    "title": "My Custom Tool",
+    "capability_type": "McpTool",
+    "family": "custom",
+    "visibility_mode": "Core",
+    "risk_level": "Low",
+    "description": "What this tool does"
+  }
+]
+```
+
+- Tools you want in **all** CLIs: add to `custom.json`
+- Tools only for **Claude Code**: add to `custom-claude.json`
+- Tools only for **Gemini CLI**: add to `custom-gemini.json`
+- `recommended.json` is auto-updated from GitHub — don't edit it
+
+### Recommended Tools
+
+The `recommended.json` file ships with 15 pre-built tool definitions covering project management, RAG search, document CRUD, and observability. It's downloaded during installation and can be refreshed by re-running the installer.
+
+## 13. Policy and Approvals
 
 | Risk Level | Approval Required |
 |------------|------------------|
@@ -388,7 +491,7 @@ Computes SHA-256 fingerprint of signal files. If unchanged, returns cached profi
 
 **Headless mode**: high-risk tools denied unless prior approval exists.
 
-## 13. Observability
+## 14. Observability
 
 ### Metrics (`metrics.snapshot`)
 
@@ -398,7 +501,7 @@ Computes SHA-256 fingerprint of signal files. If unchanged, returns cached profi
 
 All tool executions logged with timestamps and JSON payloads. Max 200 per query.
 
-## 14. Embedded Admin UI
+## 15. Embedded Admin UI
 
 ```bash
 THE_ONE_PROJECT_ROOT="$(pwd)" THE_ONE_PROJECT_ID="demo" cargo run -p the-one-ui --bin embedded-ui
@@ -414,7 +517,7 @@ THE_ONE_PROJECT_ROOT="$(pwd)" THE_ONE_PROJECT_ID="demo" cargo run -p the-one-ui 
 | `/api/swagger` | Raw OpenAPI JSON |
 | `/api/config` | POST endpoint for config updates |
 
-## 15. Project State Layout
+## 16. Project State Layout
 
 ```
 ~/.the-one/                            # global state ($THE_ONE_HOME)
@@ -433,7 +536,7 @@ THE_ONE_PROJECT_ROOT="$(pwd)" THE_ONE_PROJECT_ID="demo" cargo run -p the-one-ui 
 +-- qdrant/                            # local index fallback
 ```
 
-## 16. CI and Release
+## 17. CI and Release
 
 ```bash
 # Full validation
@@ -444,7 +547,7 @@ cargo build --release -p the-one-mcp --bin the-one-mcp
 bash scripts/release-gate.sh
 ```
 
-## 17. Troubleshooting
+## 18. Troubleshooting
 
 | Problem | Solution |
 |---------|----------|
@@ -455,7 +558,7 @@ bash scripts/release-gate.sh
 | Nano provider timeouts | Check URL, increase `timeout_ms`, pool auto-falls back to rules |
 | Slow first embedding | Model download (~30MB), cached after |
 
-## 18. Source Reference
+## 19. Source Reference
 
 | Component | File |
 |-----------|------|

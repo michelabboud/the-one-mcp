@@ -2,6 +2,26 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.2.1] - 2026-04-03
+
+### Added
+- Multi-CLI support: Claude Code, Gemini CLI, OpenCode, Codex — auto-detected and registered
+- Tiered embedding models: fast (384d), balanced (768d), quality (1024d), multilingual (1024d) + 15 models
+- Quantized model variants with `-q` suffix for smaller downloads
+- Per-CLI custom tools: `custom-claude.json`, `custom-gemini.json`, `custom-opencode.json`, `custom-codex.json`
+- `install.sh` — one-command installer with OS/arch detection, release download, CLI registration, smoke test
+- `build.sh` — production build manager (build, dev, test, check, package, install, clean, info)
+- `tools/recommended.json` — 15 pre-built tool definitions, auto-downloaded during install
+- Cross-platform release workflow: Linux/macOS/Windows x86-64 + ARM64 (6 targets)
+- `CLAUDE.md` for Claude Code development guidance
+- `available_models()` function listing all supported embedding models
+- `resolve_model()` supporting tier aliases and full model names
+
+### Changed
+- Embedding provider now uses `resolve_model()` for flexible model selection
+- Installer shows version of each detected CLI
+- README rewritten with install command, multi-CLI table, embedding tiers, per-CLI tools
+
 ## [0.2.0] - 2026-04-03
 
 ### Added

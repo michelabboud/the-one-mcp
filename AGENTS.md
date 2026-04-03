@@ -139,11 +139,35 @@ the-one-mcp/
 5. **RAG for discovery, raw markdown for precision**
 6. **Single shared backend** with thin CLI adapters
 
+## Multi-CLI Support
+
+Works with Claude Code, Gemini CLI, OpenCode, and Codex — same server, same protocol.
+
+- Server reads `clientInfo.name` from MCP `initialize` handshake
+- Loads per-CLI custom tools from `~/.the-one/registry/custom-<client>.json`
+- Universal tools from `recommended.json` + `custom.json` always loaded
+- Install script auto-detects all CLIs and registers with each
+
+## Embedding Models
+
+Tiered selection via config `"embedding_model"`:
+
+| Tier | Dims | Best For |
+|------|------|----------|
+| `fast` (default) | 384 | Getting started |
+| `balanced` | 768 | Production |
+| `quality` | 1024 | Best local |
+| `multilingual` | 1024 | Non-English |
+
+Plus 15+ models by full name, quantized variants with `-q` suffix.
+
 ## Key Decisions
 
 - All broker methods are async (tokio)
-- Embeddings: fastembed (384-dim ONNX) local, OpenAI-compatible API optional
+- Embeddings: tiered fastembed (384-1024 dim ONNX) local, OpenAI-compatible API optional
 - Provider pool: up to 5 OpenAI-compatible endpoints with health checks
 - Docs: managed folder with soft-delete to .trash/
 - Limits: 12 configurable parameters with validation bounds
 - Transports: stdio (default), SSE, streamable HTTP
+- Per-CLI custom tools via `clientInfo` detection
+- Install script: one-command setup with auto-registration for all CLIs

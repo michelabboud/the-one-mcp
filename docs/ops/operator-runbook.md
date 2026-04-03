@@ -36,7 +36,7 @@ After `project.init`, check these files exist:
 ## 2. Running the Server
 
 ```bash
-# Stdio (default, for Claude Code / Codex)
+# Stdio (default — for Claude Code, Gemini CLI, OpenCode, Codex)
 ./target/release/the-one-mcp serve
 
 # SSE transport
@@ -170,7 +170,30 @@ Use `metrics.snapshot` — includes per-provider call counts, errors, and latenc
 - `"round_robin"` — spread load
 - `"latency"` — use fastest provider
 
-## 8. Safe Rollout Rules
+## 8. Per-CLI Custom Tools
+
+The tool catalog supports per-client customization:
+
+```
+~/.the-one/registry/
+├── recommended.json         # Universal (auto-updated from GitHub)
+├── custom.json              # Shared across all CLIs
+├── custom-claude.json       # Claude Code only
+├── custom-gemini.json       # Gemini CLI only
+├── custom-opencode.json     # OpenCode only
+└── custom-codex.json        # Codex only
+```
+
+Loading order: `recommended.json` + `custom.json` + `custom-<client>.json`
+
+The server identifies the client via `clientInfo.name` in the MCP `initialize` handshake. If a per-CLI file doesn't exist, only universal tools are loaded.
+
+To add a custom tool for Claude Code only:
+```bash
+$EDITOR ~/.the-one/registry/custom-claude.json
+```
+
+## 9. Safe Rollout Rules
 
 1. Do not ship schema changes without contract test updates
 2. Keep `v1beta` response fields additive only
