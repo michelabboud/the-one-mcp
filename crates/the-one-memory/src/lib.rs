@@ -1,4 +1,5 @@
 pub mod chunker;
+pub mod embeddings;
 
 use std::cmp::Reverse;
 use std::collections::HashMap;
