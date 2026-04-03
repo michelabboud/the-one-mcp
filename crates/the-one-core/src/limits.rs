@@ -87,28 +87,39 @@ impl ConfigurableLimits {
     pub fn validated(mut self) -> Self {
         self.max_tool_suggestions =
             clamp_usize("max_tool_suggestions", self.max_tool_suggestions, 1, 50);
-        self.max_search_hits =
-            clamp_usize("max_search_hits", self.max_search_hits, 1, 100);
-        self.max_raw_section_bytes =
-            clamp_usize("max_raw_section_bytes", self.max_raw_section_bytes, 1024, 1_048_576);
+        self.max_search_hits = clamp_usize("max_search_hits", self.max_search_hits, 1, 100);
+        self.max_raw_section_bytes = clamp_usize(
+            "max_raw_section_bytes",
+            self.max_raw_section_bytes,
+            1024,
+            1_048_576,
+        );
         self.max_enabled_families =
             clamp_usize("max_enabled_families", self.max_enabled_families, 1, 100);
-        self.max_doc_size_bytes =
-            clamp_usize("max_doc_size_bytes", self.max_doc_size_bytes, 1024, 10_485_760);
-        self.max_managed_docs =
-            clamp_usize("max_managed_docs", self.max_managed_docs, 10, 10_000);
-        self.max_embedding_batch_size =
-            clamp_usize("max_embedding_batch_size", self.max_embedding_batch_size, 1, 256);
-        self.max_chunk_tokens =
-            clamp_usize("max_chunk_tokens", self.max_chunk_tokens, 64, 2_048);
+        self.max_doc_size_bytes = clamp_usize(
+            "max_doc_size_bytes",
+            self.max_doc_size_bytes,
+            1024,
+            10_485_760,
+        );
+        self.max_managed_docs = clamp_usize("max_managed_docs", self.max_managed_docs, 10, 10_000);
+        self.max_embedding_batch_size = clamp_usize(
+            "max_embedding_batch_size",
+            self.max_embedding_batch_size,
+            1,
+            256,
+        );
+        self.max_chunk_tokens = clamp_usize("max_chunk_tokens", self.max_chunk_tokens, 64, 2_048);
         self.max_nano_timeout_ms =
             clamp_u64("max_nano_timeout_ms", self.max_nano_timeout_ms, 100, 10_000);
-        self.max_nano_retries =
-            clamp_u8("max_nano_retries", self.max_nano_retries, 0, 10);
-        self.max_nano_providers =
-            clamp_usize("max_nano_providers", self.max_nano_providers, 1, 10);
-        self.search_score_threshold =
-            clamp_f32("search_score_threshold", self.search_score_threshold, 0.0, 1.0);
+        self.max_nano_retries = clamp_u8("max_nano_retries", self.max_nano_retries, 0, 10);
+        self.max_nano_providers = clamp_usize("max_nano_providers", self.max_nano_providers, 1, 10);
+        self.search_score_threshold = clamp_f32(
+            "search_score_threshold",
+            self.search_score_threshold,
+            0.0,
+            1.0,
+        );
         self
     }
 }
@@ -122,18 +133,33 @@ mod tests {
         let defaults = ConfigurableLimits::default();
         let validated = defaults.clone().validated();
 
-        assert_eq!(validated.max_tool_suggestions, defaults.max_tool_suggestions);
+        assert_eq!(
+            validated.max_tool_suggestions,
+            defaults.max_tool_suggestions
+        );
         assert_eq!(validated.max_search_hits, defaults.max_search_hits);
-        assert_eq!(validated.max_raw_section_bytes, defaults.max_raw_section_bytes);
-        assert_eq!(validated.max_enabled_families, defaults.max_enabled_families);
+        assert_eq!(
+            validated.max_raw_section_bytes,
+            defaults.max_raw_section_bytes
+        );
+        assert_eq!(
+            validated.max_enabled_families,
+            defaults.max_enabled_families
+        );
         assert_eq!(validated.max_doc_size_bytes, defaults.max_doc_size_bytes);
         assert_eq!(validated.max_managed_docs, defaults.max_managed_docs);
-        assert_eq!(validated.max_embedding_batch_size, defaults.max_embedding_batch_size);
+        assert_eq!(
+            validated.max_embedding_batch_size,
+            defaults.max_embedding_batch_size
+        );
         assert_eq!(validated.max_chunk_tokens, defaults.max_chunk_tokens);
         assert_eq!(validated.max_nano_timeout_ms, defaults.max_nano_timeout_ms);
         assert_eq!(validated.max_nano_retries, defaults.max_nano_retries);
         assert_eq!(validated.max_nano_providers, defaults.max_nano_providers);
-        assert!((validated.search_score_threshold - defaults.search_score_threshold).abs() < f32::EPSILON);
+        assert!(
+            (validated.search_score_threshold - defaults.search_score_threshold).abs()
+                < f32::EPSILON
+        );
     }
 
     #[test]

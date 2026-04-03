@@ -143,8 +143,7 @@ impl ProviderPool {
     }
 
     async fn select_round_robin(&self) -> Vec<usize> {
-        let start =
-            self.round_robin_index.fetch_add(1, Ordering::Relaxed) % self.providers.len();
+        let start = self.round_robin_index.fetch_add(1, Ordering::Relaxed) % self.providers.len();
         let mut indices = Vec::new();
         for offset in 0..self.providers.len() {
             let i = (start + offset) % self.providers.len();

@@ -373,9 +373,6 @@ mod tests {
 
         // The last chunk (with "Content here") should have full hierarchy
         let deep_chunk = chunks.last().unwrap();
-        assert_eq!(
-            deep_chunk.heading_hierarchy,
-            vec!["Top", "Sub", "Deep"]
-        );
+        assert_eq!(deep_chunk.heading_hierarchy, vec!["Top", "Sub", "Deep"]);
     }
 }

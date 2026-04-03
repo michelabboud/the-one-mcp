@@ -80,9 +80,7 @@ async fn main() -> anyhow::Result<()> {
                     Box::new(SseTransport { port })
                 }
                 TransportKind::Stream => {
-                    eprintln!(
-                        "the-one-mcp: starting streamable HTTP transport on port {port}"
-                    );
+                    eprintln!("the-one-mcp: starting streamable HTTP transport on port {port}");
                     Box::new(StreamableHttpTransport { port })
                 }
             };

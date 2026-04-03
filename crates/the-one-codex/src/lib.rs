@@ -51,7 +51,9 @@ impl CodexAdapter {
         project_id: &str,
         limit: usize,
     ) -> Result<AuditEventsResponse, the_one_core::error::CoreError> {
-        self.core.audit_events(project_root, project_id, limit).await
+        self.core
+            .audit_events(project_root, project_id, limit)
+            .await
     }
 
     pub async fn ingest_docs(
@@ -60,7 +62,9 @@ impl CodexAdapter {
         project_id: &str,
         docs_root: &Path,
     ) -> Result<usize, the_one_core::error::CoreError> {
-        self.core.ingest_docs(project_root, project_id, docs_root).await
+        self.core
+            .ingest_docs(project_root, project_id, docs_root)
+            .await
     }
 
     pub async fn tool_run(

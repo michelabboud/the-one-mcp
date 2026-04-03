@@ -241,10 +241,7 @@ impl AppConfig {
             nano_providers: merged.nano_providers.unwrap_or_default(),
             nano_routing_policy: merged.nano_routing_policy.unwrap_or_default(),
             external_docs_root: merged.external_docs_root.map(PathBuf::from),
-            limits: merged
-                .limits
-                .map(|l| l.validated())
-                .unwrap_or_default(),
+            limits: merged.limits.map(|l| l.validated()).unwrap_or_default(),
         })
     }
 }
@@ -864,7 +861,10 @@ mod tests {
 
                 // Default limit preserved when set in config to default value
                 let defaults = ConfigurableLimits::default();
-                assert_eq!(config.limits.max_tool_suggestions, defaults.max_tool_suggestions);
+                assert_eq!(
+                    config.limits.max_tool_suggestions,
+                    defaults.max_tool_suggestions
+                );
             },
         );
     }

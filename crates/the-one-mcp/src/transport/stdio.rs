@@ -2,8 +2,8 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-use super::Transport;
 use super::jsonrpc::{dispatch, JsonRpcRequest};
+use super::Transport;
 use crate::broker::McpBroker;
 use the_one_core::error::CoreError;
 
@@ -31,8 +31,7 @@ impl Transport for StdioTransport {
                         -32700,
                         format!("parse error: {e}"),
                     );
-                    let response_json =
-                        serde_json::to_string(&error_response).unwrap_or_default();
+                    let response_json = serde_json::to_string(&error_response).unwrap_or_default();
                     let _ = stdout.write_all(response_json.as_bytes()).await;
                     let _ = stdout.write_all(b"\n").await;
                     let _ = stdout.flush().await;

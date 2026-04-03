@@ -402,8 +402,7 @@ mod tests {
     #[test]
     fn test_update_existing() {
         let (_dir, mgr) = setup();
-        mgr.create("up.md", "v1", MAX_DOC_BYTES, MAX_DOCS)
-            .unwrap();
+        mgr.create("up.md", "v1", MAX_DOC_BYTES, MAX_DOCS).unwrap();
         mgr.update("up.md", "v2", MAX_DOC_BYTES).unwrap();
         assert_eq!(mgr.get("up.md").unwrap(), "v2");
     }
@@ -529,9 +528,7 @@ mod tests {
         let (_dir, mgr) = setup();
         mgr.create("one.md", "1", MAX_DOC_BYTES, 2).unwrap();
         mgr.create("two.md", "2", MAX_DOC_BYTES, 2).unwrap();
-        let err = mgr
-            .create("three.md", "3", MAX_DOC_BYTES, 2)
-            .unwrap_err();
+        let err = mgr.create("three.md", "3", MAX_DOC_BYTES, 2).unwrap_err();
         assert!(err.to_string().contains("exceed limit"));
     }
 

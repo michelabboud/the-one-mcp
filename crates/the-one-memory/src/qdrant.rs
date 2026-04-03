@@ -76,7 +76,9 @@ impl AsyncQdrantBackend {
             builder = builder.add_root_certificate(cert);
         }
 
-        let client = builder.build().map_err(|e| format!("failed to build reqwest client: {e}"))?;
+        let client = builder
+            .build()
+            .map_err(|e| format!("failed to build reqwest client: {e}"))?;
 
         Ok(Self {
             client,
@@ -120,9 +122,7 @@ impl AsyncQdrantBackend {
             return Ok(());
         }
 
-        Err(format!(
-            "ensure_collection failed (HTTP {status}): {text}"
-        ))
+        Err(format!("ensure_collection failed (HTTP {status}): {text}"))
     }
 
     /// Upsert points (vectors with payloads).
@@ -287,7 +287,9 @@ impl AsyncQdrantBackend {
             404 => Ok(false),
             other => {
                 let text = resp.text().await.unwrap_or_default();
-                Err(format!("collection_exists unexpected status {other}: {text}"))
+                Err(format!(
+                    "collection_exists unexpected status {other}: {text}"
+                ))
             }
         }
     }
@@ -357,12 +359,9 @@ mod tests {
                 .body(r#"{"status":"ok","result":true}"#);
         });
 
-        let backend = AsyncQdrantBackend::new(
-            &server.base_url(),
-            "test-proj",
-            QdrantOptions::default(),
-        )
-        .expect("backend should be created");
+        let backend =
+            AsyncQdrantBackend::new(&server.base_url(), "test-proj", QdrantOptions::default())
+                .expect("backend should be created");
 
         backend
             .ensure_collection(384)
@@ -412,12 +411,9 @@ mod tests {
                 );
         });
 
-        let backend = AsyncQdrantBackend::new(
-            &server.base_url(),
-            "search-proj",
-            QdrantOptions::default(),
-        )
-        .expect("backend should be created");
+        let backend =
+            AsyncQdrantBackend::new(&server.base_url(), "search-proj", QdrantOptions::default())
+                .expect("backend should be created");
 
         let results = backend
             .search(vec![0.1, 0.2, 0.3], 5, 0.5)

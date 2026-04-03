@@ -99,7 +99,8 @@ impl MemoryEngine {
             config.embedding_model,
             config.embedding_dims,
         );
-        let qdrant = AsyncQdrantBackend::new(config.qdrant_url, config.project_id, config.qdrant_options)?;
+        let qdrant =
+            AsyncQdrantBackend::new(config.qdrant_url, config.project_id, config.qdrant_options)?;
         let max_chunk_tokens = config.max_chunk_tokens;
         Ok(Self {
             chunks: Vec::new(),
@@ -112,7 +113,10 @@ impl MemoryEngine {
 
     /// Ingest all `.md` files from a directory tree.
     /// Returns the number of chunks indexed.
-    pub async fn ingest_markdown_tree(&mut self, docs_root: &Path) -> Result<usize, std::io::Error> {
+    pub async fn ingest_markdown_tree(
+        &mut self,
+        docs_root: &Path,
+    ) -> Result<usize, std::io::Error> {
         if !docs_root.exists() {
             return Ok(0);
         }
@@ -264,7 +268,11 @@ impl MemoryEngine {
                 })
                 .collect();
 
-            scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+            scored.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
             scored.truncate(request.top_k);
             scored
         }
@@ -290,8 +298,11 @@ impl MemoryEngine {
 
     /// Get full content of a document by reconstructing from chunks.
     pub fn docs_get(&self, path: &str) -> Option<String> {
-        let mut file_chunks: Vec<&ChunkMeta> =
-            self.chunks.iter().filter(|c| c.source_path == path).collect();
+        let mut file_chunks: Vec<&ChunkMeta> = self
+            .chunks
+            .iter()
+            .filter(|c| c.source_path == path)
+            .collect();
         if file_chunks.is_empty() {
             return None;
         }
@@ -310,9 +321,7 @@ impl MemoryEngine {
         let matching: Vec<&ChunkMeta> = self
             .chunks
             .iter()
-            .filter(|c| {
-                c.source_path == path && c.heading_hierarchy.iter().any(|h| h == heading)
-            })
+            .filter(|c| c.source_path == path && c.heading_hierarchy.iter().any(|h| h == heading))
             .collect();
         if matching.is_empty() {
             return None;
@@ -425,8 +434,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let docs = temp.path().join("docs");
         fs::create_dir_all(&docs).expect("mkdir");
-        fs::write(docs.join("readme.md"), "# Intro\nSome content here")
-            .expect("write");
+        fs::write(docs.join("readme.md"), "# Intro\nSome content here").expect("write");
 
         let mut engine = make_local_engine();
         engine
