@@ -8,7 +8,7 @@ Shortest path to a working MCP server connected to your AI assistant.
 curl -fsSL https://raw.githubusercontent.com/michelabboud/the-one-mcp/main/scripts/install.sh | bash
 ```
 
-This auto-detects your OS, downloads the latest release, creates default config, and registers with every AI CLI it finds (Claude Code, Gemini CLI, OpenCode, Codex).
+This auto-detects your OS, downloads the latest release, creates default config, imports the tool catalog (28+ tools), and registers with every AI CLI it finds.
 
 **Done.** Start an AI coding session — the MCP connects automatically.
 
@@ -17,17 +17,26 @@ This auto-detects your OS, downloads the latest release, creates default config,
 ```bash
 git clone https://github.com/michelabboud/the-one-mcp.git
 cd the-one-mcp
-
-# Build
 bash scripts/build.sh build
-
-# Install to ~/.the-one/bin/ and register with CLIs
 bash scripts/install.sh --local ./target/release
 ```
 
-## Register with Your AI Assistant
+## What Happens After Install
 
-If the installer didn't auto-register (or you want to do it manually):
+1. You start a Claude Code / Gemini / OpenCode session
+2. The MCP server starts automatically (stdio transport)
+3. On first `project.init`, it:
+   - Detects your project (languages, frameworks)
+   - Imports the tool catalog into SQLite
+   - Scans your system for installed tools
+   - Indexes your docs into the RAG engine
+4. Now you can:
+   - Ask about your code → `memory.search` finds relevant docs
+   - Ask for tool recommendations → `tool.suggest` returns what's available
+   - Save knowledge → `docs.create` persists it across sessions
+   - Run tools → `tool.run` with policy-gated approval
+
+## Register Manually (if needed)
 
 ```bash
 # Claude Code
@@ -40,13 +49,6 @@ gemini mcp add the-one-mcp ~/.the-one/bin/the-one-mcp serve
 opencode mcp add --name the-one-mcp --command ~/.the-one/bin/the-one-mcp --args serve
 ```
 
-## Verify
-
-```bash
-# Quick smoke test
-echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' | ~/.the-one/bin/the-one-mcp serve
-```
-
 ## Configure (Optional)
 
 Everything works with defaults. To customize:
@@ -55,70 +57,26 @@ Everything works with defaults. To customize:
 $EDITOR ~/.the-one/config.json
 ```
 
-Common tweaks:
 ```json
 {
   "embedding_model": "balanced",
-  "limits": {
-    "max_search_hits": 10,
-    "max_chunk_tokens": 1024
-  }
+  "limits": { "max_search_hits": 10 }
 }
 ```
 
-### Embedding Model Tiers
+## Key Commands the LLM Uses
 
-| Tier | Dims | Use Case |
-|------|------|----------|
-| `fast` (default) | 384 | Getting started |
-| `balanced` | 768 | Production recommended |
-| `quality` | 1024 | Best local quality |
-| `multilingual` | 1024 | Non-English projects |
+| What you say | What the LLM calls |
+|-------------|-------------------|
+| "Check my code for security issues" | `tool.suggest({ category: "security" })` → `tool.run(...)` |
+| "How does our auth system work?" | `memory.search("auth system")` |
+| "Save a note about this decision" | `docs.create("decisions/auth-choice.md", content)` |
+| "What tools do I have?" | `tool.list({ state: "enabled" })` |
+| "Install cargo-audit" | `tool.install({ tool_id: "cargo-audit" })` |
 
-### Add Nano LLM Routing (Optional)
+## Full Docs
 
-If you have Ollama running:
-```json
-{
-  "nano_providers": [{
-    "name": "ollama",
-    "base_url": "http://localhost:11434/v1",
-    "model": "qwen2:0.5b",
-    "timeout_ms": 500,
-    "enabled": true
-  }]
-}
-```
-
-## Custom Tools
-
-```bash
-# Shared across all CLIs
-$EDITOR ~/.the-one/registry/custom.json
-
-# For a specific CLI only
-$EDITOR ~/.the-one/registry/custom-claude.json
-$EDITOR ~/.the-one/registry/custom-gemini.json
-$EDITOR ~/.the-one/registry/custom-opencode.json
-```
-
-## Admin UI (Optional)
-
-```bash
-THE_ONE_PROJECT_ROOT="$(pwd)" THE_ONE_PROJECT_ID="demo" ~/.the-one/bin/embedded-ui
-```
-
-Open `http://127.0.0.1:8787/dashboard`
-
-## Transport Modes
-
-| Transport | Use Case | Command |
-|-----------|----------|---------|
-| `stdio` (default) | Claude Code, Gemini, OpenCode, Codex | `the-one-mcp serve` |
-| `sse` | Web clients | `the-one-mcp serve --transport sse --port 3000` |
-| `stream` | MCP-spec HTTP clients | `the-one-mcp serve --transport stream --port 3000` |
-
-## What's Next
-
-- [Complete Guide](the-one-mcp-complete-guide.md) — all 19 sections: config, embeddings, provider pool, limits, per-CLI tools
-- [Operator Runbook](../ops/operator-runbook.md) — backup/restore, incident triage
+- **[INSTALL.md](../../INSTALL.md)** — complete installation guide
+- **[Complete Guide](the-one-mcp-complete-guide.md)** — 19 sections, all features
+- **[Operator Runbook](../ops/operator-runbook.md)** — backup, incident triage
+- **[Tool Ecosystem](../plans/tool-ecosystem-architecture.md)** — catalog vision

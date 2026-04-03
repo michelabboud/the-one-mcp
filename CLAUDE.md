@@ -65,6 +65,8 @@ the-one-codex  ──> the-one-mcp
 
 **Provider pool with health tracking**: Up to 5 nano LLM providers managed by `ProviderPool`. Each has independent `ProviderHealth` with cooldown escalation (5s → 15s → 60s). TCP pre-flight check before every classification. Silent fallback to rules-only routing when all providers fail.
 
+**Tool catalog (SQLite + Qdrant)**: `ToolCatalog` in `the-one-core/src/tool_catalog.rs` manages `catalog.db` — a SQLite database with FTS5 full-text search and Qdrant semantic search. Tools are imported from `tools/catalog/` JSON files on first `project.init`. System inventory (`which` scan) tracks what's installed. Per-CLI enable/disable in `enabled_tools` table. The catalog is global (not per-project), while enabled state is per-CLI per-project. The `std::sync::Mutex<Option<ToolCatalog>>` pattern is used because `rusqlite::Connection` is `!Sync`.
+
 ### Error Handling
 
 All crates use `CoreError` from `the-one-core::error`. Library code uses `thiserror`, the binary (`the-one-mcp.rs`) uses `anyhow`. The `MemoryEngine` and `ProviderPool` return `Result<T, String>` internally — the broker maps these to `CoreError::Embedding` or `CoreError::Provider`.
@@ -79,4 +81,6 @@ All crates use `CoreError` from `the-one-core::error`. Library code uses `thiser
 - The `fastembed` model downloads on first use (~23-220MB depending on tier) and caches in `.fastembed_cache/` (gitignored)
 - `scripts/install.sh` handles full installation: download, config, CLI registration (Claude/Gemini/OpenCode/Codex)
 - `scripts/build.sh` is the build manager: `build`, `build --lean`, `dev`, `test`, `check`, `package`, `install`
-- Tool catalog: `tools/recommended.json` (universal), `~/.the-one/registry/custom-<cli>.json` (per-CLI)
+- Tool catalog: `tools/catalog/` (curated JSON), `~/.the-one/catalog.db` (SQLite with FTS5), Qdrant `the_one_tools` collection (semantic)
+- Custom tools: `~/.the-one/registry/custom.json` (shared), `custom-<cli>.json` (per-CLI)
+- 31 MCP tools (see `crates/the-one-mcp/src/transport/tools.rs`), 135 tests, 63 schemas, 28 catalog entries

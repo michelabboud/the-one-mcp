@@ -431,50 +431,88 @@ Creates `.the-one/` with manifests, SQLite database, and profile.
 
 Computes SHA-256 fingerprint of signal files. If unchanged, returns cached profile. If changed, recomputes and syncs document index.
 
-## 12. Custom Tools (Per-CLI)
+## 12. Tool Catalog
 
-The tool catalog supports three layers, loaded in order:
+The broker includes a curated catalog of developer tools, LSPs, and MCP servers — stored in SQLite with FTS5 full-text search and Qdrant semantic search.
+
+### Catalog Architecture
+
+```
+tools/catalog/                     Source of truth (JSON files on GitHub)
+├── languages/rust.json            16 Rust tools (LSP, build, test, QA, security)
+├── categories/security.json       4 cross-language security tools
+├── mcps/official.json             8 official MCP servers
+└── _schema.json                   Schema for tool entries
+
+~/.the-one/catalog.db              SQLite: imported tools + FTS5 + inventory + enabled state
+Qdrant: the_one_tools              Semantic search over tool descriptions
+```
+
+### How tool.suggest Works
+
+```
+User: "I need QA tools"
+  → LLM calls: tool.suggest({ category: "qa" })
+  → Broker: filter catalog by project languages (Rust) + category (qa)
+  → Group by install state:
+      ENABLED:     cargo-clippy (active)
+      AVAILABLE:   cargo-audit (installed, not enabled)
+      RECOMMENDED: cargo-deny, semgrep (not installed, with install commands)
+  → LLM decides which to enable/install/run
+```
+
+### How tool.search Works
+
+Three-tier fallback:
+1. **Qdrant semantic search** — "check deps for security issues" finds `cargo-audit` even though words don't match
+2. **SQLite FTS5** — keyword-based fallback when Qdrant unavailable
+3. **Registry fallback** — legacy capability registry
+
+### Tool Lifecycle MCP Tools
+
+| Tool | Description |
+|------|-------------|
+| `tool.suggest` | Project-aware recommendations grouped by state |
+| `tool.search` | Semantic or text search across catalog + user tools |
+| `tool.info` | Full metadata for a tool (description, install, run, risk, state) |
+| `tool.list` | List by state: enabled / available / recommended / all |
+| `tool.add` | Add a custom tool locally |
+| `tool.remove` | Remove user-added tool (cannot remove catalog tools) |
+| `tool.enable` | Activate for current CLI/project |
+| `tool.disable` | Deactivate for current CLI/project |
+| `tool.install` | Run install command, update inventory, auto-enable |
+| `tool.update` | Refresh catalog from GitHub + re-scan system inventory |
+
+### Custom Tools (Per-CLI)
 
 ```
 ~/.the-one/registry/
-├── recommended.json         # Universal baseline (auto-updated from GitHub)
-├── custom.json              # Your shared tools (loaded for ALL clients)
-├── custom-claude.json       # Loaded only when Claude Code connects
-├── custom-gemini.json       # Loaded only when Gemini CLI connects
-├── custom-opencode.json     # Loaded only when OpenCode connects
-└── custom-codex.json        # Loaded only when Codex connects
+├── custom.json              # Shared across all CLIs
+├── custom-claude.json       # Claude Code only
+├── custom-gemini.json       # Gemini CLI only
+├── custom-opencode.json     # OpenCode only
+└── custom-codex.json        # Codex only
 ```
 
-### How Client Detection Works
+Add tools via the `tool.add` MCP command (the LLM calls it), or edit the JSON files directly.
 
-The MCP protocol's `initialize` handshake includes a `clientInfo.name` field. The broker reads this to determine which CLI is connecting and loads the appropriate custom tools file.
+### Adding Tools via MCP
 
-### Adding Custom Tools
-
-Edit the appropriate file (JSON array of tool objects):
-
-```json
-[
-  {
-    "id": "my-custom-tool",
-    "title": "My Custom Tool",
-    "capability_type": "McpTool",
-    "family": "custom",
-    "visibility_mode": "Core",
-    "risk_level": "Low",
-    "description": "What this tool does"
-  }
-]
+The LLM can add tools on your behalf:
+```
+User: "Add my custom linter as a tool"
+LLM calls: tool.add({
+  id: "my-linter",
+  name: "My Linter",
+  description: "Custom linting for our project",
+  install_command: "npm install -g my-linter",
+  run_command: "my-linter check ."
+})
 ```
 
-- Tools you want in **all** CLIs: add to `custom.json`
-- Tools only for **Claude Code**: add to `custom-claude.json`
-- Tools only for **Gemini CLI**: add to `custom-gemini.json`
-- `recommended.json` is auto-updated from GitHub — don't edit it
+### Contributing Tools to the Catalog
 
-### Recommended Tools
-
-The `recommended.json` file ships with 15 pre-built tool definitions covering project management, RAG search, document CRUD, and observability. It's downloaded during installation and can be refreshed by re-running the installer.
+See [CONTRIBUTING.md](../../CONTRIBUTING.md) — submit via GitHub Issue or PR.
 
 ## 13. Policy and Approvals
 

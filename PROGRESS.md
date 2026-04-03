@@ -1,67 +1,122 @@
 # Progress Report
 
+## Current Version: v0.3.0
+
 ## Overall Status
 
-- All planned stages 0-9 plus the production overhaul have been implemented and verified.
-- Core build/test gates are green.
-- Version: v0.2.0
+All planned stages complete. Three major releases shipped:
+- **v0.1.0** — Initial workspace: 8 crates, 14 MCP tools, stub implementations
+- **v0.2.0** — Production overhaul: async broker, real embeddings, 3 transports, 24 tools
+- **v0.3.0** — Tool catalog: SQLite + Qdrant semantic search, tool lifecycle, 31 tools
 
-## Stage Progress
+Build/test gates: all green. 135 tests, 0 failures.
 
-- Stage 0: Program setup - complete
-- Stage 1: Core foundations - complete
-- Stage 2: Isolation/lifecycle - complete
-- Stage 3: Profiler/fingerprint - complete
-- Stage 4: Registry/policy/approvals - complete
-- Stage 5: Docs/RAG plane - complete (Qdrant HTTP + local fallback + keyword fallback)
-- Stage 6: Router rules+nano - complete (hard bounds + telemetry + fallback/error tracking)
-- Stage 7: MCP contracts/versioning - complete (`v1beta` schema set + invariants/tests)
-- Stage 8: Claude/Codex parity - complete (shared adapter core and parity coverage)
-- Stage 9: UI/ops/hardening - complete (embedded runtime, release gate, runbook)
+## Stats
 
-## Production Overhaul (v0.2.0)
+| Metric | v0.1.0 | v0.2.0 | v0.3.0 |
+|--------|--------|--------|--------|
+| MCP Tools | 14 | 24 | **31** |
+| Tests | 68 | 122 | **135** |
+| Rust LOC | 6,400 | ~10,000 | **~12,800** |
+| JSON Schemas | 33 | 49 | **63** |
+| Catalog Tools | — | — | **28** |
+| Platforms | 1 | 1 | **6** |
+| AI CLIs | 2 | 2 | **4** |
 
-- Task 1: Fix failing config test (temp-env isolation) - complete
-- Task 2: Add ConfigurableLimits to core - complete
-- Task 3: Extend config with embedding, nano pool, limits - complete
-- Task 4: Smart markdown chunker - complete
-- Task 5: Embedding providers (fastembed + API) - complete
-- Task 6: Async Qdrant HTTP backend - complete
-- Task 7: Refactor MemoryEngine to async - complete
-- Task 8: Provider health tracking - complete
-- Task 9: OpenAI-compatible provider + pool - complete
-- Task 10: Make Router async with provider pool - complete
-- Task 11: DocsManager with CRUD + soft-delete - complete
-- Task 12: Make McpBroker async - complete
-- Task 13: Update adapters and UI for async - complete
-- Task 14: JSON-RPC types + MCP tool definitions - complete
-- Task 15: Stdio transport - complete
-- Task 16: SSE transport - complete
-- Task 17: Streamable HTTP transport - complete
-- Task 18: Main binary with clap CLI - complete
-- Task 19: Update JSON schemas for new tools - complete
-- Task 20: Update admin UI with limits + provider health - complete
-- Task 21: Update release gate and CI - complete
-- Task 22: Update docs and version - complete
+## Stage Progress (v0.1.0)
 
-## Recent Milestones
+- Stage 0: Program setup — complete
+- Stage 1: Core foundations — complete
+- Stage 2: Isolation/lifecycle — complete
+- Stage 3: Profiler/fingerprint — complete
+- Stage 4: Registry/policy/approvals — complete
+- Stage 5: Docs/RAG plane — complete
+- Stage 6: Router rules+nano — complete
+- Stage 7: MCP contracts/versioning — complete
+- Stage 8: Claude/Codex parity — complete
+- Stage 9: UI/ops/hardening — complete
 
-- MCP JSON-RPC transport with stdio, SSE, and streamable HTTP
-- Production-grade RAG with fastembed-rs local embeddings and API embeddings
-- Managed documents system with CRUD, soft-delete, and auto-sync
-- Nano LLM provider pool with health tracking and routing policies
-- 24 total MCP tools with JSON Schema definitions
-- CLI binary with serve command and transport options
+## Production Overhaul (v0.2.0) — 23 Tasks
+
+All complete: async broker, fastembed embeddings, smart chunker, async Qdrant, provider pool with health tracking, managed documents with soft-delete, configurable limits, stdio/SSE/streamable HTTP transports, clap CLI binary.
+
+## Multi-CLI + Installer (v0.2.1)
+
+All complete: Claude Code + Gemini CLI + OpenCode + Codex auto-detection, tiered embedding models (fast/balanced/quality/multilingual), per-CLI custom tools, install.sh one-command installer, build.sh build manager, cross-platform release workflow.
+
+## Tool Catalog Integration (v0.3.0) — 7 Tasks
+
+- Cat-1: SQLite schema + error variant — complete
+- Cat-2: ToolCatalog struct with DB, import, query, scan — complete
+- Cat-3: API types for 6 new tools — complete
+- Cat-4: Broker methods for catalog tools — complete
+- Cat-5: Transport dispatch + catalog bootstrap — complete
+- Cat-6: Qdrant semantic search for tools — complete
+- Cat-7: Changelog, schemas, docs, validation, tag — complete
+
+## Key Features Delivered
+
+### Tool Catalog (v0.3.0)
+- SQLite catalog.db with FTS5 full-text search
+- Qdrant semantic search over tool descriptions (with FTS5 fallback)
+- System inventory scanning (auto-detects installed tools via `which`)
+- Per-CLI per-project tool enable/disable state
+- 7 new MCP tools: tool.add, tool.remove, tool.disable, tool.install, tool.info, tool.update, tool.list
+- Curated catalog seed: 16 Rust tools, 4 security tools, 8 official MCPs
+- tool.suggest returns grouped results: enabled / available / recommended
+- tool.search: semantic (Qdrant) → FTS5 → registry fallback chain
+
+### Production RAG (v0.2.0)
+- fastembed-rs with tiered models (384-1024 dim ONNX, offline, free)
+- OpenAI-compatible API embedding provider
+- Smart markdown chunker (heading-aware, paragraph-safe, code-block preserving)
+- Async Qdrant HTTP backend with collection management
+
+### Managed Documents (v0.2.0)
+- Full CRUD with soft-delete to .trash/
+- Auto-sync on project.refresh
+- docs.reindex for full re-ingestion
+
+### Multi-CLI Support (v0.2.1)
+- Claude Code, Gemini CLI, OpenCode, Codex
+- Per-CLI custom tools
+- One-command installer with auto-registration
+
+### MCP Transport (v0.2.0)
+- stdio (Claude Code, Gemini, OpenCode, Codex)
+- SSE (web clients)
+- Streamable HTTP (MCP spec compliant)
+
+### Nano LLM Provider Pool (v0.2.0)
+- Up to 5 OpenAI-compatible providers
+- Priority / round-robin / latency routing
+- Per-provider health tracking with cooldown
+- TCP pre-flight checks
 
 ## Verification Snapshot
 
-- `cargo fmt --check` - passing
-- `cargo clippy --workspace --all-targets -- -D warnings` - passing
-- `cargo test --workspace` - passing
-- `cargo build --release -p the-one-mcp --bin the-one-mcp` - passing
+- `cargo fmt --check` — passing
+- `cargo clippy --workspace --all-targets -- -D warnings` — passing
+- `cargo test --workspace` — **135 tests passing**
+- `cargo build --release -p the-one-mcp --bin the-one-mcp` — passing
+- `bash scripts/release-gate.sh` — passing
 
-## Next Optional Hardening (Non-blocking)
+## What's Next
 
-- Add UI auth/session controls for multi-user environments
-- Add broader load profile benchmarks and performance budgets
-- Expand OpenAPI detail coverage from summary paths to full operation schemas
+### Near-Term
+- Fill catalog: Python, JavaScript, Go, Java language files (~200 tools)
+- GitHub Pages tool submission form (low-friction community contributions)
+- GitHub Actions catalog validation + security checks
+- Pre-built catalog snapshots (SQLite + Qdrant) in GitHub Releases
+
+### Medium-Term
+- Community contribution pipeline (PR template, auto-validation)
+- Periodic security re-check cron (GitHub Advisory Database)
+- Tool ratings and trust level promotion
+- clientInfo-based tool loading (per-CLI catalog filtering)
+
+### Future
+- Web marketplace for browsing, rating, and reviewing tools
+- Community-curated "markets" (collections by use case)
+- Automated tool discovery from package registries
+- Install analytics and usage tracking

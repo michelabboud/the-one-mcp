@@ -81,10 +81,10 @@ the-one-mcp/
 └── .github/workflows/ci.yml   # CI pipeline
 ```
 
-## MCP Tool Surface (24 tools)
+## MCP Tool Surface (31 tools)
 
 ### Project Lifecycle
-- `project.init` — detect project, create state, index docs
+- `project.init` — detect project, create state, bootstrap catalog
 - `project.refresh` — re-fingerprint, sync docs, refresh profile
 - `project.profile.get` — return cached project profile
 
@@ -109,11 +109,20 @@ the-one-mcp/
 ### Re-index
 - `docs.reindex` — force full re-indexing
 
-### Tools
-- `tool.suggest` — suggest capabilities by query
-- `tool.search` — search capabilities
-- `tool.enable` — enable tool family
+### Tool Discovery
+- `tool.suggest` — project-aware recommendations grouped by state (enabled/available/recommended)
+- `tool.search` — semantic search (Qdrant) → FTS5 → registry fallback
+- `tool.info` — full metadata for a specific tool
+- `tool.list` — list by state: enabled, available, recommended, all
+
+### Tool Lifecycle
+- `tool.add` — add custom tool locally (user source)
+- `tool.remove` — remove user-added tool (cannot remove catalog tools)
+- `tool.enable` — activate for current CLI/project
+- `tool.disable` — deactivate for current CLI/project
+- `tool.install` — run install command, update inventory, auto-enable
 - `tool.run` — execute tool with approval gate
+- `tool.update` — refresh catalog from source + re-scan system
 
 ### Config & Observability
 - `config.export` — full config with limits
