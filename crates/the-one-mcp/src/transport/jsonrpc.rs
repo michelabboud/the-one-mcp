@@ -393,6 +393,52 @@ async fn dispatch_tool(broker: &McpBroker, tool_name: &str, args: Value) -> Resu
                 .map_err(|e| e.to_string())?;
             serde_json::to_value(result).map_err(|e| e.to_string())
         }
+        "tool.list" => {
+            let request = serde_json::from_value::<ToolListRequest>(args)
+                .map_err(|e| format!("invalid tool.list params: {e}"))?;
+            let result = broker.tool_list(request).await
+                .map_err(|e| e.to_string())?;
+            serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+        "tool.add" => {
+            let request = serde_json::from_value::<ToolAddRequest>(args)
+                .map_err(|e| format!("invalid tool.add params: {e}"))?;
+            let result = broker.tool_add(request).await
+                .map_err(|e| e.to_string())?;
+            serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+        "tool.remove" => {
+            let request = serde_json::from_value::<ToolRemoveRequest>(args)
+                .map_err(|e| format!("invalid tool.remove params: {e}"))?;
+            let result = broker.tool_remove(request).await
+                .map_err(|e| e.to_string())?;
+            serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+        "tool.disable" => {
+            let request = serde_json::from_value::<ToolDisableRequest>(args)
+                .map_err(|e| format!("invalid tool.disable params: {e}"))?;
+            let result = broker.tool_disable(request).await
+                .map_err(|e| e.to_string())?;
+            serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+        "tool.install" => {
+            let request = serde_json::from_value::<ToolInstallRequest>(args)
+                .map_err(|e| format!("invalid tool.install params: {e}"))?;
+            let result = broker.tool_install(request).await
+                .map_err(|e| e.to_string())?;
+            serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+        "tool.info" => {
+            let tool_id = args["tool_id"].as_str().ok_or("missing tool_id")?;
+            let result = broker.tool_info(ToolInfoRequest { tool_id: tool_id.to_string() }).await
+                .map_err(|e| e.to_string())?;
+            serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+        "tool.update" => {
+            let result = broker.tool_catalog_update().await
+                .map_err(|e| e.to_string())?;
+            serde_json::to_value(result).map_err(|e| e.to_string())
+        }
         "tool.suggest" => {
             let query = args["query"].as_str().ok_or("missing query")?;
             let max = args["max"].as_u64().unwrap_or(5) as usize;
@@ -533,7 +579,7 @@ mod tests {
         let response = dispatch(&broker, request).await;
         assert!(response.error.is_none());
         let tools = response.result.unwrap()["tools"].as_array().unwrap().len();
-        assert_eq!(tools, 24);
+        assert_eq!(tools, 31);
     }
 
     #[tokio::test]

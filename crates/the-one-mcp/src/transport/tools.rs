@@ -153,7 +153,71 @@ pub fn tool_definitions() -> Vec<Value> {
             },
             "required": ["project_root", "project_id"]
         })),
-        tool_def("tool.suggest", "Get capability suggestions matching a natural-language query.", json!({
+        tool_def("tool.list", "List tools by state: enabled, available, recommended, or all", json!({
+            "type": "object",
+            "properties": {
+                "state": { "type": "string", "description": "Filter by tool state", "enum": ["enabled", "available", "recommended", "all"] },
+                "project_root": { "type": "string", "description": "Absolute path to the project root" },
+                "project_id": { "type": "string", "description": "Unique project identifier" }
+            },
+            "required": ["project_root", "project_id"]
+        })),
+        tool_def("tool.add", "Add a custom tool to your local catalog", json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "string", "description": "Unique tool identifier" },
+                "name": { "type": "string", "description": "Human-readable tool name" },
+                "description": { "type": "string", "description": "Tool description" },
+                "install_command": { "type": "string", "description": "Shell command to install the tool" },
+                "run_command": { "type": "string", "description": "Shell command to run the tool" },
+                "tool_type": { "type": "string", "description": "Type of tool (default: cli)", "default": "cli" },
+                "category": { "type": "array", "items": { "type": "string" }, "description": "Tool categories" },
+                "languages": { "type": "array", "items": { "type": "string" }, "description": "Supported languages" },
+                "tags": { "type": "array", "items": { "type": "string" }, "description": "Searchable tags" },
+                "github": { "type": "string", "description": "GitHub repository URL" },
+                "risk_level": { "type": "string", "description": "Risk level: low, medium, high" },
+                "cli": { "type": "string", "description": "CLI binary name" }
+            },
+            "required": ["id", "name", "description", "install_command", "run_command"]
+        })),
+        tool_def("tool.remove", "Remove a user-added custom tool from the local catalog (cannot remove curated catalog tools)", json!({
+            "type": "object",
+            "properties": {
+                "tool_id": { "type": "string", "description": "Tool ID to remove" }
+            },
+            "required": ["tool_id"]
+        })),
+        tool_def("tool.disable", "Disable a tool for the current CLI and project", json!({
+            "type": "object",
+            "properties": {
+                "tool_id": { "type": "string", "description": "Tool ID to disable" },
+                "project_root": { "type": "string", "description": "Absolute path to the project root" },
+                "project_id": { "type": "string", "description": "Unique project identifier" }
+            },
+            "required": ["tool_id", "project_root", "project_id"]
+        })),
+        tool_def("tool.install", "Install a tool by running its install command, then auto-enable it", json!({
+            "type": "object",
+            "properties": {
+                "tool_id": { "type": "string", "description": "Tool ID to install" },
+                "project_root": { "type": "string", "description": "Absolute path to the project root" },
+                "project_id": { "type": "string", "description": "Unique project identifier" }
+            },
+            "required": ["tool_id", "project_root", "project_id"]
+        })),
+        tool_def("tool.info", "Get full metadata for a specific tool including install state and version", json!({
+            "type": "object",
+            "properties": {
+                "tool_id": { "type": "string", "description": "Tool ID to query" }
+            },
+            "required": ["tool_id"]
+        })),
+        tool_def("tool.update", "Refresh the tool catalog from source and re-scan system inventory", json!({
+            "type": "object",
+            "properties": {},
+            "required": []
+        })),
+        tool_def("tool.suggest", "Get smart tool recommendations filtered by project profile — returns tools grouped as enabled, available (installed but not enabled), and recommended (not installed)", json!({
             "type": "object",
             "properties": {
                 "query": { "type": "string", "description": "Natural-language description of desired capability" },
@@ -227,7 +291,7 @@ mod tests {
     #[test]
     fn test_tool_definitions_count() {
         let tools = tool_definitions();
-        assert_eq!(tools.len(), 24);
+        assert_eq!(tools.len(), 31); // 24 original + 7 new (tool.list, tool.add, tool.remove, tool.disable, tool.install, tool.info, tool.update)
     }
 
     #[test]

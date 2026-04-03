@@ -653,19 +653,23 @@ impl McpBroker {
         request: ToolInstallRequest,
     ) -> Result<ToolInstallResponse, CoreError> {
         self.ensure_catalog()?;
-        let guard = self.catalog.lock().map_err(|e| CoreError::Catalog(format!("catalog lock poisoned: {e}")))?;
-        let cat = guard
-            .as_ref()
-            .ok_or_else(|| CoreError::Catalog("catalog not initialized".into()))?;
 
-        let tool = cat
-            .get_tool(&request.tool_id)?
-            .ok_or_else(|| CoreError::Catalog(format!("tool not found: {}", request.tool_id)))?;
+        // Extract the install command while holding the lock, then drop it before await
+        let install_command = {
+            let guard = self.catalog.lock().map_err(|e| CoreError::Catalog(format!("catalog lock poisoned: {e}")))?;
+            let cat = guard
+                .as_ref()
+                .ok_or_else(|| CoreError::Catalog("catalog not initialized".into()))?;
+            let tool = cat
+                .get_tool(&request.tool_id)?
+                .ok_or_else(|| CoreError::Catalog(format!("tool not found: {}", request.tool_id)))?;
+            tool.install_command.clone()
+        };
 
-        // Execute install command
+        // Execute install command without holding the lock
         let output = tokio::process::Command::new("sh")
             .arg("-c")
-            .arg(&tool.install_command)
+            .arg(&install_command)
             .output()
             .await
             .map_err(|e| CoreError::Catalog(format!("install exec: {e}")))?;
@@ -675,6 +679,12 @@ impl McpBroker {
         let combined = format!("{stdout}{stderr}");
 
         if output.status.success() {
+            // Re-acquire lock for post-install operations
+            let guard = self.catalog.lock().map_err(|e| CoreError::Catalog(format!("catalog lock poisoned: {e}")))?;
+            let cat = guard
+                .as_ref()
+                .ok_or_else(|| CoreError::Catalog("catalog not initialized".into()))?;
+
             // Re-scan inventory to pick up the new binary
             let _ = cat.scan_system_inventory();
             // Auto-enable
