@@ -1,0 +1,35 @@
+{
+  "version": "0.1.0",
+  "last_updated": "2026-04-03",
+  "schema": "_schema.json",
+  "total_tools": 28,
+  "files": {
+    "languages": [
+      "languages/rust.json",
+      "languages/python.json",
+      "languages/javascript.json",
+      "languages/go.json",
+      "languages/java.json",
+      "languages/cpp.json"
+    ],
+    "categories": [
+      "categories/testing.json",
+      "categories/security.json",
+      "categories/ci-cd.json",
+      "categories/databases.json",
+      "categories/cloud.json",
+      "categories/automation.json",
+      "categories/docs.json",
+      "categories/monitoring.json"
+    ],
+    "mcps": [
+      "mcps/official.json",
+      "mcps/community.json"
+    ],
+    "markets": [
+      "markets/mcp-registry.json"
+    ]
+  },
+  "languages_supported": ["rust", "python", "javascript", "typescript", "go", "java", "cpp", "c", "ruby", "php", "swift", "kotlin", "scala", "elixir", "zig"],
+  "categories_supported": ["build", "test", "lint", "qa", "security", "ci-cd", "database", "cloud", "docs", "automation", "monitoring", "formatting", "debugging", "profiling", "coverage", "mutation-testing", "e2e", "api-testing", "load-testing"]
+}

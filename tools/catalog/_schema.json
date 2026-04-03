@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "the-one.tools.catalog.entry",
+  "type": "object",
+  "required": ["id", "name", "type", "category", "description", "install", "run"],
+  "properties": {
+    "id": { "type": "string", "description": "Unique tool identifier (lowercase, hyphenated)" },
+    "name": { "type": "string", "description": "Display name" },
+    "type": { "type": "string", "enum": ["cli", "lsp", "mcp", "framework", "library", "extension"] },
+    "category": { "type": "array", "items": { "type": "string" }, "description": "Categories: build, test, lint, qa, security, ci-cd, database, cloud, docs, automation, monitoring" },
+    "languages": { "type": "array", "items": { "type": "string" }, "description": "Supported languages (empty = language-agnostic)" },
+    "frameworks": { "type": "array", "items": { "type": "string" }, "description": "Relevant frameworks" },
+    "description": { "type": "string", "description": "One-line description for LLM consumption" },
+    "when_to_use": { "type": "string", "description": "When this tool is most useful (for LLM decision-making)" },
+    "what_it_finds": { "type": "string", "description": "What issues/results this tool produces" },
+    "install": {
+      "type": "object",
+      "properties": {
+        "command": { "type": "string" },
+        "package_manager": { "type": "string" },
+        "binary_name": { "type": "string" },
+        "url": { "type": "string" }
+      },
+      "required": ["command"]
+    },
+    "run": {
+      "type": "object",
+      "properties": {
+        "command": { "type": "string" },
+        "args_template": { "type": "string" },
+        "common_flags": { "type": "array", "items": { "type": "string" } }
+      },
+      "required": ["command"]
+    },
+    "risk_level": { "type": "string", "enum": ["low", "medium", "high"] },
+    "requires": { "type": "array", "items": { "type": "string" }, "description": "Prerequisites that must be installed" },
+    "cli_support": { "type": "array", "items": { "type": "string" }, "description": "Which CLIs support this tool" },
+    "tags": { "type": "array", "items": { "type": "string" } },
+    "github": { "type": "string" },
+    "docs": { "type": "string" },
+    "security": {
+      "type": "object",
+      "properties": {
+        "trust_level": { "type": "string", "enum": ["verified", "community", "unverified", "deprecated", "warning"] },
+        "last_checked": { "type": "string" }
+      }
+    }
+  }
+}
