@@ -8,8 +8,15 @@ license.workspace = true
 default = ["embed-swagger"]
 embed-swagger = []
 
+[[bin]]
+name = "the-one-mcp"
+path = "src/bin/the-one-mcp.rs"
+
 [dependencies]
+anyhow.workspace = true
 async-trait.workspace = true
+axum = "0.8"
+clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 the-one-core = { path = "../the-one-core" }
@@ -17,6 +24,7 @@ the-one-memory = { path = "../the-one-memory" }
 the-one-registry = { path = "../the-one-registry" }
 the-one-router = { path = "../the-one-router" }
 tokio.workspace = true
+tokio-stream = { version = "0.1", features = ["sync"] }
 tracing.workspace = true
 
 [dev-dependencies]
