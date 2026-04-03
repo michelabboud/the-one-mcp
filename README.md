@@ -1,6 +1,7 @@
 # the-one-mcp
 
-> **This project is under active development and testing.** APIs, tool definitions, and catalog formats may change between releases. Feedback and contributions welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).
+> [!WARNING]
+> **This project is under active development and testing.** APIs, tool definitions, and catalog formats may change between releases. Not recommended for production use yet. Feedback and contributions welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 A production-grade Rust MCP (Model Context Protocol) broker that gives AI coding assistants project-aware memory, semantic document search, a curated tool catalog with thousands of developer tools, and intelligent request routing — while keeping token usage minimal.
 
