@@ -1,3 +1,4 @@
+pub mod health;
 pub mod providers;
 
 use std::time::Instant;
