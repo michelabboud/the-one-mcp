@@ -2,6 +2,25 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.3.0] - 2026-04-03
+
+### Added
+- Tool catalog system with SQLite storage and FTS5 full-text search
+- Qdrant semantic search for tool discovery (with FTS5 fallback)
+- System inventory scanning (auto-detects installed tools via `which`)
+- Per-CLI tool enable/disable state tracking
+- 7 new MCP tools: tool.add, tool.remove, tool.disable, tool.install, tool.info, tool.update, tool.list
+- 31 total MCP tools with JSON Schema definitions
+- Catalog seed: 16 Rust tools, 4 security tools, 8 MCPs
+- Catalog changelog and diff-based update mechanism
+- Tool entries with LLM-optimized metadata (when_to_use, what_it_finds)
+- tool.suggest now returns grouped results: enabled, available, recommended
+- tool.search uses semantic search (Qdrant) with FTS5 fallback
+
+### Changed
+- tool.suggest filters by project profile (languages, frameworks)
+- tool.search tries Qdrant semantic search first, then FTS5, then registry fallback
+
 ## [0.2.1] - 2026-04-03
 
 ### Added

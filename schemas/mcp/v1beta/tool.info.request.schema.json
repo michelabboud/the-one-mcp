@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "the-one.mcp.v1beta.tool.info.request",
+  "title": "tool.info request",
+  "type": "object",
+  "required": ["tool_id"],
+  "properties": {
+    "tool_id": { "type": "string", "description": "ID of the tool to get info for" }
+  },
+  "additionalProperties": false
+}

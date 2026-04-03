@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "the-one.mcp.v1beta.tool.install.request",
+  "title": "tool.install request",
+  "type": "object",
+  "required": ["tool_id", "project_root", "project_id"],
+  "properties": {
+    "tool_id": { "type": "string", "description": "ID of the tool to install" },
+    "project_root": { "type": "string", "description": "Project root path" },
+    "project_id": { "type": "string", "description": "Project identifier" }
+  },
+  "additionalProperties": false
+}

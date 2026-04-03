@@ -31,7 +31,7 @@ bash scripts/install.sh --local ./target/release
 | **OpenCode** | `opencode --version` | `opencode mcp add --name the-one-mcp --command ~/.the-one/bin/the-one-mcp --args serve` |
 | **Codex** | `codex --version` | Add to Codex MCP config |
 
-All four use the same MCP server — same 24 tools, same protocol. The server reads `clientInfo` from the MCP handshake to load client-specific custom tools.
+All four use the same MCP server — same 31 tools, same protocol. The server reads `clientInfo` from the MCP handshake to load client-specific custom tools.
 
 ## Why
 
@@ -82,7 +82,7 @@ Plus 15+ additional models and quantized variants. Or use any OpenAI-compatible 
 
 Config: `"embedding_model": "balanced"`
 
-## 24 MCP Tools
+## 31 MCP Tools
 
 | Category | Tools |
 |----------|-------|
@@ -92,6 +92,7 @@ Config: `"embedding_model": "balanced"`
 | **Trash** | `docs.trash.list`, `docs.trash.restore`, `docs.trash.empty` |
 | **Re-index** | `docs.reindex` |
 | **Tools** | `tool.suggest`, `tool.search`, `tool.enable`, `tool.run` |
+| **Tool Lifecycle** | `tool.add`, `tool.remove`, `tool.disable`, `tool.install`, `tool.info`, `tool.update`, `tool.list` |
 | **Config** | `config.export`, `config.update` |
 | **Observability** | `metrics.snapshot`, `audit.events` |
 

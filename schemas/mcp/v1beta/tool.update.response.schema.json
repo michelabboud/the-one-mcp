@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "the-one.mcp.v1beta.tool.update.response",
+  "title": "tool.update response",
+  "type": "object",
+  "required": ["tools_added", "tools_updated", "system_tools_found"],
+  "properties": {
+    "catalog_version_before": { "type": "string", "description": "Catalog version before update" },
+    "catalog_version_after": { "type": "string", "description": "Catalog version after update" },
+    "tools_added": { "type": "integer", "description": "Number of tools added" },
+    "tools_updated": { "type": "integer", "description": "Number of tools updated" },
+    "system_tools_found": { "type": "integer", "description": "Number of system tools found via inventory scan" }
+  },
+  "additionalProperties": false
+}

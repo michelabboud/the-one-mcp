@@ -1,0 +1,11 @@
+[
+  {
+    "version": 1,
+    "date": "2026-04-03",
+    "added": [],
+    "updated": [],
+    "removed": [],
+    "deprecated": [],
+    "notes": "Initial catalog release with 28 tools (16 Rust, 4 security, 8 MCPs)"
+  }
+]

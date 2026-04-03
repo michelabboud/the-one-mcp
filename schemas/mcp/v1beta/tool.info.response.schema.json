@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "the-one.mcp.v1beta.tool.info.response",
+  "title": "tool.info response",
+  "type": "object",
+  "required": ["id", "name", "tool_type", "description", "install_command", "run_command"],
+  "properties": {
+    "id": { "type": "string" },
+    "name": { "type": "string" },
+    "tool_type": { "type": "string" },
+    "category": { "type": "array", "items": { "type": "string" } },
+    "languages": { "type": "array", "items": { "type": "string" } },
+    "description": { "type": "string" },
+    "when_to_use": { "type": "string" },
+    "what_it_finds": { "type": "string" },
+    "install_command": { "type": "string" },
+    "run_command": { "type": "string" },
+    "risk_level": { "type": "string" },
+    "tags": { "type": "array", "items": { "type": "string" } },
+    "github": { "type": "string" },
+    "trust_level": { "type": "string" },
+    "source": { "type": "string" },
+    "state": { "type": "string" }
+  },
+  "additionalProperties": false
+}

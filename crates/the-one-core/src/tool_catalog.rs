@@ -193,11 +193,7 @@ impl ToolCatalog {
                      updated_at=excluded.updated_at",
             )?;
             for e in entries {
-                let install_cmd = e
-                    .install
-                    .as_ref()
-                    .map(|i| i.command.as_str())
-                    .unwrap_or("");
+                let install_cmd = e.install.as_ref().map(|i| i.command.as_str()).unwrap_or("");
                 let run_cmd = e.run.as_ref().map(|r| r.command.as_str()).unwrap_or("");
                 stmt.execute(params![
                     e.id,
@@ -225,11 +221,7 @@ impl ToolCatalog {
     }
 
     /// Read a JSON file containing an array of `CatalogToolEntry` and import.
-    pub fn import_from_file(
-        &self,
-        path: &Path,
-        source: &str,
-    ) -> Result<usize, CoreError> {
+    pub fn import_from_file(&self, path: &Path, source: &str) -> Result<usize, CoreError> {
         let data = std::fs::read_to_string(path)?;
         let entries: Vec<CatalogToolEntry> = serde_json::from_str(&data)?;
         self.import_tools(&entries, source)
@@ -258,9 +250,9 @@ impl ToolCatalog {
     // -- Queries --------------------------------------------------------------
 
     pub fn tool_count(&self) -> Result<u64, CoreError> {
-        let c: i64 =
-            self.conn
-                .query_row("SELECT COUNT(*) FROM tools", [], |r| r.get(0))?;
+        let c: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM tools", [], |r| r.get(0))?;
         Ok(c as u64)
     }
 
@@ -431,11 +423,7 @@ impl ToolCatalog {
     }
 
     /// Full-text search over the FTS5 index.
-    pub fn search_fts(
-        &self,
-        query: &str,
-        limit: u32,
-    ) -> Result<Vec<SearchResult>, CoreError> {
+    pub fn search_fts(&self, query: &str, limit: u32) -> Result<Vec<SearchResult>, CoreError> {
         // Sanitise the query for FTS5 — wrap each token in double-quotes.
         let sanitised: String = query
             .split_whitespace()
@@ -475,9 +463,7 @@ impl ToolCatalog {
     /// For each tool in the catalog, run `which <binary_name>` and record
     /// path + version in the system_inventory table.
     pub fn scan_system_inventory(&self) -> Result<u64, CoreError> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT id, install_command FROM tools")?;
+        let mut stmt = self.conn.prepare("SELECT id, install_command FROM tools")?;
         let tool_ids: Vec<(String, String)> = stmt
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
             .filter_map(|r| r.ok())
@@ -569,25 +555,32 @@ impl ToolCatalog {
     /// The text combines description, when_to_use, what_it_finds, and tags
     /// to create a rich embedding target for semantic search.
     pub fn all_tool_descriptions(&self) -> Result<Vec<(String, String)>, CoreError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, description, when_to_use, what_it_finds, tags FROM tools"
-        ).map_err(|e| CoreError::Catalog(format!("all_tool_descriptions prepare: {e}")))?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, description, when_to_use, what_it_finds, tags FROM tools")
+            .map_err(|e| CoreError::Catalog(format!("all_tool_descriptions prepare: {e}")))?;
 
-        let rows = stmt.query_map([], |row| {
-            let id: String = row.get(0)?;
-            let description: String = row.get(1)?;
-            let when_to_use: String = row.get::<_, Option<String>>(2)?.unwrap_or_default();
-            let what_it_finds: String = row.get::<_, Option<String>>(3)?.unwrap_or_default();
-            let tags_json: String = row.get::<_, Option<String>>(4)?.unwrap_or_else(|| "[]".to_string());
-            let tags: Vec<String> = serde_json::from_str(&tags_json).unwrap_or_default();
+        let rows = stmt
+            .query_map([], |row| {
+                let id: String = row.get(0)?;
+                let description: String = row.get(1)?;
+                let when_to_use: String = row.get::<_, Option<String>>(2)?.unwrap_or_default();
+                let what_it_finds: String = row.get::<_, Option<String>>(3)?.unwrap_or_default();
+                let tags_json: String = row
+                    .get::<_, Option<String>>(4)?
+                    .unwrap_or_else(|| "[]".to_string());
+                let tags: Vec<String> = serde_json::from_str(&tags_json).unwrap_or_default();
 
-            let text = format!(
-                "{description} {when_to_use} {what_it_finds} {}",
-                tags.join(" ")
-            ).trim().to_string();
+                let text = format!(
+                    "{description} {when_to_use} {what_it_finds} {}",
+                    tags.join(" ")
+                )
+                .trim()
+                .to_string();
 
-            Ok((id, text))
-        }).map_err(|e| CoreError::Catalog(format!("all_tool_descriptions query: {e}")))?;
+                Ok((id, text))
+            })
+            .map_err(|e| CoreError::Catalog(format!("all_tool_descriptions query: {e}")))?;
 
         let mut results = Vec::new();
         for row in rows.flatten() {
@@ -789,14 +782,7 @@ mod tests {
         cat.import_tools(&entries, "catalog").unwrap();
 
         let result = cat
-            .suggest(
-                &["rust".to_string()],
-                None,
-                None,
-                "claude",
-                "/tmp/proj",
-                10,
-            )
+            .suggest(&["rust".to_string()], None, None, "claude", "/tmp/proj", 10)
             .unwrap();
 
         // Only the rust tool should appear.
@@ -888,7 +874,8 @@ mod tests {
     fn test_all_tool_descriptions() {
         let tmp = tempfile::tempdir().unwrap();
         let cat = test_catalog(tmp.path());
-        cat.import_tools(&[sample_tool("my-tool", "rust")], "catalog").unwrap();
+        cat.import_tools(&[sample_tool("my-tool", "rust")], "catalog")
+            .unwrap();
         let descs = cat.all_tool_descriptions().unwrap();
         assert_eq!(descs.len(), 1);
         assert_eq!(descs[0].0, "my-tool");
@@ -918,26 +905,23 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let cat = ToolCatalog::open(tmp.path()).unwrap();
         let entries = vec![
-            sample_entry("tool-enabled", "Enabled Tool", vec!["rust"], vec!["security"]),
+            sample_entry(
+                "tool-enabled",
+                "Enabled Tool",
+                vec!["rust"],
+                vec!["security"],
+            ),
             sample_entry("tool-other", "Other Tool", vec!["rust"], vec!["security"]),
         ];
         cat.import_tools(&entries, "catalog").unwrap();
         cat.enable_tool("tool-enabled", "claude", "/proj").unwrap();
 
         let result = cat
-            .suggest(
-                &["rust".to_string()],
-                None,
-                None,
-                "claude",
-                "/proj",
-                10,
-            )
+            .suggest(&["rust".to_string()], None, None, "claude", "/proj", 10)
             .unwrap();
 
         let enabled_ids: Vec<&str> = result.enabled.iter().map(|s| s.id.as_str()).collect();
-        let recommended_ids: Vec<&str> =
-            result.recommended.iter().map(|s| s.id.as_str()).collect();
+        let recommended_ids: Vec<&str> = result.recommended.iter().map(|s| s.id.as_str()).collect();
 
         assert!(
             enabled_ids.contains(&"tool-enabled"),

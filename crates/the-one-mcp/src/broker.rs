@@ -569,13 +569,8 @@ impl McpBroker {
 
     fn find_catalog_data_dir() -> Option<PathBuf> {
         let global = the_one_core::config::global_state_dir_or_default();
-        let candidates = [
-            PathBuf::from("tools/catalog"),
-            global.join("catalog"),
-        ];
-        candidates
-            .into_iter()
-            .find(|p| p.exists() && p.is_dir())
+        let candidates = [PathBuf::from("tools/catalog"), global.join("catalog")];
+        candidates.into_iter().find(|p| p.exists() && p.is_dir())
     }
 
     // -----------------------------------------------------------------------
@@ -583,12 +578,12 @@ impl McpBroker {
     // -----------------------------------------------------------------------
 
     #[instrument(skip_all)]
-    pub async fn tool_add(
-        &self,
-        request: ToolAddRequest,
-    ) -> Result<ToolAddResponse, CoreError> {
+    pub async fn tool_add(&self, request: ToolAddRequest) -> Result<ToolAddResponse, CoreError> {
         self.ensure_catalog()?;
-        let guard = self.catalog.lock().map_err(|e| CoreError::Catalog(format!("catalog lock poisoned: {e}")))?;
+        let guard = self
+            .catalog
+            .lock()
+            .map_err(|e| CoreError::Catalog(format!("catalog lock poisoned: {e}")))?;
         let cat = guard
             .as_ref()
             .ok_or_else(|| CoreError::Catalog("catalog not initialized".into()))?;
@@ -627,7 +622,10 @@ impl McpBroker {
         request: ToolRemoveRequest,
     ) -> Result<ToolRemoveResponse, CoreError> {
         self.ensure_catalog()?;
-        let guard = self.catalog.lock().map_err(|e| CoreError::Catalog(format!("catalog lock poisoned: {e}")))?;
+        let guard = self
+            .catalog
+            .lock()
+            .map_err(|e| CoreError::Catalog(format!("catalog lock poisoned: {e}")))?;
         let cat = guard
             .as_ref()
             .ok_or_else(|| CoreError::Catalog("catalog not initialized".into()))?;
@@ -641,7 +639,10 @@ impl McpBroker {
         request: ToolDisableRequest,
     ) -> Result<ToolDisableResponse, CoreError> {
         self.ensure_catalog()?;
-        let guard = self.catalog.lock().map_err(|e| CoreError::Catalog(format!("catalog lock poisoned: {e}")))?;
+        let guard = self
+            .catalog
+            .lock()
+            .map_err(|e| CoreError::Catalog(format!("catalog lock poisoned: {e}")))?;
         let cat = guard
             .as_ref()
             .ok_or_else(|| CoreError::Catalog("catalog not initialized".into()))?;
@@ -658,13 +659,16 @@ impl McpBroker {
 
         // Extract the install command while holding the lock, then drop it before await
         let install_command = {
-            let guard = self.catalog.lock().map_err(|e| CoreError::Catalog(format!("catalog lock poisoned: {e}")))?;
+            let guard = self
+                .catalog
+                .lock()
+                .map_err(|e| CoreError::Catalog(format!("catalog lock poisoned: {e}")))?;
             let cat = guard
                 .as_ref()
                 .ok_or_else(|| CoreError::Catalog("catalog not initialized".into()))?;
-            let tool = cat
-                .get_tool(&request.tool_id)?
-                .ok_or_else(|| CoreError::Catalog(format!("tool not found: {}", request.tool_id)))?;
+            let tool = cat.get_tool(&request.tool_id)?.ok_or_else(|| {
+                CoreError::Catalog(format!("tool not found: {}", request.tool_id))
+            })?;
             tool.install_command.clone()
         };
 
@@ -682,7 +686,10 @@ impl McpBroker {
 
         if output.status.success() {
             // Re-acquire lock for post-install operations
-            let guard = self.catalog.lock().map_err(|e| CoreError::Catalog(format!("catalog lock poisoned: {e}")))?;
+            let guard = self
+                .catalog
+                .lock()
+                .map_err(|e| CoreError::Catalog(format!("catalog lock poisoned: {e}")))?;
             let cat = guard
                 .as_ref()
                 .ok_or_else(|| CoreError::Catalog("catalog not initialized".into()))?;
@@ -717,7 +724,10 @@ impl McpBroker {
         request: ToolInfoRequest,
     ) -> Result<Option<the_one_core::tool_catalog::ToolFullInfo>, CoreError> {
         self.ensure_catalog()?;
-        let guard = self.catalog.lock().map_err(|e| CoreError::Catalog(format!("catalog lock poisoned: {e}")))?;
+        let guard = self
+            .catalog
+            .lock()
+            .map_err(|e| CoreError::Catalog(format!("catalog lock poisoned: {e}")))?;
         let cat = guard
             .as_ref()
             .ok_or_else(|| CoreError::Catalog("catalog not initialized".into()))?;
@@ -727,7 +737,10 @@ impl McpBroker {
     #[instrument(skip_all)]
     pub async fn tool_catalog_update(&self) -> Result<ToolUpdateResponse, CoreError> {
         self.ensure_catalog()?;
-        let guard = self.catalog.lock().map_err(|e| CoreError::Catalog(format!("catalog lock poisoned: {e}")))?;
+        let guard = self
+            .catalog
+            .lock()
+            .map_err(|e| CoreError::Catalog(format!("catalog lock poisoned: {e}")))?;
         let cat = guard
             .as_ref()
             .ok_or_else(|| CoreError::Catalog("catalog not initialized".into()))?;
@@ -756,12 +769,12 @@ impl McpBroker {
     }
 
     #[instrument(skip_all)]
-    pub async fn tool_list(
-        &self,
-        request: ToolListRequest,
-    ) -> Result<ToolListResponse, CoreError> {
+    pub async fn tool_list(&self, request: ToolListRequest) -> Result<ToolListResponse, CoreError> {
         self.ensure_catalog()?;
-        let guard = self.catalog.lock().map_err(|e| CoreError::Catalog(format!("catalog lock poisoned: {e}")))?;
+        let guard = self
+            .catalog
+            .lock()
+            .map_err(|e| CoreError::Catalog(format!("catalog lock poisoned: {e}")))?;
         let cat = guard
             .as_ref()
             .ok_or_else(|| CoreError::Catalog("catalog not initialized".into()))?;
@@ -832,12 +845,14 @@ impl McpBroker {
         config: &AppConfig,
     ) -> Result<Box<dyn the_one_memory::embeddings::EmbeddingProvider>, String> {
         if config.embedding_provider == "api" {
-            Ok(Box::new(the_one_memory::embeddings::ApiEmbeddingProvider::new(
-                config.embedding_api_base_url.as_deref().unwrap_or(""),
-                config.embedding_api_key.as_deref(),
-                &config.embedding_model,
-                config.embedding_dimensions,
-            )))
+            Ok(Box::new(
+                the_one_memory::embeddings::ApiEmbeddingProvider::new(
+                    config.embedding_api_base_url.as_deref().unwrap_or(""),
+                    config.embedding_api_key.as_deref(),
+                    &config.embedding_model,
+                    config.embedding_dimensions,
+                ),
+            ))
         } else {
             Ok(Box::new(
                 the_one_memory::embeddings::FastEmbedProvider::new(&config.embedding_model)
@@ -847,7 +862,10 @@ impl McpBroker {
     }
 
     async fn ensure_tools_embedded(&self) {
-        if self.tools_embedded.load(std::sync::atomic::Ordering::Relaxed) {
+        if self
+            .tools_embedded
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
             return;
         }
 
@@ -906,21 +924,21 @@ impl McpBroker {
                     .await
                     .map_err(|e| format!("embed: {e}"))?;
 
-                let points: Vec<the_one_memory::qdrant::QdrantPoint> =
-                    descriptions[batch_start..batch_end]
-                        .iter()
-                        .zip(vectors)
-                        .map(|((id, _), vector)| the_one_memory::qdrant::QdrantPoint {
-                            id: id.clone(),
-                            vector,
-                            payload: the_one_memory::qdrant::QdrantPayload {
-                                chunk_id: id.clone(),
-                                source_path: String::new(),
-                                heading: String::new(),
-                                chunk_index: 0,
-                            },
-                        })
-                        .collect();
+                let points: Vec<the_one_memory::qdrant::QdrantPoint> = descriptions
+                    [batch_start..batch_end]
+                    .iter()
+                    .zip(vectors)
+                    .map(|((id, _), vector)| the_one_memory::qdrant::QdrantPoint {
+                        id: id.clone(),
+                        vector,
+                        payload: the_one_memory::qdrant::QdrantPayload {
+                            chunk_id: id.clone(),
+                            source_path: String::new(),
+                            heading: String::new(),
+                            chunk_index: 0,
+                        },
+                    })
+                    .collect();
 
                 qdrant
                     .upsert_points(points)
@@ -976,9 +994,7 @@ impl McpBroker {
 
         // Map Qdrant results back to SearchResult using catalog DB
         let guard = self.catalog.lock().map_err(|e| format!("lock: {e}"))?;
-        let cat = guard
-            .as_ref()
-            .ok_or("catalog not initialized")?;
+        let cat = guard.as_ref().ok_or("catalog not initialized")?;
 
         let mut results = Vec::new();
         for qr in qdrant_results {

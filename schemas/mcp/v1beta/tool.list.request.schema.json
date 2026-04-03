@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "the-one.mcp.v1beta.tool.list.request",
+  "title": "tool.list request",
+  "type": "object",
+  "required": ["project_root", "project_id"],
+  "properties": {
+    "state": { "type": "string", "description": "Filter by state (enabled, disabled, available)" },
+    "project_root": { "type": "string", "description": "Project root path" },
+    "project_id": { "type": "string", "description": "Project identifier" }
+  },
+  "additionalProperties": false
+}

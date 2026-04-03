@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "the-one.mcp.v1beta.tool.install.response",
+  "title": "tool.install response",
+  "type": "object",
+  "required": ["installed", "auto_enabled", "output"],
+  "properties": {
+    "installed": { "type": "boolean", "description": "Whether installation succeeded" },
+    "binary_path": { "type": "string", "description": "Path to installed binary" },
+    "version": { "type": "string", "description": "Installed version" },
+    "auto_enabled": { "type": "boolean", "description": "Whether tool was auto-enabled" },
+    "output": { "type": "string", "description": "Install command output" }
+  },
+  "additionalProperties": false
+}

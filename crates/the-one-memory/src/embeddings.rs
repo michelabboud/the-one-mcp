@@ -29,9 +29,7 @@ pub trait EmbeddingProvider: Send + Sync {
 pub fn resolve_model(name: &str) -> (fastembed::EmbeddingModel, usize) {
     match name.to_ascii_lowercase().trim() {
         // ── Tier aliases ──
-        "fast" | "default" | "all-minilm-l6-v2" => {
-            (fastembed::EmbeddingModel::AllMiniLML6V2, 384)
-        }
+        "fast" | "default" | "all-minilm-l6-v2" => (fastembed::EmbeddingModel::AllMiniLML6V2, 384),
         "balanced" | "bge-base-en-v1.5" => (fastembed::EmbeddingModel::BGEBaseENV15, 768),
         "quality" | "bge-large-en-v1.5" => (fastembed::EmbeddingModel::BGELargeENV15, 1024),
         "multilingual" | "multilingual-e5-large" => {
@@ -48,16 +46,12 @@ pub fn resolve_model(name: &str) -> (fastembed::EmbeddingModel, usize) {
         "gte-large-en-v1.5" => (fastembed::EmbeddingModel::GTELargeENV15, 1024),
         "multilingual-e5-small" => (fastembed::EmbeddingModel::MultilingualE5Small, 384),
         "multilingual-e5-base" => (fastembed::EmbeddingModel::MultilingualE5Base, 768),
-        "paraphrase-ml-minilm-l12-v2" => {
-            (fastembed::EmbeddingModel::ParaphraseMLMiniLML12V2, 384)
-        }
+        "paraphrase-ml-minilm-l12-v2" => (fastembed::EmbeddingModel::ParaphraseMLMiniLML12V2, 384),
 
         // ── Quantized variants (smaller download, slight quality loss) ──
         "fast-q" | "all-minilm-l6-v2-q" => (fastembed::EmbeddingModel::AllMiniLML6V2Q, 384),
         "balanced-q" | "bge-base-en-v1.5-q" => (fastembed::EmbeddingModel::BGEBaseENV15Q, 768),
-        "quality-q" | "bge-large-en-v1.5-q" => {
-            (fastembed::EmbeddingModel::BGELargeENV15Q, 1024)
-        }
+        "quality-q" | "bge-large-en-v1.5-q" => (fastembed::EmbeddingModel::BGELargeENV15Q, 1024),
 
         // ── Default fallback ──
         _ => {
