@@ -1,3 +1,33 @@
+# Build
 /target
+/dist
+
+# Project state (per-project, not committed)
 /.the-one
+
+# Embedding model cache
 .fastembed_cache/
+
+# Secrets — never commit these
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+secrets/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Catalog database (local, rebuilt from catalog JSON)
+catalog.db
