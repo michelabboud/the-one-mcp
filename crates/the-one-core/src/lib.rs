@@ -1,6 +1,7 @@
 pub mod backup;
 pub mod config;
 pub mod contracts;
+pub mod docs_manager;
 pub mod error;
 pub mod limits;
 pub mod manifests;
