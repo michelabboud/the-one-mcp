@@ -1,4 +1,5 @@
 pub mod health;
+pub mod provider_pool;
 pub mod providers;
 
 use std::time::Instant;
