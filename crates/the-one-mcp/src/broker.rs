@@ -145,14 +145,14 @@ impl McpBroker {
         // Determine embedding + qdrant setup from config
         if config.embedding_provider == "api" {
             // API embeddings + Qdrant
-            MemoryEngine::new_api(
-                config.embedding_api_base_url.as_deref().unwrap_or(""),
-                config.embedding_api_key.as_deref(),
-                &config.embedding_model,
-                config.embedding_dimensions,
-                &config.qdrant_url,
+            MemoryEngine::new_api(the_one_memory::ApiEngineConfig {
+                embedding_base_url: config.embedding_api_base_url.as_deref().unwrap_or(""),
+                embedding_api_key: config.embedding_api_key.as_deref(),
+                embedding_model: &config.embedding_model,
+                embedding_dims: config.embedding_dimensions,
+                qdrant_url: &config.qdrant_url,
                 project_id,
-                QdrantOptions {
+                qdrant_options: QdrantOptions {
                     api_key: config.qdrant_api_key.clone(),
                     ca_cert_path: config
                         .qdrant_ca_cert_path
@@ -161,7 +161,7 @@ impl McpBroker {
                     tls_insecure: config.qdrant_tls_insecure,
                 },
                 max_chunk_tokens,
-            )
+            })
             .map_err(CoreError::Embedding)
         } else {
             // Local fastembed

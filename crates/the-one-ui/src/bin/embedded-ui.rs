@@ -13,7 +13,7 @@ async fn main() {
         .expect("THE_ONE_UI_BIND/ui_bind must be host:port");
 
     let admin = Arc::new(AdminUi::new(McpBroker::new()));
-    let _ = admin.trigger_project_init(&resolved.project_root, &resolved.project_id);
+    let _ = admin.trigger_project_init(&resolved.project_root, &resolved.project_id).await;
 
     let runtime =
         start_embedded_ui_runtime(admin, resolved.project_root, resolved.project_id, bind_addr)

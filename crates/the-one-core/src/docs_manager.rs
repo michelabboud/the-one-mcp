@@ -308,11 +308,11 @@ impl DocsManager {
             let path = entry.path();
             if path.is_dir() {
                 // Skip .trash when walking managed root
-                if path.file_name().map_or(false, |n| n == ".trash") {
+                if path.file_name().is_some_and(|n| n == ".trash") {
                     continue;
                 }
                 self.walk_dir(&path, root, entries)?;
-            } else if path.extension().map_or(false, |ext| ext == "md") {
+            } else if path.extension().is_some_and(|ext| ext == "md") {
                 let relative = path
                     .strip_prefix(root)
                     .map_err(|e| CoreError::Document(format!("path strip error: {e}")))?

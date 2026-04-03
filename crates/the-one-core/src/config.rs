@@ -63,20 +63,15 @@ pub struct NanoProviderEntry {
     pub enabled: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NanoRoutingPolicy {
+    #[default]
     #[serde(rename = "priority")]
     Priority,
     #[serde(rename = "round_robin")]
     RoundRobin,
     #[serde(rename = "latency")]
     Latency,
-}
-
-impl Default for NanoRoutingPolicy {
-    fn default() -> Self {
-        Self::Priority
-    }
 }
 
 #[derive(Debug, Clone, Default)]

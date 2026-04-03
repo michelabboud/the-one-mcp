@@ -14,6 +14,18 @@ use crate::qdrant::{AsyncQdrantBackend, QdrantOptions, QdrantPayload, QdrantPoin
 // Public types
 // ---------------------------------------------------------------------------
 
+/// Configuration for creating a MemoryEngine with API embeddings + Qdrant.
+pub struct ApiEngineConfig<'a> {
+    pub embedding_base_url: &'a str,
+    pub embedding_api_key: Option<&'a str>,
+    pub embedding_model: &'a str,
+    pub embedding_dims: usize,
+    pub qdrant_url: &'a str,
+    pub project_id: &'a str,
+    pub qdrant_options: QdrantOptions,
+    pub max_chunk_tokens: usize,
+}
+
 #[derive(Debug, Clone)]
 pub struct MemorySearchRequest {
     pub query: String,
@@ -80,23 +92,15 @@ impl MemoryEngine {
     }
 
     /// Create with API embeddings + Qdrant HTTP backend.
-    pub fn new_api(
-        embedding_base_url: &str,
-        embedding_api_key: Option<&str>,
-        embedding_model: &str,
-        embedding_dims: usize,
-        qdrant_url: &str,
-        project_id: &str,
-        qdrant_options: QdrantOptions,
-        max_chunk_tokens: usize,
-    ) -> Result<Self, String> {
+    pub fn new_api(config: ApiEngineConfig<'_>) -> Result<Self, String> {
         let provider = crate::embeddings::ApiEmbeddingProvider::new(
-            embedding_base_url,
-            embedding_api_key,
-            embedding_model,
-            embedding_dims,
+            config.embedding_base_url,
+            config.embedding_api_key,
+            config.embedding_model,
+            config.embedding_dims,
         );
-        let qdrant = AsyncQdrantBackend::new(qdrant_url, project_id, qdrant_options)?;
+        let qdrant = AsyncQdrantBackend::new(config.qdrant_url, config.project_id, config.qdrant_options)?;
+        let max_chunk_tokens = config.max_chunk_tokens;
         Ok(Self {
             chunks: Vec::new(),
             by_id: HashMap::new(),
@@ -156,7 +160,7 @@ impl MemoryEngine {
             qdrant
                 .ensure_collection(dims)
                 .await
-                .map_err(|e| std::io::Error::other(e))?;
+                .map_err(std::io::Error::other)?;
 
             // Embed in batches of 64
             let batch_size = 64;
@@ -171,7 +175,7 @@ impl MemoryEngine {
                     .embedding_provider
                     .embed_batch(&texts)
                     .await
-                    .map_err(|e| std::io::Error::other(e))?;
+                    .map_err(std::io::Error::other)?;
 
                 let points: Vec<QdrantPoint> = self.chunks[batch_start..batch_end]
                     .iter()
@@ -191,7 +195,7 @@ impl MemoryEngine {
                 qdrant
                     .upsert_points(points)
                     .await
-                    .map_err(|e| std::io::Error::other(e))?;
+                    .map_err(std::io::Error::other)?;
             }
         }
 
