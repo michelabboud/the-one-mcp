@@ -51,6 +51,7 @@ pub struct McpBroker {
     session_approvals: RwLock<HashSet<String>>,
     metrics: BrokerMetrics,
     catalog: std::sync::Mutex<Option<the_one_core::tool_catalog::ToolCatalog>>,
+    tools_embedded: std::sync::atomic::AtomicBool,
 }
 
 // Manual Debug impl since MemoryEngine, DocsManager, and ToolCatalog don't implement Debug
@@ -107,6 +108,7 @@ impl McpBroker {
             session_approvals: RwLock::new(HashSet::new()),
             metrics: BrokerMetrics::default(),
             catalog: std::sync::Mutex::new(None),
+            tools_embedded: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -826,41 +828,228 @@ impl McpBroker {
         ToolSuggestResponse { suggestions }
     }
 
+    fn try_build_embedding_provider(
+        config: &AppConfig,
+    ) -> Result<Box<dyn the_one_memory::embeddings::EmbeddingProvider>, String> {
+        if config.embedding_provider == "api" {
+            Ok(Box::new(the_one_memory::embeddings::ApiEmbeddingProvider::new(
+                config.embedding_api_base_url.as_deref().unwrap_or(""),
+                config.embedding_api_key.as_deref(),
+                &config.embedding_model,
+                config.embedding_dimensions,
+            )))
+        } else {
+            Ok(Box::new(
+                the_one_memory::embeddings::FastEmbedProvider::new(&config.embedding_model)
+                    .map_err(|e| format!("fastembed: {e}"))?,
+            ))
+        }
+    }
+
+    async fn ensure_tools_embedded(&self) {
+        if self.tools_embedded.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+
+        // Try to embed tools into Qdrant — failures are silently ignored (FTS fallback)
+        let result: Result<(), String> = async {
+            let config = AppConfig::load(
+                &std::env::current_dir().unwrap_or_default(),
+                RuntimeOverrides::default(),
+            )
+            .map_err(|e| e.to_string())?;
+
+            // Get tool descriptions from catalog
+            let descriptions = {
+                let guard = self.catalog.lock().map_err(|e| format!("lock: {e}"))?;
+                match guard.as_ref() {
+                    Some(cat) => cat.all_tool_descriptions().map_err(|e| e.to_string())?,
+                    None => return Ok(()),
+                }
+            };
+
+            if descriptions.is_empty() {
+                return Ok(());
+            }
+
+            // Build embedding provider
+            let provider = Self::try_build_embedding_provider(&config)?;
+
+            // Build Qdrant backend for "tools" collection (global, not per-project)
+            let qdrant = the_one_memory::qdrant::AsyncQdrantBackend::new(
+                &config.qdrant_url,
+                "tools",
+                the_one_memory::qdrant::QdrantOptions {
+                    api_key: config.qdrant_api_key.clone(),
+                    ca_cert_path: config
+                        .qdrant_ca_cert_path
+                        .as_ref()
+                        .map(|p| p.to_string_lossy().to_string()),
+                    tls_insecure: config.qdrant_tls_insecure,
+                },
+            )
+            .map_err(|e| format!("qdrant: {e}"))?;
+
+            qdrant
+                .ensure_collection(provider.dimensions())
+                .await
+                .map_err(|e| format!("collection: {e}"))?;
+
+            // Embed in batches
+            let texts: Vec<String> = descriptions.iter().map(|(_, text)| text.clone()).collect();
+            let batch_size = 64;
+            for batch_start in (0..texts.len()).step_by(batch_size) {
+                let batch_end = (batch_start + batch_size).min(texts.len());
+                let batch = texts[batch_start..batch_end].to_vec();
+                let vectors = provider
+                    .embed_batch(&batch)
+                    .await
+                    .map_err(|e| format!("embed: {e}"))?;
+
+                let points: Vec<the_one_memory::qdrant::QdrantPoint> =
+                    descriptions[batch_start..batch_end]
+                        .iter()
+                        .zip(vectors)
+                        .map(|((id, _), vector)| the_one_memory::qdrant::QdrantPoint {
+                            id: id.clone(),
+                            vector,
+                            payload: the_one_memory::qdrant::QdrantPayload {
+                                chunk_id: id.clone(),
+                                source_path: String::new(),
+                                heading: String::new(),
+                                chunk_index: 0,
+                            },
+                        })
+                        .collect();
+
+                qdrant
+                    .upsert_points(points)
+                    .await
+                    .map_err(|e| format!("upsert: {e}"))?;
+            }
+
+            Ok(())
+        }
+        .await;
+
+        if result.is_ok() {
+            self.tools_embedded
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            tracing::info!("Tool catalog embedded into Qdrant");
+        } else {
+            tracing::debug!(
+                "Tool embedding skipped (Qdrant unavailable): {:?}",
+                result.err()
+            );
+        }
+    }
+
+    async fn search_tools_semantic(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<the_one_core::tool_catalog::SearchResult>, String> {
+        let config = AppConfig::load(
+            &std::env::current_dir().unwrap_or_default(),
+            RuntimeOverrides::default(),
+        )
+        .map_err(|e| e.to_string())?;
+
+        let provider = Self::try_build_embedding_provider(&config)?;
+        let query_vector = provider.embed_single(query).await?;
+
+        let qdrant = the_one_memory::qdrant::AsyncQdrantBackend::new(
+            &config.qdrant_url,
+            "tools",
+            the_one_memory::qdrant::QdrantOptions {
+                api_key: config.qdrant_api_key.clone(),
+                ca_cert_path: config
+                    .qdrant_ca_cert_path
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().to_string()),
+                tls_insecure: config.qdrant_tls_insecure,
+            },
+        )
+        .map_err(|e| format!("qdrant: {e}"))?;
+
+        let qdrant_results = qdrant.search(query_vector, limit, 0.3).await?;
+
+        // Map Qdrant results back to SearchResult using catalog DB
+        let guard = self.catalog.lock().map_err(|e| format!("lock: {e}"))?;
+        let cat = guard
+            .as_ref()
+            .ok_or("catalog not initialized")?;
+
+        let mut results = Vec::new();
+        for qr in qdrant_results {
+            if let Ok(Some(tool)) = cat.get_tool(&qr.chunk_id) {
+                results.push(the_one_core::tool_catalog::SearchResult {
+                    id: tool.id,
+                    name: tool.name,
+                    description: tool.description,
+                    score: qr.score as f64,
+                    state: tool.state,
+                    source: tool.source,
+                });
+            }
+        }
+
+        Ok(results)
+    }
+
     #[instrument(skip_all)]
     pub async fn tool_search(&self, request: ToolSearchRequest) -> ToolSearchResponse {
-        let limit = self.policy.clamp_suggestions(request.max);
+        let clamped = self.policy.clamp_search_hits(request.max);
 
-        // Try catalog FTS first
-        if self.ensure_catalog().is_ok() {
-            if let Ok(guard) = self.catalog.lock() {
-                if let Some(cat) = guard.as_ref() {
-                    if let Ok(results) = cat.search_fts(&request.query, limit as u32) {
-                        if !results.is_empty() {
-                            let matches = results
-                                .into_iter()
-                                .map(|r| ToolSuggestItem {
-                                    id: r.id,
-                                    title: r.name,
-                                    reason: format!("[{}] {}", r.source, r.description),
-                                })
-                                .take(limit)
-                                .collect();
-                            return ToolSearchResponse { matches };
-                        }
+        // Try semantic search via Qdrant
+        self.ensure_tools_embedded().await;
+        if let Ok(results) = self.search_tools_semantic(&request.query, clamped).await {
+            if !results.is_empty() {
+                let matches: Vec<ToolSuggestItem> = results
+                    .iter()
+                    .map(|r| ToolSuggestItem {
+                        id: r.id.clone(),
+                        title: r.name.clone(),
+                        reason: format!("[{:.0}% match] {}", r.score * 100.0, r.description),
+                    })
+                    .collect();
+                return ToolSearchResponse { matches };
+            }
+        }
+
+        // Try catalog FTS
+        self.ensure_catalog().ok();
+        if let Ok(guard) = self.catalog.lock() {
+            if let Some(cat) = guard.as_ref() {
+                if let Ok(results) = cat.search_fts(&request.query, clamped as u32) {
+                    let matches: Vec<ToolSuggestItem> = results
+                        .iter()
+                        .map(|r| ToolSuggestItem {
+                            id: r.id.clone(),
+                            title: r.name.clone(),
+                            reason: format!("[text match] {}", r.description),
+                        })
+                        .collect();
+                    if !matches.is_empty() {
+                        return ToolSearchResponse { matches };
                     }
                 }
             }
         }
 
-        // Fallback to registry
-        let response = self
-            .tool_suggest(ToolSuggestRequest {
-                query: request.query,
-                max: request.max,
-            })
-            .await;
+        // Final fallback: old registry search
+        let suggestions = self
+            .registry
+            .suggest(&request.query, RiskLevel::Medium, clamped);
         ToolSearchResponse {
-            matches: response.suggestions,
+            matches: suggestions
+                .into_iter()
+                .map(|s| ToolSuggestItem {
+                    id: s.id,
+                    title: s.title,
+                    reason: s.reason,
+                })
+                .collect(),
         }
     }
 

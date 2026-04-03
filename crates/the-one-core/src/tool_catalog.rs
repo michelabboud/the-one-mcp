@@ -565,6 +565,37 @@ impl ToolCatalog {
 
     // -- User tools -----------------------------------------------------------
 
+    /// Returns (tool_id, text_to_embed) for all tools.
+    /// The text combines description, when_to_use, what_it_finds, and tags
+    /// to create a rich embedding target for semantic search.
+    pub fn all_tool_descriptions(&self) -> Result<Vec<(String, String)>, CoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, description, when_to_use, what_it_finds, tags FROM tools"
+        ).map_err(|e| CoreError::Catalog(format!("all_tool_descriptions prepare: {e}")))?;
+
+        let rows = stmt.query_map([], |row| {
+            let id: String = row.get(0)?;
+            let description: String = row.get(1)?;
+            let when_to_use: String = row.get::<_, Option<String>>(2)?.unwrap_or_default();
+            let what_it_finds: String = row.get::<_, Option<String>>(3)?.unwrap_or_default();
+            let tags_json: String = row.get::<_, Option<String>>(4)?.unwrap_or_else(|| "[]".to_string());
+            let tags: Vec<String> = serde_json::from_str(&tags_json).unwrap_or_default();
+
+            let text = format!(
+                "{description} {when_to_use} {what_it_finds} {}",
+                tags.join(" ")
+            ).trim().to_string();
+
+            Ok((id, text))
+        }).map_err(|e| CoreError::Catalog(format!("all_tool_descriptions query: {e}")))?;
+
+        let mut results = Vec::new();
+        for row in rows.flatten() {
+            results.push(row);
+        }
+        Ok(results)
+    }
+
     /// Import a single user-provided tool entry with source='user'.
     pub fn add_user_tool(&self, entry: &CatalogToolEntry) -> Result<(), CoreError> {
         self.import_tools(std::slice::from_ref(entry), "user")?;
@@ -828,6 +859,40 @@ mod tests {
         let removed = cat.remove_user_tool("my-tool").unwrap();
         assert!(removed);
         assert!(cat.get_tool("my-tool").unwrap().is_none());
+    }
+
+    fn test_catalog(dir: &Path) -> ToolCatalog {
+        ToolCatalog::open(dir).unwrap()
+    }
+
+    fn sample_tool(id: &str, lang: &str) -> CatalogToolEntry {
+        CatalogToolEntry {
+            id: id.to_string(),
+            name: id.to_string(),
+            tool_type: "cli".to_string(),
+            category: vec!["security".to_string()],
+            languages: vec![lang.to_string()],
+            description: "test tool".to_string(),
+            when_to_use: "when testing".to_string(),
+            what_it_finds: "finds bugs".to_string(),
+            install: None,
+            run: None,
+            risk_level: "low".to_string(),
+            tags: vec!["test".to_string()],
+            github: String::new(),
+            trust_level: "community".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_all_tool_descriptions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cat = test_catalog(tmp.path());
+        cat.import_tools(&[sample_tool("my-tool", "rust")], "catalog").unwrap();
+        let descs = cat.all_tool_descriptions().unwrap();
+        assert_eq!(descs.len(), 1);
+        assert_eq!(descs[0].0, "my-tool");
+        assert!(descs[0].1.contains("test tool"));
     }
 
     #[test]

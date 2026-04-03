@@ -1,5 +1,4 @@
 /// SQL constants for the tool catalog database tables.
-
 pub const CREATE_TOOLS_TABLE: &str = "
 CREATE TABLE IF NOT EXISTS tools (
     id              TEXT PRIMARY KEY NOT NULL,
