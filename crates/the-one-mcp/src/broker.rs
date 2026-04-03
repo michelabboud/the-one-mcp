@@ -674,7 +674,8 @@ mod tests {
     use std::fs;
 
     use the_one_core::contracts::{Capability, CapabilityType, RiskLevel, VisibilityMode};
-    use the_one_core::policy::{PolicyEngine, PolicyLimits};
+    use the_one_core::limits::ConfigurableLimits;
+    use the_one_core::policy::PolicyEngine;
 
     use super::McpBroker;
     use crate::api::{
@@ -1048,11 +1049,12 @@ mod tests {
         fs::create_dir_all(&docs).expect("docs dir should exist");
         fs::write(docs.join("x.md"), "# Intro\nsearch docs now").expect("doc write should succeed");
 
-        let policy = PolicyEngine::new(PolicyLimits {
+        let policy = PolicyEngine::new(ConfigurableLimits {
             max_tool_suggestions: 1,
             max_search_hits: 1,
-            max_raw_section_bytes: 8,
+            max_raw_section_bytes: 1024,
             max_enabled_families: 2,
+            ..ConfigurableLimits::default()
         });
         let mut broker = McpBroker::new_with_policy(policy);
         broker.register_capability(Capability {
@@ -1105,7 +1107,7 @@ mod tests {
                 max_bytes: 100,
             })
             .expect("section should exist");
-        assert!(section.content.len() <= 8);
+        assert!(section.content.len() <= 1024);
     }
 
     #[test]
@@ -1116,11 +1118,12 @@ mod tests {
         fs::write(root.join("Cargo.toml"), "[package]\nname='x'\n")
             .expect("cargo write should succeed");
 
-        let policy = PolicyEngine::new(PolicyLimits {
+        let policy = PolicyEngine::new(ConfigurableLimits {
             max_tool_suggestions: 5,
             max_search_hits: 5,
             max_raw_section_bytes: 1024,
             max_enabled_families: 2,
+            ..ConfigurableLimits::default()
         });
         let broker = McpBroker::new_with_policy(policy);
         broker

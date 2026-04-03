@@ -2,6 +2,7 @@ pub mod backup;
 pub mod config;
 pub mod contracts;
 pub mod error;
+pub mod limits;
 pub mod manifests;
 pub mod policy;
 pub mod profiler;

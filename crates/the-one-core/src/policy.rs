@@ -1,36 +1,28 @@
 use crate::contracts::RiskLevel;
 use crate::error::CoreError;
+use crate::limits::ConfigurableLimits;
 
 #[derive(Debug, Clone)]
-pub struct PolicyLimits {
-    pub max_tool_suggestions: usize,
-    pub max_search_hits: usize,
-    pub max_raw_section_bytes: usize,
-    pub max_enabled_families: usize,
+pub struct PolicyEngine {
+    limits: ConfigurableLimits,
 }
 
-impl Default for PolicyLimits {
+impl Default for PolicyEngine {
     fn default() -> Self {
         Self {
-            max_tool_suggestions: 5,
-            max_search_hits: 5,
-            max_raw_section_bytes: 24 * 1024,
-            max_enabled_families: 12,
+            limits: ConfigurableLimits::default().validated(),
         }
     }
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct PolicyEngine {
-    limits: PolicyLimits,
-}
-
 impl PolicyEngine {
-    pub fn new(limits: PolicyLimits) -> Self {
-        Self { limits }
+    pub fn new(limits: ConfigurableLimits) -> Self {
+        Self {
+            limits: limits.validated(),
+        }
     }
 
-    pub fn limits(&self) -> &PolicyLimits {
+    pub fn limits(&self) -> &ConfigurableLimits {
         &self.limits
     }
 
@@ -64,20 +56,22 @@ impl PolicyEngine {
 
 #[cfg(test)]
 mod tests {
-    use super::{PolicyEngine, PolicyLimits};
+    use super::PolicyEngine;
+    use crate::limits::ConfigurableLimits;
 
     #[test]
     fn test_policy_clamps_values_to_limits() {
-        let engine = PolicyEngine::new(PolicyLimits {
+        let engine = PolicyEngine::new(ConfigurableLimits {
             max_tool_suggestions: 3,
             max_search_hits: 2,
-            max_raw_section_bytes: 100,
+            max_raw_section_bytes: 1024,
             max_enabled_families: 1,
+            ..ConfigurableLimits::default()
         });
 
         assert_eq!(engine.clamp_suggestions(10), 3);
         assert_eq!(engine.clamp_search_hits(10), 2);
-        assert_eq!(engine.clamp_doc_bytes(9999), 100);
+        assert_eq!(engine.clamp_doc_bytes(9999), 1024);
         assert!(engine.validate_enabled_families_count(2).is_err());
     }
 }
