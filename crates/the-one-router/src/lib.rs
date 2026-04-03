@@ -7,6 +7,7 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 use the_one_core::contracts::{RouteDecision, RouteType};
 
+use crate::provider_pool::ProviderPool;
 use crate::providers::NanoProvider;
 
 const MAX_NANO_TIMEOUT_MS: u64 = 2_000;
@@ -60,11 +61,23 @@ pub struct RoutedDecision {
 #[derive(Debug, Clone)]
 pub struct Router {
     nano_enabled: bool,
+    pool: Option<std::sync::Arc<ProviderPool>>,
 }
 
 impl Router {
     pub fn new(nano_enabled: bool) -> Self {
-        Self { nano_enabled }
+        Self {
+            nano_enabled,
+            pool: None,
+        }
+    }
+
+    /// Create a router with a provider pool for async classification.
+    pub fn new_with_pool(pool: ProviderPool) -> Self {
+        Self {
+            nano_enabled: true,
+            pool: Some(std::sync::Arc::new(pool)),
+        }
     }
 
     pub fn route_rules_only(&self, request: &str) -> RouteDecision {
@@ -241,6 +254,92 @@ impl Router {
             },
         }
     }
+
+    /// Route a request using the provider pool (async).
+    /// Falls back to rules-only if pool is empty or all providers fail.
+    pub async fn route_with_pool(&self, request: &str) -> RoutedDecision {
+        let start = Instant::now();
+
+        if let Some(pool) = &self.pool {
+            let pool_result = pool.classify(request).await;
+            let latency = start.elapsed().as_millis() as u64;
+
+            if pool_result.fallback_to_rules {
+                // Pool failed — fallback to rules
+                let decision = self.route_rules_only(request);
+                return RoutedDecision {
+                    decision,
+                    telemetry: RouteTelemetry {
+                        provider_path: "rules-fallback".to_string(),
+                        confidence_percent: 100,
+                        latency_ms: latency,
+                        used_fallback: true,
+                        attempts: pool_result.attempts,
+                        timeout_ms_bound: 0,
+                        retries_bound: 0,
+                        last_error: pool_result.last_error,
+                    },
+                };
+            }
+
+            // Pool succeeded
+            let intent = pool_result.intent.unwrap_or(RequestIntent::Unknown);
+            let decision = match intent {
+                RequestIntent::SearchDocs => RouteDecision {
+                    route: RouteType::RuleWithNano,
+                    requires_memory_search: true,
+                    requires_approval: false,
+                    rationale: "nano provider classified as search_docs".to_string(),
+                },
+                RequestIntent::RunTool => RouteDecision {
+                    route: RouteType::ToolExecution,
+                    requires_memory_search: false,
+                    requires_approval: true,
+                    rationale: "nano provider classified as run_tool".to_string(),
+                },
+                RequestIntent::ConfigureSystem => RouteDecision {
+                    route: RouteType::RuleOnly,
+                    requires_memory_search: false,
+                    requires_approval: false,
+                    rationale: "nano provider classified as configure_system".to_string(),
+                },
+                RequestIntent::Unknown => self.route_rules_only(request),
+            };
+
+            RoutedDecision {
+                decision,
+                telemetry: RouteTelemetry {
+                    provider_path: pool_result
+                        .provider_used
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    confidence_percent: 85,
+                    latency_ms: latency,
+                    used_fallback: false,
+                    attempts: pool_result.attempts,
+                    timeout_ms_bound: 0,
+                    retries_bound: 0,
+                    last_error: None,
+                },
+            }
+        } else {
+            // No pool — pure rules
+            let decision = self.route_rules_only(request);
+            let latency = start.elapsed().as_millis() as u64;
+            RoutedDecision {
+                decision,
+                telemetry: RouteTelemetry {
+                    provider_path: "rules-only".to_string(),
+                    confidence_percent: 100,
+                    latency_ms: latency,
+                    used_fallback: false,
+                    attempts: 0,
+                    timeout_ms_bound: 0,
+                    retries_bound: 0,
+                    last_error: None,
+                },
+            }
+        }
+    }
 }
 
 pub fn default_route_decision() -> RouteDecision {
@@ -365,5 +464,31 @@ mod tests {
             assert_eq!(routed.decision.route, RouteType::RuleWithNano);
             assert!(!routed.telemetry.used_fallback);
         }
+    }
+
+    #[tokio::test]
+    async fn test_route_with_pool_no_pool_uses_rules() {
+        let router = Router::new(true);
+        let routed = router.route_with_pool("search docs for cargo").await;
+        assert_eq!(routed.decision.route, RouteType::Retrieval);
+        assert!(routed.decision.requires_memory_search);
+        assert_eq!(routed.telemetry.provider_path, "rules-only");
+        assert!(!routed.telemetry.used_fallback);
+        assert_eq!(routed.telemetry.attempts, 0);
+    }
+
+    #[tokio::test]
+    async fn test_route_with_pool_empty_pool_falls_back() {
+        use crate::provider_pool::ProviderPool;
+        use the_one_core::config::NanoRoutingPolicy;
+
+        let pool = ProviderPool::new(vec![], NanoRoutingPolicy::Priority);
+        let router = Router::new_with_pool(pool);
+        let routed = router.route_with_pool("search docs for cargo").await;
+        assert_eq!(routed.decision.route, RouteType::Retrieval);
+        assert!(routed.decision.requires_memory_search);
+        assert_eq!(routed.telemetry.provider_path, "rules-fallback");
+        assert!(routed.telemetry.used_fallback);
+        assert!(routed.telemetry.last_error.is_some());
     }
 }

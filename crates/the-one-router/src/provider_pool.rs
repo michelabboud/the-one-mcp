@@ -23,6 +23,15 @@ pub struct ProviderPool {
     round_robin_index: AtomicUsize,
 }
 
+impl std::fmt::Debug for ProviderPool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProviderPool")
+            .field("provider_count", &self.providers.len())
+            .field("policy", &self.policy)
+            .finish()
+    }
+}
+
 impl ProviderPool {
     pub fn new(entries: Vec<NanoProviderEntry>, policy: NanoRoutingPolicy) -> Self {
         let providers = entries
