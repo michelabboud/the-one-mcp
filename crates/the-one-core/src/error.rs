@@ -14,4 +14,12 @@ pub enum CoreError {
     PolicyDenied(String),
     #[error("unsupported schema version: {0}")]
     UnsupportedSchemaVersion(String),
+    #[error("embedding error: {0}")]
+    Embedding(String),
+    #[error("transport error: {0}")]
+    Transport(String),
+    #[error("provider error: {0}")]
+    Provider(String),
+    #[error("document error: {0}")]
+    Document(String),
 }

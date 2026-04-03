@@ -6,6 +6,7 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 use crate::error::CoreError;
+use crate::limits::ConfigurableLimits;
 
 const DEFAULT_PROVIDER: &str = "local";
 const DEFAULT_LOG_LEVEL: &str = "info";
@@ -14,6 +15,9 @@ const DEFAULT_NANO_PROVIDER: &str = "rules";
 const DEFAULT_NANO_MODEL: &str = "none";
 const DEFAULT_QDRANT_TLS_INSECURE: bool = false;
 const DEFAULT_QDRANT_STRICT_AUTH: bool = true;
+const DEFAULT_EMBEDDING_PROVIDER: &str = "local";
+const DEFAULT_EMBEDDING_MODEL: &str = "all-MiniLM-L6-v2";
+const DEFAULT_EMBEDDING_DIMENSIONS: usize = 384;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NanoProviderKind {
@@ -49,6 +53,32 @@ impl FromStr for NanoProviderKind {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NanoProviderEntry {
+    pub name: String,
+    pub base_url: String,
+    pub model: String,
+    pub api_key: Option<String>,
+    pub timeout_ms: u64,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NanoRoutingPolicy {
+    #[serde(rename = "priority")]
+    Priority,
+    #[serde(rename = "round_robin")]
+    RoundRobin,
+    #[serde(rename = "latency")]
+    Latency,
+}
+
+impl Default for NanoRoutingPolicy {
+    fn default() -> Self {
+        Self::Priority
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct RuntimeOverrides {
     pub provider: Option<String>,
@@ -60,6 +90,15 @@ pub struct RuntimeOverrides {
     pub qdrant_ca_cert_path: Option<String>,
     pub qdrant_tls_insecure: Option<bool>,
     pub qdrant_strict_auth: Option<bool>,
+    pub embedding_provider: Option<String>,
+    pub embedding_model: Option<String>,
+    pub embedding_api_base_url: Option<String>,
+    pub embedding_api_key: Option<String>,
+    pub embedding_dimensions: Option<usize>,
+    pub nano_providers: Option<Vec<NanoProviderEntry>>,
+    pub nano_routing_policy: Option<NanoRoutingPolicy>,
+    pub external_docs_root: Option<String>,
+    pub limits: Option<ConfigurableLimits>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -73,6 +112,15 @@ pub struct ProjectConfigUpdate {
     pub qdrant_ca_cert_path: Option<String>,
     pub qdrant_tls_insecure: Option<bool>,
     pub qdrant_strict_auth: Option<bool>,
+    pub embedding_provider: Option<String>,
+    pub embedding_model: Option<String>,
+    pub embedding_api_base_url: Option<String>,
+    pub embedding_api_key: Option<String>,
+    pub embedding_dimensions: Option<usize>,
+    pub nano_providers: Option<Vec<NanoProviderEntry>>,
+    pub nano_routing_policy: Option<NanoRoutingPolicy>,
+    pub external_docs_root: Option<String>,
+    pub limits: Option<ConfigurableLimits>,
 }
 
 #[derive(Debug, Clone)]
@@ -89,6 +137,15 @@ pub struct AppConfig {
     pub qdrant_strict_auth: bool,
     pub nano_provider: NanoProviderKind,
     pub nano_model: String,
+    pub embedding_provider: String,
+    pub embedding_model: String,
+    pub embedding_api_base_url: Option<String>,
+    pub embedding_api_key: Option<String>,
+    pub embedding_dimensions: usize,
+    pub nano_providers: Vec<NanoProviderEntry>,
+    pub nano_routing_policy: NanoRoutingPolicy,
+    pub external_docs_root: Option<PathBuf>,
+    pub limits: ConfigurableLimits,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -102,6 +159,15 @@ struct FileConfig {
     qdrant_strict_auth: Option<bool>,
     nano_provider: Option<String>,
     nano_model: Option<String>,
+    embedding_provider: Option<String>,
+    embedding_model: Option<String>,
+    embedding_api_base_url: Option<String>,
+    embedding_api_key: Option<String>,
+    embedding_dimensions: Option<usize>,
+    nano_providers: Option<Vec<NanoProviderEntry>>,
+    nano_routing_policy: Option<NanoRoutingPolicy>,
+    external_docs_root: Option<String>,
+    limits: Option<ConfigurableLimits>,
 }
 
 impl AppConfig {
@@ -120,6 +186,15 @@ impl AppConfig {
             qdrant_strict_auth: Some(DEFAULT_QDRANT_STRICT_AUTH),
             nano_provider: Some(DEFAULT_NANO_PROVIDER.to_string()),
             nano_model: Some(DEFAULT_NANO_MODEL.to_string()),
+            embedding_provider: Some(DEFAULT_EMBEDDING_PROVIDER.to_string()),
+            embedding_model: Some(DEFAULT_EMBEDDING_MODEL.to_string()),
+            embedding_api_base_url: None,
+            embedding_api_key: None,
+            embedding_dimensions: Some(DEFAULT_EMBEDDING_DIMENSIONS),
+            nano_providers: None,
+            nano_routing_policy: None,
+            external_docs_root: None,
+            limits: None,
         };
 
         apply_file_layer(&global_state_dir.join("config.json"), &mut merged)?;
@@ -157,6 +232,24 @@ impl AppConfig {
             nano_model: merged
                 .nano_model
                 .unwrap_or_else(|| DEFAULT_NANO_MODEL.to_string()),
+            embedding_provider: merged
+                .embedding_provider
+                .unwrap_or_else(|| DEFAULT_EMBEDDING_PROVIDER.to_string()),
+            embedding_model: merged
+                .embedding_model
+                .unwrap_or_else(|| DEFAULT_EMBEDDING_MODEL.to_string()),
+            embedding_api_base_url: merged.embedding_api_base_url,
+            embedding_api_key: merged.embedding_api_key,
+            embedding_dimensions: merged
+                .embedding_dimensions
+                .unwrap_or(DEFAULT_EMBEDDING_DIMENSIONS),
+            nano_providers: merged.nano_providers.unwrap_or_default(),
+            nano_routing_policy: merged.nano_routing_policy.unwrap_or_default(),
+            external_docs_root: merged.external_docs_root.map(PathBuf::from),
+            limits: merged
+                .limits
+                .map(|l| l.validated())
+                .unwrap_or_default(),
         })
     }
 }
@@ -203,6 +296,33 @@ pub fn update_project_config(
     }
     if update.nano_model.is_some() {
         merged.nano_model = update.nano_model;
+    }
+    if update.embedding_provider.is_some() {
+        merged.embedding_provider = update.embedding_provider;
+    }
+    if update.embedding_model.is_some() {
+        merged.embedding_model = update.embedding_model;
+    }
+    if update.embedding_api_base_url.is_some() {
+        merged.embedding_api_base_url = update.embedding_api_base_url;
+    }
+    if update.embedding_api_key.is_some() {
+        merged.embedding_api_key = update.embedding_api_key;
+    }
+    if update.embedding_dimensions.is_some() {
+        merged.embedding_dimensions = update.embedding_dimensions;
+    }
+    if update.nano_providers.is_some() {
+        merged.nano_providers = update.nano_providers;
+    }
+    if update.nano_routing_policy.is_some() {
+        merged.nano_routing_policy = update.nano_routing_policy;
+    }
+    if update.external_docs_root.is_some() {
+        merged.external_docs_root = update.external_docs_root;
+    }
+    if update.limits.is_some() {
+        merged.limits = update.limits;
     }
 
     let tmp_path = project_state_dir.join("config.json.tmp");
@@ -289,6 +409,110 @@ fn apply_env_layer(merged: &mut FileConfig) {
     if let Ok(nano_model) = env::var("THE_ONE_NANO_MODEL") {
         merged.nano_model = Some(nano_model);
     }
+    if let Ok(v) = env::var("THE_ONE_EMBEDDING_PROVIDER") {
+        merged.embedding_provider = Some(v);
+    }
+    if let Ok(v) = env::var("THE_ONE_EMBEDDING_MODEL") {
+        merged.embedding_model = Some(v);
+    }
+    if let Ok(v) = env::var("THE_ONE_EMBEDDING_API_BASE_URL") {
+        merged.embedding_api_base_url = Some(v);
+    }
+    if let Ok(v) = env::var("THE_ONE_EMBEDDING_API_KEY") {
+        merged.embedding_api_key = Some(v);
+    }
+    if let Ok(v) = env::var("THE_ONE_EMBEDDING_DIMENSIONS") {
+        if let Ok(d) = v.parse::<usize>() {
+            merged.embedding_dimensions = Some(d);
+        }
+    }
+    if let Ok(v) = env::var("THE_ONE_EXTERNAL_DOCS_ROOT") {
+        merged.external_docs_root = Some(v);
+    }
+    // Limit env vars
+    apply_limit_env_vars(merged);
+}
+
+fn apply_limit_env_vars(merged: &mut FileConfig) {
+    let mut limits = merged.limits.clone().unwrap_or_default();
+    let mut any_set = merged.limits.is_some();
+
+    if let Ok(v) = env::var("THE_ONE_LIMIT_MAX_TOOL_SUGGESTIONS") {
+        if let Ok(n) = v.parse::<usize>() {
+            limits.max_tool_suggestions = n;
+            any_set = true;
+        }
+    }
+    if let Ok(v) = env::var("THE_ONE_LIMIT_MAX_SEARCH_HITS") {
+        if let Ok(n) = v.parse::<usize>() {
+            limits.max_search_hits = n;
+            any_set = true;
+        }
+    }
+    if let Ok(v) = env::var("THE_ONE_LIMIT_MAX_RAW_SECTION_BYTES") {
+        if let Ok(n) = v.parse::<usize>() {
+            limits.max_raw_section_bytes = n;
+            any_set = true;
+        }
+    }
+    if let Ok(v) = env::var("THE_ONE_LIMIT_MAX_ENABLED_FAMILIES") {
+        if let Ok(n) = v.parse::<usize>() {
+            limits.max_enabled_families = n;
+            any_set = true;
+        }
+    }
+    if let Ok(v) = env::var("THE_ONE_LIMIT_MAX_DOC_SIZE_BYTES") {
+        if let Ok(n) = v.parse::<usize>() {
+            limits.max_doc_size_bytes = n;
+            any_set = true;
+        }
+    }
+    if let Ok(v) = env::var("THE_ONE_LIMIT_MAX_MANAGED_DOCS") {
+        if let Ok(n) = v.parse::<usize>() {
+            limits.max_managed_docs = n;
+            any_set = true;
+        }
+    }
+    if let Ok(v) = env::var("THE_ONE_LIMIT_MAX_EMBEDDING_BATCH_SIZE") {
+        if let Ok(n) = v.parse::<usize>() {
+            limits.max_embedding_batch_size = n;
+            any_set = true;
+        }
+    }
+    if let Ok(v) = env::var("THE_ONE_LIMIT_MAX_CHUNK_TOKENS") {
+        if let Ok(n) = v.parse::<usize>() {
+            limits.max_chunk_tokens = n;
+            any_set = true;
+        }
+    }
+    if let Ok(v) = env::var("THE_ONE_LIMIT_MAX_NANO_TIMEOUT_MS") {
+        if let Ok(n) = v.parse::<u64>() {
+            limits.max_nano_timeout_ms = n;
+            any_set = true;
+        }
+    }
+    if let Ok(v) = env::var("THE_ONE_LIMIT_MAX_NANO_RETRIES") {
+        if let Ok(n) = v.parse::<u8>() {
+            limits.max_nano_retries = n;
+            any_set = true;
+        }
+    }
+    if let Ok(v) = env::var("THE_ONE_LIMIT_MAX_NANO_PROVIDERS") {
+        if let Ok(n) = v.parse::<usize>() {
+            limits.max_nano_providers = n;
+            any_set = true;
+        }
+    }
+    if let Ok(v) = env::var("THE_ONE_LIMIT_SEARCH_SCORE_THRESHOLD") {
+        if let Ok(n) = v.parse::<f32>() {
+            limits.search_score_threshold = n;
+            any_set = true;
+        }
+    }
+
+    if any_set {
+        merged.limits = Some(limits);
+    }
 }
 
 fn apply_runtime_layer(runtime: RuntimeOverrides, merged: &mut FileConfig) {
@@ -318,6 +542,33 @@ fn apply_runtime_layer(runtime: RuntimeOverrides, merged: &mut FileConfig) {
     }
     if runtime.nano_model.is_some() {
         merged.nano_model = runtime.nano_model;
+    }
+    if runtime.embedding_provider.is_some() {
+        merged.embedding_provider = runtime.embedding_provider;
+    }
+    if runtime.embedding_model.is_some() {
+        merged.embedding_model = runtime.embedding_model;
+    }
+    if runtime.embedding_api_base_url.is_some() {
+        merged.embedding_api_base_url = runtime.embedding_api_base_url;
+    }
+    if runtime.embedding_api_key.is_some() {
+        merged.embedding_api_key = runtime.embedding_api_key;
+    }
+    if runtime.embedding_dimensions.is_some() {
+        merged.embedding_dimensions = runtime.embedding_dimensions;
+    }
+    if runtime.nano_providers.is_some() {
+        merged.nano_providers = runtime.nano_providers;
+    }
+    if runtime.nano_routing_policy.is_some() {
+        merged.nano_routing_policy = runtime.nano_routing_policy;
+    }
+    if runtime.external_docs_root.is_some() {
+        merged.external_docs_root = runtime.external_docs_root;
+    }
+    if runtime.limits.is_some() {
+        merged.limits = runtime.limits;
     }
 }
 
@@ -349,6 +600,33 @@ fn merge(base: &mut FileConfig, overlay: FileConfig) {
     if overlay.nano_model.is_some() {
         base.nano_model = overlay.nano_model;
     }
+    if overlay.embedding_provider.is_some() {
+        base.embedding_provider = overlay.embedding_provider;
+    }
+    if overlay.embedding_model.is_some() {
+        base.embedding_model = overlay.embedding_model;
+    }
+    if overlay.embedding_api_base_url.is_some() {
+        base.embedding_api_base_url = overlay.embedding_api_base_url;
+    }
+    if overlay.embedding_api_key.is_some() {
+        base.embedding_api_key = overlay.embedding_api_key;
+    }
+    if overlay.embedding_dimensions.is_some() {
+        base.embedding_dimensions = overlay.embedding_dimensions;
+    }
+    if overlay.nano_providers.is_some() {
+        base.nano_providers = overlay.nano_providers;
+    }
+    if overlay.nano_routing_policy.is_some() {
+        base.nano_routing_policy = overlay.nano_routing_policy;
+    }
+    if overlay.external_docs_root.is_some() {
+        base.external_docs_root = overlay.external_docs_root;
+    }
+    if overlay.limits.is_some() {
+        base.limits = overlay.limits;
+    }
 }
 
 fn parse_bool_env(value: &str) -> Option<bool> {
@@ -366,6 +644,7 @@ mod tests {
     use super::{
         update_project_config, AppConfig, NanoProviderKind, ProjectConfigUpdate, RuntimeOverrides,
     };
+    use crate::limits::ConfigurableLimits;
 
     #[test]
     fn test_config_precedence_runtime_overrides_env_project_global_defaults() {
@@ -401,6 +680,24 @@ mod tests {
                 ("THE_ONE_QDRANT_CA_CERT_PATH", None),
                 ("THE_ONE_QDRANT_TLS_INSECURE", None),
                 ("THE_ONE_QDRANT_STRICT_AUTH", None),
+                ("THE_ONE_EMBEDDING_PROVIDER", None),
+                ("THE_ONE_EMBEDDING_MODEL", None),
+                ("THE_ONE_EMBEDDING_API_BASE_URL", None),
+                ("THE_ONE_EMBEDDING_API_KEY", None),
+                ("THE_ONE_EMBEDDING_DIMENSIONS", None),
+                ("THE_ONE_EXTERNAL_DOCS_ROOT", None),
+                ("THE_ONE_LIMIT_MAX_TOOL_SUGGESTIONS", None),
+                ("THE_ONE_LIMIT_MAX_SEARCH_HITS", None),
+                ("THE_ONE_LIMIT_MAX_RAW_SECTION_BYTES", None),
+                ("THE_ONE_LIMIT_MAX_ENABLED_FAMILIES", None),
+                ("THE_ONE_LIMIT_MAX_DOC_SIZE_BYTES", None),
+                ("THE_ONE_LIMIT_MAX_MANAGED_DOCS", None),
+                ("THE_ONE_LIMIT_MAX_EMBEDDING_BATCH_SIZE", None),
+                ("THE_ONE_LIMIT_MAX_CHUNK_TOKENS", None),
+                ("THE_ONE_LIMIT_MAX_NANO_TIMEOUT_MS", None),
+                ("THE_ONE_LIMIT_MAX_NANO_RETRIES", None),
+                ("THE_ONE_LIMIT_MAX_NANO_PROVIDERS", None),
+                ("THE_ONE_LIMIT_SEARCH_SCORE_THRESHOLD", None),
             ],
             || {
                 let config = AppConfig::load(
@@ -415,6 +712,7 @@ mod tests {
                         qdrant_ca_cert_path: None,
                         qdrant_tls_insecure: None,
                         qdrant_strict_auth: None,
+                        ..RuntimeOverrides::default()
                     },
                 )
                 .expect("config should load");
@@ -450,6 +748,24 @@ mod tests {
                 ("THE_ONE_QDRANT_CA_CERT_PATH", None),
                 ("THE_ONE_QDRANT_TLS_INSECURE", None),
                 ("THE_ONE_QDRANT_STRICT_AUTH", None),
+                ("THE_ONE_EMBEDDING_PROVIDER", None),
+                ("THE_ONE_EMBEDDING_MODEL", None),
+                ("THE_ONE_EMBEDDING_API_BASE_URL", None),
+                ("THE_ONE_EMBEDDING_API_KEY", None),
+                ("THE_ONE_EMBEDDING_DIMENSIONS", None),
+                ("THE_ONE_EXTERNAL_DOCS_ROOT", None),
+                ("THE_ONE_LIMIT_MAX_TOOL_SUGGESTIONS", None),
+                ("THE_ONE_LIMIT_MAX_SEARCH_HITS", None),
+                ("THE_ONE_LIMIT_MAX_RAW_SECTION_BYTES", None),
+                ("THE_ONE_LIMIT_MAX_ENABLED_FAMILIES", None),
+                ("THE_ONE_LIMIT_MAX_DOC_SIZE_BYTES", None),
+                ("THE_ONE_LIMIT_MAX_MANAGED_DOCS", None),
+                ("THE_ONE_LIMIT_MAX_EMBEDDING_BATCH_SIZE", None),
+                ("THE_ONE_LIMIT_MAX_CHUNK_TOKENS", None),
+                ("THE_ONE_LIMIT_MAX_NANO_TIMEOUT_MS", None),
+                ("THE_ONE_LIMIT_MAX_NANO_RETRIES", None),
+                ("THE_ONE_LIMIT_MAX_NANO_PROVIDERS", None),
+                ("THE_ONE_LIMIT_SEARCH_SCORE_THRESHOLD", None),
             ],
             || {
                 update_project_config(
@@ -468,6 +784,92 @@ mod tests {
                 assert_eq!(config.provider, "hosted");
                 assert_eq!(config.nano_provider, NanoProviderKind::Ollama);
                 assert_eq!(config.nano_model, "tiny");
+            },
+        );
+    }
+
+    #[test]
+    fn test_config_loads_embedding_and_limits_from_project_config() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let project_root = temp.path().join("repo");
+        let project_state_dir = project_root.join(".the-one");
+        let global_state_dir = temp.path().join("global");
+
+        fs::create_dir_all(&project_state_dir).expect("project state dir should exist");
+        fs::create_dir_all(&global_state_dir).expect("global state dir should exist");
+
+        fs::write(
+            project_state_dir.join("config.json"),
+            r#"{
+                "embedding_provider": "openai",
+                "embedding_model": "text-embedding-3-small",
+                "embedding_dimensions": 256,
+                "limits": {
+                    "max_tool_suggestions": 5,
+                    "max_search_hits": 10,
+                    "max_raw_section_bytes": 24576,
+                    "max_enabled_families": 12,
+                    "max_doc_size_bytes": 102400,
+                    "max_managed_docs": 500,
+                    "max_embedding_batch_size": 64,
+                    "max_chunk_tokens": 256,
+                    "max_nano_timeout_ms": 2000,
+                    "max_nano_retries": 3,
+                    "max_nano_providers": 5,
+                    "search_score_threshold": 0.3
+                }
+            }"#,
+        )
+        .expect("project config write should succeed");
+
+        let global_home = global_state_dir.display().to_string();
+        temp_env::with_vars(
+            [
+                ("THE_ONE_HOME", Some(global_home.as_str())),
+                ("THE_ONE_PROVIDER", None),
+                ("THE_ONE_LOG_LEVEL", None),
+                ("THE_ONE_QDRANT_URL", None),
+                ("THE_ONE_NANO_PROVIDER", None),
+                ("THE_ONE_NANO_MODEL", None),
+                ("THE_ONE_QDRANT_API_KEY", None),
+                ("THE_ONE_QDRANT_CA_CERT_PATH", None),
+                ("THE_ONE_QDRANT_TLS_INSECURE", None),
+                ("THE_ONE_QDRANT_STRICT_AUTH", None),
+                ("THE_ONE_EMBEDDING_PROVIDER", None),
+                ("THE_ONE_EMBEDDING_MODEL", None),
+                ("THE_ONE_EMBEDDING_API_BASE_URL", None),
+                ("THE_ONE_EMBEDDING_API_KEY", None),
+                ("THE_ONE_EMBEDDING_DIMENSIONS", None),
+                ("THE_ONE_EXTERNAL_DOCS_ROOT", None),
+                ("THE_ONE_LIMIT_MAX_TOOL_SUGGESTIONS", None),
+                ("THE_ONE_LIMIT_MAX_SEARCH_HITS", None),
+                ("THE_ONE_LIMIT_MAX_RAW_SECTION_BYTES", None),
+                ("THE_ONE_LIMIT_MAX_ENABLED_FAMILIES", None),
+                ("THE_ONE_LIMIT_MAX_DOC_SIZE_BYTES", None),
+                ("THE_ONE_LIMIT_MAX_MANAGED_DOCS", None),
+                ("THE_ONE_LIMIT_MAX_EMBEDDING_BATCH_SIZE", None),
+                ("THE_ONE_LIMIT_MAX_CHUNK_TOKENS", None),
+                ("THE_ONE_LIMIT_MAX_NANO_TIMEOUT_MS", None),
+                ("THE_ONE_LIMIT_MAX_NANO_RETRIES", None),
+                ("THE_ONE_LIMIT_MAX_NANO_PROVIDERS", None),
+                ("THE_ONE_LIMIT_SEARCH_SCORE_THRESHOLD", None),
+            ],
+            || {
+                let config = AppConfig::load(&project_root, RuntimeOverrides::default())
+                    .expect("config should load");
+
+                // Embedding fields from project config
+                assert_eq!(config.embedding_provider, "openai");
+                assert_eq!(config.embedding_model, "text-embedding-3-small");
+                assert_eq!(config.embedding_dimensions, 256);
+
+                // Limits from project config
+                assert_eq!(config.limits.max_search_hits, 10);
+                assert_eq!(config.limits.max_chunk_tokens, 256);
+
+                // Default limit preserved when set in config to default value
+                let defaults = ConfigurableLimits::default();
+                assert_eq!(config.limits.max_tool_suggestions, defaults.max_tool_suggestions);
             },
         );
     }
