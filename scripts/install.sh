@@ -141,11 +141,33 @@ detect_platform() {
 detect_clis() {
     HAS_CLAUDE=false
     HAS_CODEX=false
+    HAS_GEMINI=false
+    HAS_OPENCODE=false
     HAS_CURL=false
     HAS_GH=false
 
-    command -v claude >/dev/null 2>&1 && HAS_CLAUDE=true
-    command -v codex >/dev/null 2>&1 && HAS_CODEX=true
+    CLAUDE_VERSION=""
+    CODEX_VERSION=""
+    GEMINI_VERSION=""
+    OPENCODE_VERSION=""
+
+    if command -v claude >/dev/null 2>&1; then
+        HAS_CLAUDE=true
+        CLAUDE_VERSION=$(claude --version 2>/dev/null | head -1 || echo "unknown")
+    fi
+    if command -v codex >/dev/null 2>&1; then
+        HAS_CODEX=true
+        CODEX_VERSION=$(codex --version 2>/dev/null | head -1 || echo "unknown")
+    fi
+    if command -v gemini >/dev/null 2>&1; then
+        HAS_GEMINI=true
+        GEMINI_VERSION=$(gemini --version 2>/dev/null | head -1 || echo "unknown")
+    fi
+    if command -v opencode >/dev/null 2>&1; then
+        HAS_OPENCODE=true
+        OPENCODE_VERSION=$(opencode --version 2>/dev/null | head -1 || echo "unknown")
+    fi
+
     command -v curl >/dev/null 2>&1 && HAS_CURL=true
     command -v gh >/dev/null 2>&1 && HAS_GH=true
 
@@ -365,42 +387,122 @@ TOOLSEOF
     fi
 }
 
-# ── Register with Claude Code ──────────────────────────────────────────────
-register_claude_code() {
+# ── Register with AI Assistants ────────────────────────────────────────────
+
+register_all_clis() {
     if [ "$SKIP_REGISTER" = true ]; then
-        skip "Skipping Claude Code registration (--skip-register)"
+        skip "Skipping CLI registration (--skip-register)"
         return 0
     fi
 
+    register_claude_code
+    register_gemini_cli
+    register_opencode
+    register_codex
+}
+
+register_claude_code() {
     if [ "$HAS_CLAUDE" = false ]; then
-        skip "Claude Code not found (install it, then run: claude mcp add ${BIN_NAME} -- ${BIN_DIR}/${BIN_NAME} serve)"
+        skip "Claude Code not found"
         return 0
     fi
 
-    info "Detected Claude Code"
+    info "Detected Claude Code (${CLAUDE_VERSION})"
     if confirm "  Register the-one-mcp with Claude Code?"; then
         if claude mcp add "${BIN_NAME}" -- "${BIN_DIR}/${BIN_NAME}${PLATFORM_EXT}" serve 2>/dev/null; then
             ok "Registered with Claude Code"
         else
-            warn "Registration failed. You can add it manually:"
+            warn "Auto-registration failed. Add manually:"
             echo "    claude mcp add ${BIN_NAME} -- ${BIN_DIR}/${BIN_NAME} serve"
         fi
     else
-        skip "Skipped Claude Code registration"
-        echo "    To register later: claude mcp add ${BIN_NAME} -- ${BIN_DIR}/${BIN_NAME} serve"
+        skip "Skipped Claude Code"
+        echo "    claude mcp add ${BIN_NAME} -- ${BIN_DIR}/${BIN_NAME} serve"
     fi
 }
 
-# ── Register with Codex ───────────────────────────────────────────────────
-register_codex() {
-    if [ "$SKIP_REGISTER" = true ]; then return 0; fi
+register_gemini_cli() {
+    if [ "$HAS_GEMINI" = false ]; then
+        skip "Gemini CLI not found"
+        return 0
+    fi
 
+    info "Detected Gemini CLI (${GEMINI_VERSION})"
+    if confirm "  Register the-one-mcp with Gemini CLI?"; then
+        if gemini mcp add "${BIN_NAME}" "${BIN_DIR}/${BIN_NAME}${PLATFORM_EXT}" serve 2>/dev/null; then
+            ok "Registered with Gemini CLI"
+        else
+            # Fallback: write to settings.json directly
+            local gemini_settings="${HOME}/.gemini/settings.json"
+            if [ -f "$gemini_settings" ]; then
+                # Check if already registered
+                if grep -q "\"${BIN_NAME}\"" "$gemini_settings" 2>/dev/null; then
+                    ok "Already registered in Gemini settings"
+                    return 0
+                fi
+
+                # Use a temp file to inject MCP config
+                local tmp_settings
+                tmp_settings=$(mktemp)
+                python3 -c "
+import json, sys
+with open('$gemini_settings') as f:
+    cfg = json.load(f)
+cfg.setdefault('mcpServers', {})
+cfg['mcpServers']['${BIN_NAME}'] = {
+    'command': '${BIN_DIR}/${BIN_NAME}${PLATFORM_EXT}',
+    'args': ['serve']
+}
+with open('$tmp_settings', 'w') as f:
+    json.dump(cfg, f, indent=2)
+" 2>/dev/null && mv "$tmp_settings" "$gemini_settings" && ok "Registered in Gemini settings.json" || {
+                    rm -f "$tmp_settings"
+                    warn "Auto-registration failed. Add manually to ~/.gemini/settings.json:"
+                    echo "    \"mcpServers\": { \"${BIN_NAME}\": { \"command\": \"${BIN_DIR}/${BIN_NAME}\", \"args\": [\"serve\"] } }"
+                }
+            else
+                warn "Gemini settings not found. Add manually:"
+                echo "    gemini mcp add ${BIN_NAME} ${BIN_DIR}/${BIN_NAME} serve"
+            fi
+        fi
+    else
+        skip "Skipped Gemini CLI"
+        echo "    gemini mcp add ${BIN_NAME} ${BIN_DIR}/${BIN_NAME} serve"
+    fi
+}
+
+register_opencode() {
+    if [ "$HAS_OPENCODE" = false ]; then
+        skip "OpenCode not found"
+        return 0
+    fi
+
+    info "Detected OpenCode (${OPENCODE_VERSION})"
+    if confirm "  Register the-one-mcp with OpenCode?"; then
+        if opencode mcp add --name "${BIN_NAME}" --command "${BIN_DIR}/${BIN_NAME}${PLATFORM_EXT}" --args serve 2>/dev/null; then
+            ok "Registered with OpenCode"
+        else
+            # Try alternative syntax
+            if opencode mcp add "${BIN_NAME}" --command "${BIN_DIR}/${BIN_NAME}${PLATFORM_EXT}" --args serve 2>/dev/null; then
+                ok "Registered with OpenCode"
+            else
+                warn "Auto-registration failed. Add manually:"
+                echo "    opencode mcp add --name ${BIN_NAME} --command ${BIN_DIR}/${BIN_NAME} --args serve"
+            fi
+        fi
+    else
+        skip "Skipped OpenCode"
+        echo "    opencode mcp add --name ${BIN_NAME} --command ${BIN_DIR}/${BIN_NAME} --args serve"
+    fi
+}
+
+register_codex() {
     if [ "$HAS_CODEX" = false ]; then
         skip "Codex not found"
         return 0
     fi
 
-    info "Detected Codex"
+    info "Detected Codex (${CODEX_VERSION})"
     echo "    To configure, add to your Codex MCP config:"
     echo "    ${BIN_DIR}/${BIN_NAME}${PLATFORM_EXT} serve"
 }
@@ -704,8 +806,10 @@ detect_clis
 
 info "Platform: ${BOLD}${PLATFORM_NAME}${NC}"
 info "Install dir: ${BOLD}${INSTALL_DIR}${NC}"
-[ "$HAS_CLAUDE" = true ] && info "Claude Code: ${GREEN}detected${NC}" || info "Claude Code: ${DIM}not found${NC}"
-[ "$HAS_CODEX" = true ] && info "Codex: ${GREEN}detected${NC}" || info "Codex: ${DIM}not found${NC}"
+[ "$HAS_CLAUDE" = true ] && info "Claude Code: ${GREEN}${CLAUDE_VERSION}${NC}" || info "Claude Code: ${DIM}not found${NC}"
+[ "$HAS_CODEX" = true ] && info "Codex: ${GREEN}${CODEX_VERSION}${NC}" || info "Codex: ${DIM}not found${NC}"
+[ "$HAS_GEMINI" = true ] && info "Gemini CLI: ${GREEN}${GEMINI_VERSION}${NC}" || info "Gemini CLI: ${DIM}not found${NC}"
+[ "$HAS_OPENCODE" = true ] && info "OpenCode: ${GREEN}${OPENCODE_VERSION}${NC}" || info "OpenCode: ${DIM}not found${NC}"
 echo ""
 
 # ── Uninstall path ─────────────────────────────────────────────────────────
@@ -738,8 +842,7 @@ download_recommended_tools
 # Step 4: PATH and CLI registration
 log "Step 4/5: Registering with AI assistants"
 ensure_path
-register_claude_code
-register_codex
+register_all_clis
 
 # Step 5: Validate
 log "Step 5/5: Validating installation"
@@ -756,10 +859,24 @@ echo "  Config:          ${CONFIG_FILE}"
 echo "  Tools:           ${REGISTRY_DIR}/recommended.json"
 echo "  Custom tools:    ${REGISTRY_DIR}/custom.json"
 echo ""
+echo "  ${BOLD}AI Assistant Status:${NC}"
 if [ "$HAS_CLAUDE" = true ]; then
-    echo "  ${GREEN}${BOLD}Claude Code:${NC}     Ready — start a session to use the MCP"
+    echo "    ${GREEN}✓${NC} Claude Code (${CLAUDE_VERSION})"
 else
-    echo "  Claude Code:     Run: claude mcp add ${BIN_NAME} -- ${BIN_DIR}/${BIN_NAME} serve"
+    echo "    ${DIM}–${NC} Claude Code: claude mcp add ${BIN_NAME} -- ${BIN_DIR}/${BIN_NAME} serve"
+fi
+if [ "$HAS_GEMINI" = true ]; then
+    echo "    ${GREEN}✓${NC} Gemini CLI (${GEMINI_VERSION})"
+else
+    echo "    ${DIM}–${NC} Gemini CLI:  gemini mcp add ${BIN_NAME} ${BIN_DIR}/${BIN_NAME} serve"
+fi
+if [ "$HAS_OPENCODE" = true ]; then
+    echo "    ${GREEN}✓${NC} OpenCode (${OPENCODE_VERSION})"
+else
+    echo "    ${DIM}–${NC} OpenCode:    opencode mcp add --name ${BIN_NAME} --command ${BIN_DIR}/${BIN_NAME} --args serve"
+fi
+if [ "$HAS_CODEX" = true ]; then
+    echo "    ${GREEN}✓${NC} Codex (${CODEX_VERSION})"
 fi
 echo ""
 info "Customize: \$EDITOR ${CONFIG_FILE}"
