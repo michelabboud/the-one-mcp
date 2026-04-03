@@ -388,56 +388,87 @@ mod tests {
         )
         .expect("project config write should succeed");
 
-        std::env::set_var("THE_ONE_HOME", global_state_dir.display().to_string());
-        std::env::set_var("THE_ONE_PROVIDER", "env-provider");
+        let global_home = global_state_dir.display().to_string();
+        temp_env::with_vars(
+            [
+                ("THE_ONE_HOME", Some(global_home.as_str())),
+                ("THE_ONE_PROVIDER", Some("env-provider")),
+                ("THE_ONE_LOG_LEVEL", None),
+                ("THE_ONE_QDRANT_URL", None),
+                ("THE_ONE_NANO_PROVIDER", None),
+                ("THE_ONE_NANO_MODEL", None),
+                ("THE_ONE_QDRANT_API_KEY", None),
+                ("THE_ONE_QDRANT_CA_CERT_PATH", None),
+                ("THE_ONE_QDRANT_TLS_INSECURE", None),
+                ("THE_ONE_QDRANT_STRICT_AUTH", None),
+            ],
+            || {
+                let config = AppConfig::load(
+                    &project_root,
+                    RuntimeOverrides {
+                        provider: Some("runtime-provider".to_string()),
+                        log_level: None,
+                        qdrant_url: None,
+                        nano_provider: Some("api".to_string()),
+                        nano_model: Some("gpt-nano".to_string()),
+                        qdrant_api_key: None,
+                        qdrant_ca_cert_path: None,
+                        qdrant_tls_insecure: None,
+                        qdrant_strict_auth: None,
+                    },
+                )
+                .expect("config should load");
 
-        let config = AppConfig::load(
-            &project_root,
-            RuntimeOverrides {
-                provider: Some("runtime-provider".to_string()),
-                log_level: None,
-                qdrant_url: None,
-                nano_provider: Some("api".to_string()),
-                nano_model: Some("gpt-nano".to_string()),
-                qdrant_api_key: None,
-                qdrant_ca_cert_path: None,
-                qdrant_tls_insecure: None,
-                qdrant_strict_auth: None,
+                assert_eq!(config.provider, "runtime-provider");
+                assert_eq!(config.log_level, "warn");
+                assert_eq!(config.qdrant_url, "http://project:6334");
+                assert_eq!(config.nano_provider, NanoProviderKind::Api);
+                assert_eq!(config.nano_model, "gpt-nano");
             },
-        )
-        .expect("config should load");
-
-        assert_eq!(config.provider, "runtime-provider");
-        assert_eq!(config.log_level, "warn");
-        assert_eq!(config.qdrant_url, "http://project:6334");
-        assert_eq!(config.nano_provider, NanoProviderKind::Api);
-        assert_eq!(config.nano_model, "gpt-nano");
-
-        std::env::remove_var("THE_ONE_HOME");
-        std::env::remove_var("THE_ONE_PROVIDER");
+        );
     }
 
     #[test]
     fn test_update_project_config_persists_provider_and_nano_settings() {
         let temp = tempfile::tempdir().expect("tempdir should be created");
         let project_root = temp.path().join("repo");
+        let global_state_dir = temp.path().join("global");
+
         fs::create_dir_all(&project_root).expect("project root should exist");
+        fs::create_dir_all(&global_state_dir).expect("global state dir should exist");
 
-        update_project_config(
-            &project_root,
-            ProjectConfigUpdate {
-                provider: Some("hosted".to_string()),
-                nano_provider: Some("ollama".to_string()),
-                nano_model: Some("tiny".to_string()),
-                ..ProjectConfigUpdate::default()
+        let global_home = global_state_dir.display().to_string();
+        temp_env::with_vars(
+            [
+                ("THE_ONE_HOME", Some(global_home.as_str())),
+                ("THE_ONE_PROVIDER", None),
+                ("THE_ONE_LOG_LEVEL", None),
+                ("THE_ONE_QDRANT_URL", None),
+                ("THE_ONE_NANO_PROVIDER", None),
+                ("THE_ONE_NANO_MODEL", None),
+                ("THE_ONE_QDRANT_API_KEY", None),
+                ("THE_ONE_QDRANT_CA_CERT_PATH", None),
+                ("THE_ONE_QDRANT_TLS_INSECURE", None),
+                ("THE_ONE_QDRANT_STRICT_AUTH", None),
+            ],
+            || {
+                update_project_config(
+                    &project_root,
+                    ProjectConfigUpdate {
+                        provider: Some("hosted".to_string()),
+                        nano_provider: Some("ollama".to_string()),
+                        nano_model: Some("tiny".to_string()),
+                        ..ProjectConfigUpdate::default()
+                    },
+                )
+                .expect("update should succeed");
+
+                let config = AppConfig::load(&project_root, RuntimeOverrides::default())
+                    .expect("config should load");
+                assert_eq!(config.provider, "hosted");
+                assert_eq!(config.nano_provider, NanoProviderKind::Ollama);
+                assert_eq!(config.nano_model, "tiny");
             },
-        )
-        .expect("update should succeed");
-
-        let config = AppConfig::load(&project_root, RuntimeOverrides::default())
-            .expect("config should load");
-        assert_eq!(config.provider, "hosted");
-        assert_eq!(config.nano_provider, NanoProviderKind::Ollama);
-        assert_eq!(config.nano_model, "tiny");
+        );
     }
 }
