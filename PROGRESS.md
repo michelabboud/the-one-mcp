@@ -93,6 +93,16 @@ All complete: Claude Code + Gemini CLI + OpenCode + Codex auto-detection, tiered
 - Per-provider health tracking with cooldown
 - TCP pre-flight checks
 
+## Infrastructure (v0.3.1)
+
+- SECURITY.md with vulnerability reporting policy and security design documentation
+- Hardened .gitignore (secrets, keys, certs, IDE, OS files)
+- Weekly cargo-audit + gitleaks CI (security.yml)
+- Manual-only release workflow (workflow_dispatch, no auto-trigger on tags)
+- `build.sh release` command for triggering cross-platform builds
+- Repo made public — curl one-liner install works
+- GitHub Release v0.3.1 with 4 platform binaries (Linux x86, macOS x86+ARM, Windows x86)
+
 ## Verification Snapshot
 
 - `cargo fmt --check` — passing
@@ -100,6 +110,7 @@ All complete: Claude Code + Gemini CLI + OpenCode + Codex auto-detection, tiered
 - `cargo test --workspace` — **135 tests passing**
 - `cargo build --release -p the-one-mcp --bin the-one-mcp` — passing
 - `bash scripts/release-gate.sh` — passing
+- `bash scripts/build.sh check` — full CI pipeline passing
 
 ## What's Next
 

@@ -1,17 +1,19 @@
 # AGENTS.md - The-One MCP Development Guide
 
-Rust MCP broker system (v0.2.0). All agents should follow these guidelines.
+Rust MCP broker system (v0.3.1). All agents should follow these guidelines.
 
 ## Build Commands
 
 ```bash
 # Full validation (run before every commit)
+bash scripts/build.sh check     # or manually:
 cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 
 # Build release binary
-cargo build --release -p the-one-mcp --bin the-one-mcp
+bash scripts/build.sh build     # with swagger
+bash scripts/build.sh build --lean  # without swagger
 
 # Build entire workspace
 cargo build --release --workspace
@@ -24,6 +26,10 @@ cargo test -p the-one-mcp
 
 # Release gate
 bash scripts/release-gate.sh
+
+# Trigger cross-platform release (manual only — does NOT auto-trigger on tags)
+bash scripts/build.sh release v0.4.0
+bash scripts/build.sh release --status
 ```
 
 ## Workspace Structure

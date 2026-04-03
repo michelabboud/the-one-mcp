@@ -576,14 +576,44 @@ THE_ONE_PROJECT_ROOT="$(pwd)" THE_ONE_PROJECT_ID="demo" cargo run -p the-one-ui 
 
 ## 17. CI and Release
 
+### Local Validation
+
 ```bash
-# Full validation
+# Full CI pipeline (what CI runs)
+bash scripts/build.sh check
+
+# Or individual steps
 cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo build --release -p the-one-mcp --bin the-one-mcp
 bash scripts/release-gate.sh
 ```
+
+### Cross-Platform Release
+
+Releases are **manual only** — tagging does not auto-trigger builds. You decide when to create release artifacts.
+
+```bash
+# Trigger a release (builds 6 platform binaries on GitHub Actions)
+bash scripts/build.sh release v0.4.0
+
+# Check release workflow status
+bash scripts/build.sh release --status
+
+# Preview without triggering
+bash scripts/build.sh --dry-run release v0.4.0
+```
+
+Or via GitHub UI: Actions → release → Run workflow → enter version tag.
+
+Each release builds: Linux x86-64, Linux ARM64, macOS x86-64, macOS ARM64, Windows x86-64, Windows ARM64. Each archive contains `the-one-mcp`, `the-one-mcp-lean` (no swagger), `embedded-ui`, schemas, and build metadata.
+
+### Security CI
+
+Automated weekly (Monday 06:00 UTC) + on every push/PR:
+- `cargo audit` — dependency vulnerability scanning
+- `gitleaks` — secret detection in committed code
 
 ## 18. Troubleshooting
 

@@ -127,14 +127,21 @@ Contribute tools via [GitHub PR or Issue](CONTRIBUTING.md).
 | `the-one-codex` | Codex adapter |
 | `the-one-ui` | Embedded admin UI (dashboard, config, audit, swagger) |
 
-## Build
+## Build & Release
 
 ```bash
+# Local builds
 bash scripts/build.sh build           # release with swagger
 bash scripts/build.sh build --lean    # release without swagger
 bash scripts/build.sh check           # full CI pipeline
 bash scripts/build.sh info            # show build config
+
+# Cross-platform release (triggers GitHub Actions — manual only)
+bash scripts/build.sh release v0.4.0  # build for 6 platforms + create GitHub Release
+bash scripts/build.sh release --status # check workflow progress
 ```
+
+Releases are **manual only** — tagging does not auto-trigger builds. You decide when to build artifacts.
 
 ## Stats
 

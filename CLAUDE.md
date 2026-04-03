@@ -80,7 +80,8 @@ All crates use `CoreError` from `the-one-core::error`. Library code uses `thiser
 - JSON schema files in `schemas/mcp/v1beta/` use `$id` prefix `the-one.mcp.v1beta.` and JSON Schema draft 2020-12
 - The `fastembed` model downloads on first use (~23-220MB depending on tier) and caches in `.fastembed_cache/` (gitignored)
 - `scripts/install.sh` handles full installation: download, config, CLI registration (Claude/Gemini/OpenCode/Codex)
-- `scripts/build.sh` is the build manager: `build`, `build --lean`, `dev`, `test`, `check`, `package`, `install`
+- `scripts/build.sh` is the build + release manager: `build`, `build --lean`, `dev`, `test`, `check`, `package`, `install`, `release`
+- Releases are manual-only via `build.sh release v0.4.0` (triggers GitHub Actions workflow_dispatch, does NOT auto-trigger on tags)
 - Tool catalog: `tools/catalog/` (curated JSON), `~/.the-one/catalog.db` (SQLite with FTS5), Qdrant `the_one_tools` collection (semantic)
 - Custom tools: `~/.the-one/registry/custom.json` (shared), `custom-<cli>.json` (per-CLI)
 - 31 MCP tools (see `crates/the-one-mcp/src/transport/tools.rs`), 135 tests, 63 schemas, 28 catalog entries

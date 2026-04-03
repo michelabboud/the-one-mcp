@@ -1,7 +1,7 @@
 # The-One MCP Operator Runbook
 
-Last updated: 2026-04-03
-Applies to: v0.2.0 (`v1beta` schema)
+Last updated: 2026-04-04
+Applies to: v0.3.1 (`v1beta` schema)
 
 ## 1. Service Health Checklist
 

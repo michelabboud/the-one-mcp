@@ -2,6 +2,27 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.3.1] - 2026-04-04
+
+### Added
+- SECURITY.md with vulnerability reporting and security design documentation
+- INSTALL.md with complete installation guide
+- Weekly security CI: cargo-audit (dependency CVEs) + gitleaks (secret scanning)
+- `build.sh release` command for triggering cross-platform GitHub Actions releases
+- Manual-only release workflow (workflow_dispatch) — tags no longer auto-trigger builds
+- Partial release support: creates GitHub Release even if some platform builds fail
+
+### Changed
+- Release workflow: removed sccache (caused failures), switched macOS to macos-latest
+- .gitignore hardened: blocks .env, secrets/, keys, certs, IDE, OS files
+- Repo made public — curl one-liner install now works
+- All docs updated for v0.3.0 features + release workflow + security
+
+### Security
+- Added cargo-audit weekly scanning for dependency vulnerabilities
+- Added gitleaks scanning for accidentally committed secrets
+- Hardened .gitignore to prevent secret exposure in public repo
+
 ## [0.3.0] - 2026-04-03
 
 ### Added
