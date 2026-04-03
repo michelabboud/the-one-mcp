@@ -339,6 +339,119 @@ pub struct ConfigUpdateResponse {
     pub path: String,
 }
 
+// ---------------------------------------------------------------------------
+// Tool lifecycle types
+// ---------------------------------------------------------------------------
+
+fn default_tool_type() -> String {
+    "cli".to_string()
+}
+
+// tool.add
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolAddRequest {
+    pub id: String,
+    pub name: String,
+    #[serde(default = "default_tool_type")]
+    pub tool_type: String,
+    #[serde(default)]
+    pub category: Vec<String>,
+    #[serde(default)]
+    pub languages: Vec<String>,
+    pub description: String,
+    pub install_command: String,
+    pub run_command: String,
+    #[serde(default)]
+    pub risk_level: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub github: Option<String>,
+    #[serde(default)]
+    pub cli: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolAddResponse {
+    pub added: bool,
+    pub id: String,
+}
+
+// tool.remove
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolRemoveRequest {
+    pub tool_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolRemoveResponse {
+    pub removed: bool,
+}
+
+// tool.disable
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolDisableRequest {
+    pub tool_id: String,
+    pub project_root: String,
+    pub project_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolDisableResponse {
+    pub disabled: bool,
+}
+
+// tool.install
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolInstallRequest {
+    pub tool_id: String,
+    pub project_root: String,
+    pub project_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolInstallResponse {
+    pub installed: bool,
+    pub binary_path: Option<String>,
+    pub version: Option<String>,
+    pub auto_enabled: bool,
+    pub output: String,
+}
+
+// tool.info
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolInfoRequest {
+    pub tool_id: String,
+}
+// Response: ToolFullInfo from the_one_core::tool_catalog (already serializable)
+
+// tool.update (catalog refresh)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolUpdateRequest {}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolUpdateResponse {
+    pub catalog_version_before: Option<String>,
+    pub catalog_version_after: Option<String>,
+    pub tools_added: usize,
+    pub tools_updated: usize,
+    pub system_tools_found: u64,
+}
+
+// tool.list (with state filter)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolListRequest {
+    #[serde(default)]
+    pub state: Option<String>,
+    pub project_root: String,
+    pub project_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolListResponse {
+    pub tools: Vec<the_one_core::tool_catalog::ToolSummary>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
