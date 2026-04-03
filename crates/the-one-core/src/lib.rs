@@ -10,3 +10,5 @@ pub mod profiler;
 pub mod project;
 pub mod storage;
 pub mod telemetry;
+pub mod tool_catalog;
+pub mod tool_catalog_schema;

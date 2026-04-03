@@ -22,4 +22,6 @@ pub enum CoreError {
     Provider(String),
     #[error("document error: {0}")]
     Document(String),
+    #[error("catalog error: {0}")]
+    Catalog(String),
 }
