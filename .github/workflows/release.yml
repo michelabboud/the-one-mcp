@@ -18,8 +18,6 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
-  SCCACHE_GHA_ENABLED: true
-  RUSTC_WRAPPER: sccache
 
 jobs:
   # ── Validate before building ─────────────────────────────────────────────
@@ -112,6 +110,8 @@ jobs:
       TARGET: ${{ matrix.target }}
       PLATFORM_NAME: ${{ matrix.name }}
       EXT: ${{ matrix.ext }}
+      SCCACHE_GHA_ENABLED: true
+      RUSTC_WRAPPER: sccache
 
     steps:
       - uses: actions/checkout@v4
