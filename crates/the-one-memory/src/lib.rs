@@ -1,3 +1,5 @@
+pub mod chunker;
+
 use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::fs;
