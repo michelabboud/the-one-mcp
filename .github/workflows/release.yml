@@ -80,7 +80,7 @@ jobs:
 
           # ── macOS ──
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-latest
             name: macos-x86_64
             cross: false
             ext: ""
@@ -229,7 +229,7 @@ jobs:
   release:
     needs: [validate, build]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    if: always() && needs.validate.result == 'success' && (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch')
     env:
       VERSION: ${{ needs.validate.outputs.version }}
 
