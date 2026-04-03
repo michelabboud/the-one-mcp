@@ -624,6 +624,67 @@ cmd_info() {
 }
 
 # ═══════════════════════════════════════════════════════════════════════════
+# ── RELEASE (triggers GitHub Actions) ──────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════
+
+cmd_release() {
+    local tag=""
+    local status_only=false
+
+    for arg in "$@"; do
+        case "$arg" in
+            --status)  status_only=true ;;
+            v*)        tag="$arg" ;;
+            *)         err "Unknown release option: $arg"; exit 1 ;;
+        esac
+    done
+
+    # Check gh CLI is available
+    if ! command -v gh >/dev/null 2>&1; then
+        err "GitHub CLI (gh) is required for release commands"
+        info "Install: https://cli.github.com/"
+        exit 1
+    fi
+
+    # Status check
+    if [ "$status_only" = true ]; then
+        log "Recent release workflows:"
+        gh run list --workflow release.yml --limit 5
+        return 0
+    fi
+
+    # Default tag from VERSION file
+    if [ -z "$tag" ]; then
+        tag="${VERSION}"
+    fi
+
+    log "Triggering release workflow for ${BOLD}${tag}${NC}"
+    echo ""
+    info "This will:"
+    echo "  1. Run fmt + clippy + tests on GitHub"
+    echo "  2. Build binaries for 6 platforms"
+    echo "  3. Create GitHub Release with artifacts"
+    echo ""
+
+    if [ "$DRY_RUN" = true ]; then
+        dry "gh workflow run release.yml -f tag=${tag}"
+        return 0
+    fi
+
+    if ! confirm "Trigger release ${tag}?"; then
+        log "Cancelled"
+        return 0
+    fi
+
+    gh workflow run release.yml -f tag="${tag}"
+    log "Release workflow triggered for ${tag}"
+    echo ""
+    info "Monitor: gh run list --workflow release.yml --limit 3"
+    info "Or:      build.sh release --status"
+    info "Or:      https://github.com/$(gh repo view --json nameWithOwner -q '.nameWithOwner')/actions/workflows/release.yml"
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
 # ── HELP ───────────────────────────────────────────────────────────────────
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -651,6 +712,7 @@ ${CYAN}${BOLD}COMMANDS${NC}
   ${GREEN}Distribution${NC}
     package         Build + create dist/ package with metadata
     install         Build + copy binary to ~/.local/bin/
+    release         Trigger cross-platform GitHub Actions release
 
   ${GREEN}Maintenance${NC}
     clean           Remove build artifacts
@@ -681,6 +743,10 @@ ${CYAN}${BOLD}INSTALL OPTIONS${NC}
 ${CYAN}${BOLD}PACKAGE OPTIONS${NC}
     --lean            Package without swagger
     --with-ui         Include embedded-ui binary in package
+
+${CYAN}${BOLD}RELEASE OPTIONS${NC}
+    <version>         Version tag (e.g., v0.4.0). Defaults to VERSION file.
+    --status          Show recent release workflow runs
 
 ${CYAN}${BOLD}EXAMPLES${NC}
     ${GREEN}# Standard release build (with swagger):${NC}
@@ -727,6 +793,15 @@ ${CYAN}${BOLD}EXAMPLES${NC}
 
     ${GREEN}# Show build info:${NC}
     build.sh info
+
+    ${GREEN}# Trigger GitHub release for current version:${NC}
+    build.sh release
+
+    ${GREEN}# Trigger release for specific version:${NC}
+    build.sh release v0.4.0
+
+    ${GREEN}# Check release workflow status:${NC}
+    build.sh release --status
 
 ${CYAN}${BOLD}FEATURE FLAGS${NC}
     embed-swagger     Bakes OpenAPI/Swagger JSON into the binary.
@@ -861,9 +936,30 @@ Creates:
     schemas/             v1beta JSON schemas
 EOF
             ;;
+        release)
+            cat <<EOF
+Usage: build.sh release [version] [--status]
+
+Trigger a cross-platform release build on GitHub Actions.
+Builds binaries for Linux, macOS, and Windows (x86-64 + ARM64).
+Creates a GitHub Release with artifacts and checksums.
+
+Requires: GitHub CLI (gh) authenticated with repo access.
+
+Options:
+  <version>    Version tag (e.g., v0.4.0). Defaults to VERSION file.
+  --status     Show recent release workflow runs instead of triggering.
+
+Examples:
+  build.sh release              Trigger release for current VERSION
+  build.sh release v0.4.0       Trigger release for v0.4.0
+  build.sh release --status     Check workflow status
+  build.sh --dry-run release    Preview without triggering
+EOF
+            ;;
         *)
             err "No help available for: ${command}"
-            info "Available commands: build, dev, test, check, package, install, clean, info, help"
+            info "Available commands: build, dev, test, check, package, install, release, clean, info, help"
             return 1
             ;;
     esac
@@ -907,6 +1003,7 @@ case "$COMMAND" in
     test)     cmd_test "$@" ;;
     check)    cmd_check "$@" ;;
     package)  cmd_package "$@" ;;
+    release)  cmd_release "$@" ;;
     install)  cmd_install "$@" ;;
     clean)    cmd_clean "$@" ;;
     info)     cmd_info "$@" ;;

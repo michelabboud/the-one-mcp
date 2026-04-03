@@ -1,15 +1,14 @@
 name: release
 
-# Trigger on version tags or manual dispatch
+# Manual trigger only — you decide when to build release artifacts.
+# Use: gh workflow run release.yml -f tag=v0.4.0
+# Or: GitHub Actions UI → release → Run workflow
 on:
-  push:
-    tags:
-      - "v*"
   workflow_dispatch:
     inputs:
       tag:
-        description: "Version tag (e.g., v0.2.0). Leave empty to use current VERSION file."
-        required: false
+        description: "Version tag to release (e.g., v0.4.0). Creates tag if it doesn't exist."
+        required: true
         type: string
 
 permissions:
@@ -20,7 +19,6 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
-  # ── Validate before building ─────────────────────────────────────────────
   validate:
     runs-on: ubuntu-latest
     outputs:
@@ -28,76 +26,56 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Determine version
+      - name: Set version
         id: version
         env:
           INPUT_TAG: ${{ inputs.tag }}
-          REF_NAME: ${{ github.ref_name }}
-        run: |
-          if [ -n "$INPUT_TAG" ]; then
-            echo "version=$INPUT_TAG" >> "$GITHUB_OUTPUT"
-          elif [[ "$REF_NAME" == v* ]]; then
-            echo "version=$REF_NAME" >> "$GITHUB_OUTPUT"
-          else
-            echo "version=$(cat VERSION)" >> "$GITHUB_OUTPUT"
-          fi
+        run: echo "version=$INPUT_TAG" >> "$GITHUB_OUTPUT"
 
       - name: Print version
         env:
           VERSION: ${{ steps.version.outputs.version }}
-        run: echo "Building version $VERSION"
+        run: echo "Building release $VERSION"
 
       - uses: dtolnay/rust-toolchain@stable
-
       - name: Format check
         run: cargo fmt --check
-
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
-
       - name: Tests
         run: cargo test --workspace
 
-  # ── Build matrix ─────────────────────────────────────────────────────────
   build:
     needs: validate
     strategy:
       fail-fast: false
       matrix:
         include:
-          # ── Linux ──
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             name: linux-x86_64
             cross: false
             ext: ""
-
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             name: linux-aarch64
             cross: true
             ext: ""
-
-          # ── macOS ──
           - target: x86_64-apple-darwin
             os: macos-latest
             name: macos-x86_64
             cross: false
             ext: ""
-
           - target: aarch64-apple-darwin
             os: macos-latest
             name: macos-aarch64
             cross: false
             ext: ""
-
-          # ── Windows ──
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             name: windows-x86_64
             cross: false
             ext: .exe
-
           - target: aarch64-pc-windows-msvc
             os: windows-latest
             name: windows-aarch64
@@ -113,67 +91,52 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-
-      # ── Rust toolchain ──
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
-      # ── Cross tool (Linux ARM64 only) ──
       - name: Install cross
         if: matrix.cross
         run: |
           curl -fsSL https://github.com/cross-rs/cross/releases/latest/download/cross-x86_64-unknown-linux-gnu.tar.gz | tar xz -C /usr/local/bin
           cross --version
 
-      # ── Build MCP server (with swagger) ──
       - name: Build MCP server (with swagger)
         shell: bash
         run: |
           BUILD_CMD="${{ matrix.cross && 'cross' || 'cargo' }}"
           $BUILD_CMD build --release --target "$TARGET" -p the-one-mcp --bin the-one-mcp
 
-      # ── Build MCP server (lean, no swagger) ──
       - name: Build MCP server (lean)
         shell: bash
         run: |
           BUILD_CMD="${{ matrix.cross && 'cross' || 'cargo' }}"
           $BUILD_CMD build --release --target "$TARGET" -p the-one-mcp --bin the-one-mcp --no-default-features
-          # Save lean binary before it gets overwritten
           cp "target/${TARGET}/release/the-one-mcp${EXT}" \
              "target/${TARGET}/release/the-one-mcp-lean${EXT}"
 
-      # ── Rebuild full binary (lean build overwrote it) ──
       - name: Rebuild MCP server (with swagger)
         shell: bash
         run: |
           BUILD_CMD="${{ matrix.cross && 'cross' || 'cargo' }}"
           $BUILD_CMD build --release --target "$TARGET" -p the-one-mcp --bin the-one-mcp
 
-      # ── Build embedded UI ──
       - name: Build embedded UI
         shell: bash
         run: |
           BUILD_CMD="${{ matrix.cross && 'cross' || 'cargo' }}"
           $BUILD_CMD build --release --target "$TARGET" -p the-one-ui --bin embedded-ui
 
-      # ── Package ──
       - name: Package artifacts
         shell: bash
         run: |
           PKG="the-one-mcp-${VERSION}-${PLATFORM_NAME}"
           DIST="dist/${PKG}"
           mkdir -p "$DIST"
-
-          # Binaries
           cp "target/${TARGET}/release/the-one-mcp${EXT}"      "$DIST/the-one-mcp${EXT}"
           cp "target/${TARGET}/release/the-one-mcp-lean${EXT}" "$DIST/the-one-mcp-lean${EXT}"
           cp "target/${TARGET}/release/embedded-ui${EXT}"      "$DIST/embedded-ui${EXT}"
-
-          # Schemas
           cp -r schemas "$DIST/"
-
-          # Build metadata
           cat > "$DIST/BUILD_INFO" <<BUILDEOF
           version=${VERSION}
           target=${TARGET}
@@ -181,24 +144,6 @@ jobs:
           git_commit=$(git rev-parse --short HEAD)
           rustc_version=$(rustc --version)
           BUILDEOF
-
-          # README
-          cat > "$DIST/README.txt" <<READMEEOF
-          the-one-mcp ${VERSION} (${PLATFORM_NAME})
-
-          Binaries included:
-            the-one-mcp${EXT}        MCP server (with Swagger UI)
-            the-one-mcp-lean${EXT}   MCP server (no Swagger, smaller)
-            embedded-ui${EXT}        Admin UI dashboard
-
-          Quick start:
-            ./the-one-mcp serve
-            claude mcp add the-one-mcp -- \$(pwd)/the-one-mcp serve
-
-          Docs: https://github.com/${GITHUB_REPOSITORY}
-          READMEEOF
-
-          # Archive
           cd dist
           if [[ "${PLATFORM_NAME}" == windows-* ]]; then
             7z a -tzip "${PKG}.zip" "${PKG}"
@@ -206,7 +151,6 @@ jobs:
             tar -czf "${PKG}.tar.gz" "${PKG}"
           fi
 
-      # ── Show sizes ──
       - name: Binary sizes
         shell: bash
         run: |
@@ -215,7 +159,6 @@ jobs:
           ls -lh "dist/the-one-mcp-${VERSION}-${PLATFORM_NAME}/the-one-mcp-lean${EXT}"
           ls -lh "dist/the-one-mcp-${VERSION}-${PLATFORM_NAME}/embedded-ui${EXT}"
 
-      # ── Upload ──
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -225,16 +168,27 @@ jobs:
             dist/*.zip
           retention-days: 30
 
-  # ── Create GitHub Release ────────────────────────────────────────────────
   release:
     needs: [validate, build]
     runs-on: ubuntu-latest
-    if: always() && needs.validate.result == 'success' && (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch')
+    if: always() && needs.validate.result == 'success'
     env:
       VERSION: ${{ needs.validate.outputs.version }}
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Create tag if needed
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if git rev-parse "$VERSION" >/dev/null 2>&1; then
+            echo "Tag $VERSION already exists"
+          else
+            git tag -a "$VERSION" -m "Release $VERSION"
+            git push origin "$VERSION"
+            echo "Created tag $VERSION"
+          fi
 
       - uses: actions/download-artifact@v4
         with:
@@ -245,13 +199,17 @@ jobs:
           mkdir -p release-assets
           find artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" \) -exec cp {} release-assets/ \;
           echo "=== Release assets ==="
-          ls -lh release-assets/
+          ls -lh release-assets/ || echo "No assets"
 
       - name: Generate checksums
         working-directory: release-assets
         run: |
-          sha256sum * > SHA256SUMS.txt
-          cat SHA256SUMS.txt
+          if compgen -G "*.tar.gz" >/dev/null || compgen -G "*.zip" >/dev/null; then
+            sha256sum * > SHA256SUMS.txt
+            cat SHA256SUMS.txt
+          else
+            echo "No artifacts to checksum"
+          fi
 
       - name: Create GitHub Release
         env:
@@ -262,8 +220,16 @@ jobs:
             PRERELEASE_FLAG="--prerelease"
           fi
 
-          gh release create "$VERSION" \
-            --title "the-one-mcp $VERSION" \
-            --generate-notes \
-            $PRERELEASE_FLAG \
-            release-assets/*
+          if compgen -G "release-assets/*.tar.gz" >/dev/null || compgen -G "release-assets/*.zip" >/dev/null; then
+            gh release create "$VERSION" \
+              --title "the-one-mcp $VERSION" \
+              --generate-notes \
+              $PRERELEASE_FLAG \
+              release-assets/*
+          else
+            gh release create "$VERSION" \
+              --title "the-one-mcp $VERSION" \
+              --generate-notes \
+              --notes "Release created but build artifacts unavailable." \
+              $PRERELEASE_FLAG
+          fi
