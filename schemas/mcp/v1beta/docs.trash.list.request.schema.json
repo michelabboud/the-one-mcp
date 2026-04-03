@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "the-one.mcp.v1beta.docs.trash.list.request",
+  "title": "docs.trash.list request",
+  "type": "object",
+  "required": ["project_root", "project_id"],
+  "properties": {
+    "project_root": {
+      "type": "string",
+      "minLength": 1
+    },
+    "project_id": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "additionalProperties": false
+}

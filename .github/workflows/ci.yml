@@ -29,6 +29,9 @@ jobs:
       - name: Cargo test
         run: cargo test --workspace
 
+      - name: Binary build
+        run: cargo build --release -p the-one-mcp --bin the-one-mcp
+
   release-gate:
     runs-on: ubuntu-latest
     needs: rust

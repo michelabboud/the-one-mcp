@@ -14,3 +14,14 @@ cargo test -p the-one-core test_manual_restore_recovers_sqlite_and_qdrant_tree
 cargo test -p the-one-mcp test_project_refresh_soak_keeps_cached_mode_when_unchanged
 cargo test -p the-one-mcp test_remote_qdrant_strict_auth_rejects_missing_api_key
 cargo test -p the-one-ui test_embedded_ui_runtime_serves_dashboard_and_health
+
+# New production tests
+cargo test -p the-one-memory test_fastembed
+cargo test -p the-one-memory test_ingest_and_search
+cargo test -p the-one-core test_create_and_get
+cargo test -p the-one-router test_pool_classify_with_mock
+cargo test -p the-one-mcp test_dispatch_initialize
+cargo test -p the-one-mcp test_dispatch_tools_list
+
+# Binary build
+cargo build --release -p the-one-mcp --bin the-one-mcp

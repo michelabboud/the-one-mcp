@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "the-one.mcp.v1beta.config.update.request",
+  "title": "config.update request",
+  "type": "object",
+  "required": ["project_root", "update"],
+  "properties": {
+    "project_root": {
+      "type": "string",
+      "minLength": 1
+    },
+    "update": {
+      "type": "object",
+      "description": "JSON object with configuration fields to update"
+    }
+  },
+  "additionalProperties": false
+}

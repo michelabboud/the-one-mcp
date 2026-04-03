@@ -21,17 +21,39 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-## 3) Build Release
+## 3) Build the MCP Binary
 
 ```bash
-# default includes embedded swagger
+# Build the MCP server binary
+cargo build --release -p the-one-mcp --bin the-one-mcp
+
+# Full workspace build (includes all crates)
 cargo build --release --workspace
 
-# optional: build MCP without embedded swagger
+# Optional: build MCP without embedded swagger
 cargo build --release -p the-one-mcp --no-default-features
 ```
 
-## 4) Launch Embedded UI
+## 4) Run as MCP Server
+
+```bash
+# Stdio transport (default, for Claude Code / Codex)
+./target/release/the-one-mcp serve
+
+# SSE transport
+./target/release/the-one-mcp serve --transport sse --port 3000
+
+# Streamable HTTP transport
+./target/release/the-one-mcp serve --transport stream --port 3000
+```
+
+### Add to Claude Code
+
+```bash
+claude mcp add the-one-mcp -- ./target/release/the-one-mcp serve
+```
+
+## 5) Launch Embedded UI
 
 ```bash
 THE_ONE_PROJECT_ROOT="$(pwd)" THE_ONE_PROJECT_ID="demo" cargo run -p the-one-ui --bin embedded-ui
@@ -50,15 +72,15 @@ Open:
 - `http://127.0.0.1:8787/swagger` (Swagger UI, 404 if built without `embed-swagger`)
 - `http://127.0.0.1:8787/api/swagger` (raw OpenAPI JSON)
 - `http://127.0.0.1:8787/audit`
-- `http://127.0.0.1:8787/config` (editable config form saved via `/api/config`)
+- `http://127.0.0.1:8787/config` (editable config form with limits, saved via `/api/config`)
 
-## 5) Run Release Gate
+## 6) Run Release Gate
 
 ```bash
 bash scripts/release-gate.sh
 ```
 
-## 6) Next Docs
+## 7) Next Docs
 
 - Operations: `docs/ops/operator-runbook.md`
 - Release notes: `docs/releases/v1beta-upgrade-notes.md`

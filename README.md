@@ -3,6 +3,27 @@
 Rust MCP broker workspace with project lifecycle, docs/memory retrieval, policy-gated tools,
 Claude/Codex adapters, and an embedded admin UI runtime.
 
+## Quick Start
+
+```bash
+# Build
+cargo build --release -p the-one-mcp --bin the-one-mcp
+
+# Run as MCP server (stdio, for Claude Code / Codex)
+./target/release/the-one-mcp serve
+
+# Run with SSE transport
+./target/release/the-one-mcp serve --transport sse --port 3000
+
+# Run with streamable HTTP transport
+./target/release/the-one-mcp serve --transport stream --port 3000
+```
+
+Add to Claude Code:
+```bash
+claude mcp add the-one-mcp -- ./target/release/the-one-mcp serve
+```
+
 ## Quick Links
 
 - Quickstart: `docs/guides/quickstart.md`
@@ -15,9 +36,14 @@ Claude/Codex adapters, and an embedded admin UI runtime.
 
 - `project.*`: init/refresh/profile
 - `memory.*` and `docs.*`: markdown ingestion, section retrieval, vector search paths
+- `docs.create/update/delete/move`: managed document CRUD with soft-delete to .trash
+- `docs.trash.list/restore/empty`: trash management
+- `docs.reindex`: re-ingest all documents into the memory index
+- `config.update`: update project configuration fields
 - `tool.*`: search/suggest/enable/run with approval policy
 - `config.export`, `metrics.snapshot`, `audit.events`
 - Qdrant HTTP integration with auth/TLS knobs + strict remote auth mode
+- Nano LLM provider pool with health tracking and routing policies
 - Optional compile-time embedded swagger (`embed-swagger`, default enabled)
 
 ## Build and Verify
@@ -31,6 +57,7 @@ cargo test --workspace
 Release builds:
 
 ```bash
+cargo build --release -p the-one-mcp --bin the-one-mcp
 cargo build --release --workspace
 cargo build --release -p the-one-mcp --no-default-features
 ```
@@ -48,4 +75,4 @@ Default endpoints:
 - `http://127.0.0.1:8787/swagger` (interactive Swagger UI)
 - `http://127.0.0.1:8787/api/swagger` (raw OpenAPI JSON)
 - `http://127.0.0.1:8787/audit`
-- `http://127.0.0.1:8787/config` (editable config form)
+- `http://127.0.0.1:8787/config` (editable config form with limits)
