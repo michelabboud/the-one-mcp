@@ -16,8 +16,8 @@ const DEFAULT_NANO_MODEL: &str = "none";
 const DEFAULT_QDRANT_TLS_INSECURE: bool = false;
 const DEFAULT_QDRANT_STRICT_AUTH: bool = true;
 const DEFAULT_EMBEDDING_PROVIDER: &str = "local";
-const DEFAULT_EMBEDDING_MODEL: &str = "BGE-base-en-v1.5";
-const DEFAULT_EMBEDDING_DIMENSIONS: usize = 768;
+const DEFAULT_EMBEDDING_MODEL: &str = "BGE-large-en-v1.5";
+const DEFAULT_EMBEDDING_DIMENSIONS: usize = 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NanoProviderKind {
