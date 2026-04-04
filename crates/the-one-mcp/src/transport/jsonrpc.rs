@@ -144,48 +144,7 @@ async fn handle_tools_call(
 
 async fn dispatch_tool(broker: &McpBroker, tool_name: &str, args: Value) -> Result<Value, String> {
     match tool_name {
-        "project.init" => {
-            let project_root = args["project_root"]
-                .as_str()
-                .ok_or("missing project_root")?;
-            let project_id = args["project_id"].as_str().ok_or("missing project_id")?;
-            let result = broker
-                .project_init(ProjectInitRequest {
-                    project_root: project_root.to_string(),
-                    project_id: project_id.to_string(),
-                })
-                .await
-                .map_err(|e| e.to_string())?;
-            serde_json::to_value(result).map_err(|e| e.to_string())
-        }
-        "project.refresh" => {
-            let project_root = args["project_root"]
-                .as_str()
-                .ok_or("missing project_root")?;
-            let project_id = args["project_id"].as_str().ok_or("missing project_id")?;
-            let result = broker
-                .project_refresh(ProjectRefreshRequest {
-                    project_root: project_root.to_string(),
-                    project_id: project_id.to_string(),
-                })
-                .await
-                .map_err(|e| e.to_string())?;
-            serde_json::to_value(result).map_err(|e| e.to_string())
-        }
-        "project.profile.get" => {
-            let project_root = args["project_root"]
-                .as_str()
-                .ok_or("missing project_root")?;
-            let project_id = args["project_id"].as_str().ok_or("missing project_id")?;
-            let result = broker
-                .project_profile_get(ProjectProfileGetRequest {
-                    project_root: project_root.to_string(),
-                    project_id: project_id.to_string(),
-                })
-                .await
-                .map_err(|e| e.to_string())?;
-            serde_json::to_value(result).map_err(|e| e.to_string())
-        }
+        // ── Work tools ──────────────────────────────────────────
         "memory.search" => {
             let project_root = args["project_root"]
                 .as_str()
@@ -237,69 +196,67 @@ async fn dispatch_tool(broker: &McpBroker, tool_name: &str, args: Value) -> Resu
                 .ok_or("missing project_root")?;
             let project_id = args["project_id"].as_str().ok_or("missing project_id")?;
             let path = args["path"].as_str().ok_or("missing path")?;
-            let result = broker
-                .docs_get(DocsGetRequest {
-                    project_root: project_root.to_string(),
-                    project_id: project_id.to_string(),
-                    path: path.to_string(),
-                })
-                .await;
-            serde_json::to_value(result).map_err(|e| e.to_string())
+            if let Some(heading) = args.get("section").and_then(|v| v.as_str()) {
+                let max_bytes = args["max_bytes"].as_u64().unwrap_or(24576) as usize;
+                let result = broker
+                    .docs_get_section(DocsGetSectionRequest {
+                        project_root: project_root.to_string(),
+                        project_id: project_id.to_string(),
+                        path: path.to_string(),
+                        heading: heading.to_string(),
+                        max_bytes,
+                    })
+                    .await;
+                serde_json::to_value(result).map_err(|e| e.to_string())
+            } else {
+                let result = broker
+                    .docs_get(DocsGetRequest {
+                        project_root: project_root.to_string(),
+                        project_id: project_id.to_string(),
+                        path: path.to_string(),
+                    })
+                    .await;
+                serde_json::to_value(result).map_err(|e| e.to_string())
+            }
         }
-        "docs.get_section" => {
-            let project_root = args["project_root"]
-                .as_str()
-                .ok_or("missing project_root")?;
-            let project_id = args["project_id"].as_str().ok_or("missing project_id")?;
-            let path = args["path"].as_str().ok_or("missing path")?;
-            let heading = args["heading"].as_str().ok_or("missing heading")?;
-            let max_bytes = args["max_bytes"].as_u64().unwrap_or(24576) as usize;
-            let result = broker
-                .docs_get_section(DocsGetSectionRequest {
-                    project_root: project_root.to_string(),
-                    project_id: project_id.to_string(),
-                    path: path.to_string(),
-                    heading: heading.to_string(),
-                    max_bytes,
-                })
-                .await;
-            serde_json::to_value(result).map_err(|e| e.to_string())
-        }
-        "docs.create" => {
-            let project_root = args["project_root"]
-                .as_str()
-                .ok_or("missing project_root")?;
-            let project_id = args["project_id"].as_str().ok_or("missing project_id")?;
-            let path = args["path"].as_str().ok_or("missing path")?;
-            let content = args["content"].as_str().ok_or("missing content")?;
-            let result = broker
-                .docs_create(DocsCreateRequest {
-                    project_root: project_root.to_string(),
-                    project_id: project_id.to_string(),
-                    path: path.to_string(),
-                    content: content.to_string(),
-                })
-                .await
-                .map_err(|e| e.to_string())?;
-            serde_json::to_value(result).map_err(|e| e.to_string())
-        }
-        "docs.update" => {
+        "docs.save" => {
             let project_root = args["project_root"]
                 .as_str()
                 .ok_or("missing project_root")?;
             let project_id = args["project_id"].as_str().ok_or("missing project_id")?;
             let path = args["path"].as_str().ok_or("missing path")?;
             let content = args["content"].as_str().ok_or("missing content")?;
-            let result = broker
+            let update_result = broker
                 .docs_update(DocsUpdateRequest {
                     project_root: project_root.to_string(),
                     project_id: project_id.to_string(),
                     path: path.to_string(),
                     content: content.to_string(),
                 })
-                .await
-                .map_err(|e| e.to_string())?;
-            serde_json::to_value(result).map_err(|e| e.to_string())
+                .await;
+            match update_result {
+                Ok(r) => serde_json::to_value(DocsSaveResponse {
+                    path: r.path,
+                    created: false,
+                })
+                .map_err(|e| e.to_string()),
+                Err(_) => {
+                    let result = broker
+                        .docs_create(DocsCreateRequest {
+                            project_root: project_root.to_string(),
+                            project_id: project_id.to_string(),
+                            path: path.to_string(),
+                            content: content.to_string(),
+                        })
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    serde_json::to_value(DocsSaveResponse {
+                        path: result.path,
+                        created: true,
+                    })
+                    .map_err(|e| e.to_string())
+                }
+            }
         }
         "docs.delete" => {
             let project_root = args["project_root"]
@@ -335,102 +292,54 @@ async fn dispatch_tool(broker: &McpBroker, tool_name: &str, args: Value) -> Resu
                 .map_err(|e| e.to_string())?;
             serde_json::to_value(result).map_err(|e| e.to_string())
         }
-        "docs.trash.list" => {
+        "tool.find" => {
             let project_root = args["project_root"]
                 .as_str()
                 .ok_or("missing project_root")?;
             let project_id = args["project_id"].as_str().ok_or("missing project_id")?;
-            let result = broker
-                .docs_trash_list(DocsTrashListRequest {
-                    project_root: project_root.to_string(),
-                    project_id: project_id.to_string(),
-                })
-                .await
-                .map_err(|e| e.to_string())?;
-            serde_json::to_value(result).map_err(|e| e.to_string())
-        }
-        "docs.trash.restore" => {
-            let project_root = args["project_root"]
-                .as_str()
-                .ok_or("missing project_root")?;
-            let project_id = args["project_id"].as_str().ok_or("missing project_id")?;
-            let path = args["path"].as_str().ok_or("missing path")?;
-            let result = broker
-                .docs_trash_restore(DocsTrashRestoreRequest {
-                    project_root: project_root.to_string(),
-                    project_id: project_id.to_string(),
-                    path: path.to_string(),
-                })
-                .await
-                .map_err(|e| e.to_string())?;
-            serde_json::to_value(result).map_err(|e| e.to_string())
-        }
-        "docs.trash.empty" => {
-            let project_root = args["project_root"]
-                .as_str()
-                .ok_or("missing project_root")?;
-            let project_id = args["project_id"].as_str().ok_or("missing project_id")?;
-            let result = broker
-                .docs_trash_empty(DocsTrashEmptyRequest {
-                    project_root: project_root.to_string(),
-                    project_id: project_id.to_string(),
-                })
-                .await
-                .map_err(|e| e.to_string())?;
-            serde_json::to_value(result).map_err(|e| e.to_string())
-        }
-        "docs.reindex" => {
-            let project_root = args["project_root"]
-                .as_str()
-                .ok_or("missing project_root")?;
-            let project_id = args["project_id"].as_str().ok_or("missing project_id")?;
-            let result = broker
-                .docs_reindex(DocsReindexRequest {
-                    project_root: project_root.to_string(),
-                    project_id: project_id.to_string(),
-                })
-                .await
-                .map_err(|e| e.to_string())?;
-            serde_json::to_value(result).map_err(|e| e.to_string())
-        }
-        "tool.list" => {
-            let request = serde_json::from_value::<ToolListRequest>(args)
-                .map_err(|e| format!("invalid tool.list params: {e}"))?;
-            let result = broker.tool_list(request).await.map_err(|e| e.to_string())?;
-            serde_json::to_value(result).map_err(|e| e.to_string())
-        }
-        "tool.add" => {
-            let request = serde_json::from_value::<ToolAddRequest>(args)
-                .map_err(|e| format!("invalid tool.add params: {e}"))?;
-            let result = broker.tool_add(request).await.map_err(|e| e.to_string())?;
-            serde_json::to_value(result).map_err(|e| e.to_string())
-        }
-        "tool.remove" => {
-            let request = serde_json::from_value::<ToolRemoveRequest>(args)
-                .map_err(|e| format!("invalid tool.remove params: {e}"))?;
-            let result = broker
-                .tool_remove(request)
-                .await
-                .map_err(|e| e.to_string())?;
-            serde_json::to_value(result).map_err(|e| e.to_string())
-        }
-        "tool.disable" => {
-            let request = serde_json::from_value::<ToolDisableRequest>(args)
-                .map_err(|e| format!("invalid tool.disable params: {e}"))?;
-            let result = broker
-                .tool_disable(request)
-                .await
-                .map_err(|e| e.to_string())?;
-            serde_json::to_value(result).map_err(|e| e.to_string())
-        }
-        "tool.install" => {
-            let request = serde_json::from_value::<ToolInstallRequest>(args)
-                .map_err(|e| format!("invalid tool.install params: {e}"))?;
-            let result = broker
-                .tool_install(request)
-                .await
-                .map_err(|e| e.to_string())?;
-            serde_json::to_value(result).map_err(|e| e.to_string())
+            let mode = args["mode"].as_str().ok_or("missing mode")?;
+            match mode {
+                "list" => {
+                    let state = args
+                        .get("filter")
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
+                    let request = ToolListRequest {
+                        state,
+                        project_root: project_root.to_string(),
+                        project_id: project_id.to_string(),
+                    };
+                    let result = broker.tool_list(request).await.map_err(|e| e.to_string())?;
+                    serde_json::to_value(result).map_err(|e| e.to_string())
+                }
+                "suggest" => {
+                    let query = args["query"]
+                        .as_str()
+                        .ok_or("missing query for suggest mode")?;
+                    let max = args["max"].as_u64().unwrap_or(5) as usize;
+                    let result = broker
+                        .tool_suggest(ToolSuggestRequest {
+                            query: query.to_string(),
+                            max,
+                        })
+                        .await;
+                    serde_json::to_value(result).map_err(|e| e.to_string())
+                }
+                "search" => {
+                    let query = args["query"]
+                        .as_str()
+                        .ok_or("missing query for search mode")?;
+                    let max = args["max"].as_u64().unwrap_or(5) as usize;
+                    let result = broker
+                        .tool_search(ToolSearchRequest {
+                            query: query.to_string(),
+                            max,
+                        })
+                        .await;
+                    serde_json::to_value(result).map_err(|e| e.to_string())
+                }
+                _ => Err(format!("unknown tool.find mode: {mode}")),
+            }
         }
         "tool.info" => {
             let tool_id = args["tool_id"].as_str().ok_or("missing tool_id")?;
@@ -442,45 +351,11 @@ async fn dispatch_tool(broker: &McpBroker, tool_name: &str, args: Value) -> Resu
                 .map_err(|e| e.to_string())?;
             serde_json::to_value(result).map_err(|e| e.to_string())
         }
-        "tool.update" => {
+        "tool.install" => {
+            let request = serde_json::from_value::<ToolInstallRequest>(args)
+                .map_err(|e| format!("invalid tool.install params: {e}"))?;
             let result = broker
-                .tool_catalog_update()
-                .await
-                .map_err(|e| e.to_string())?;
-            serde_json::to_value(result).map_err(|e| e.to_string())
-        }
-        "tool.suggest" => {
-            let query = args["query"].as_str().ok_or("missing query")?;
-            let max = args["max"].as_u64().unwrap_or(5) as usize;
-            let result = broker
-                .tool_suggest(ToolSuggestRequest {
-                    query: query.to_string(),
-                    max,
-                })
-                .await;
-            serde_json::to_value(result).map_err(|e| e.to_string())
-        }
-        "tool.search" => {
-            let query = args["query"].as_str().ok_or("missing query")?;
-            let max = args["max"].as_u64().unwrap_or(5) as usize;
-            let result = broker
-                .tool_search(ToolSearchRequest {
-                    query: query.to_string(),
-                    max,
-                })
-                .await;
-            serde_json::to_value(result).map_err(|e| e.to_string())
-        }
-        "tool.enable" => {
-            let project_root = args["project_root"]
-                .as_str()
-                .ok_or("missing project_root")?;
-            let family = args["family"].as_str().ok_or("missing family")?;
-            let result = broker
-                .tool_enable(ToolEnableRequest {
-                    project_root: project_root.to_string(),
-                    family: family.to_string(),
-                })
+                .tool_install(request)
                 .await
                 .map_err(|e| e.to_string())?;
             serde_json::to_value(result).map_err(|e| e.to_string())
@@ -507,21 +382,86 @@ async fn dispatch_tool(broker: &McpBroker, tool_name: &str, args: Value) -> Resu
                 .map_err(|e| e.to_string())?;
             serde_json::to_value(result).map_err(|e| e.to_string())
         }
-        "config.export" => {
-            let project_root = args["project_root"]
+
+        // ── Multiplexed admin tools ─────────────────────────────
+        "setup" => dispatch_setup(broker, args).await,
+        "config" => dispatch_config(broker, args).await,
+        "maintain" => dispatch_maintain(broker, args).await,
+        "observe" => dispatch_observe(broker, args).await,
+
+        _ => Err(format!("unknown tool: {tool_name}")),
+    }
+}
+
+async fn dispatch_setup(broker: &McpBroker, args: Value) -> Result<Value, String> {
+    let action = args["action"].as_str().ok_or("missing action")?;
+    let params = args
+        .get("params")
+        .cloned()
+        .unwrap_or(Value::Object(Default::default()));
+    let project_root = params["project_root"]
+        .as_str()
+        .ok_or("missing params.project_root")?;
+    let project_id = params["project_id"]
+        .as_str()
+        .ok_or("missing params.project_id")?;
+    match action {
+        "project" => {
+            let result = broker
+                .project_init(ProjectInitRequest {
+                    project_root: project_root.to_string(),
+                    project_id: project_id.to_string(),
+                })
+                .await
+                .map_err(|e| e.to_string())?;
+            serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+        "refresh" => {
+            let result = broker
+                .project_refresh(ProjectRefreshRequest {
+                    project_root: project_root.to_string(),
+                    project_id: project_id.to_string(),
+                })
+                .await
+                .map_err(|e| e.to_string())?;
+            serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+        "profile" => {
+            let result = broker
+                .project_profile_get(ProjectProfileGetRequest {
+                    project_root: project_root.to_string(),
+                    project_id: project_id.to_string(),
+                })
+                .await
+                .map_err(|e| e.to_string())?;
+            serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+        _ => Err(format!("unknown setup action: {action}")),
+    }
+}
+
+async fn dispatch_config(broker: &McpBroker, args: Value) -> Result<Value, String> {
+    let action = args["action"].as_str().ok_or("missing action")?;
+    let params = args
+        .get("params")
+        .cloned()
+        .unwrap_or(Value::Object(Default::default()));
+    match action {
+        "export" => {
+            let project_root = params["project_root"]
                 .as_str()
-                .ok_or("missing project_root")?;
+                .ok_or("missing params.project_root")?;
             let result = broker
                 .config_export(Path::new(project_root))
                 .await
                 .map_err(|e| e.to_string())?;
             serde_json::to_value(result).map_err(|e| e.to_string())
         }
-        "config.update" => {
-            let project_root = args["project_root"]
+        "update" => {
+            let project_root = params["project_root"]
                 .as_str()
-                .ok_or("missing project_root")?;
-            let update = args
+                .ok_or("missing params.project_root")?;
+            let update = params
                 .get("update")
                 .cloned()
                 .unwrap_or(Value::Object(Default::default()));
@@ -534,16 +474,156 @@ async fn dispatch_tool(broker: &McpBroker, tool_name: &str, args: Value) -> Resu
                 .map_err(|e| e.to_string())?;
             serde_json::to_value(result).map_err(|e| e.to_string())
         }
-        "metrics.snapshot" => {
+        "tool.add" => {
+            let request = serde_json::from_value::<ToolAddRequest>(params)
+                .map_err(|e| format!("invalid tool.add params: {e}"))?;
+            let result = broker.tool_add(request).await.map_err(|e| e.to_string())?;
+            serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+        "tool.remove" => {
+            let request = serde_json::from_value::<ToolRemoveRequest>(params)
+                .map_err(|e| format!("invalid tool.remove params: {e}"))?;
+            let result = broker
+                .tool_remove(request)
+                .await
+                .map_err(|e| e.to_string())?;
+            serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+        "models.list" => {
+            let filter = params.get("filter").and_then(|v| v.as_str());
+            Ok(broker.models_list(filter))
+        }
+        "models.check" => Ok(broker.models_check_updates()),
+        _ => Err(format!("unknown config action: {action}")),
+    }
+}
+
+async fn dispatch_maintain(broker: &McpBroker, args: Value) -> Result<Value, String> {
+    let action = args["action"].as_str().ok_or("missing action")?;
+    let params = args
+        .get("params")
+        .cloned()
+        .unwrap_or(Value::Object(Default::default()));
+    match action {
+        "reindex" => {
+            let project_root = params["project_root"]
+                .as_str()
+                .ok_or("missing params.project_root")?;
+            let project_id = params["project_id"]
+                .as_str()
+                .ok_or("missing params.project_id")?;
+            let result = broker
+                .docs_reindex(DocsReindexRequest {
+                    project_root: project_root.to_string(),
+                    project_id: project_id.to_string(),
+                })
+                .await
+                .map_err(|e| e.to_string())?;
+            serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+        "tool.enable" => {
+            let project_root = params["project_root"]
+                .as_str()
+                .ok_or("missing params.project_root")?;
+            let family = params["family"].as_str().ok_or("missing params.family")?;
+            let result = broker
+                .tool_enable(ToolEnableRequest {
+                    project_root: project_root.to_string(),
+                    family: family.to_string(),
+                })
+                .await
+                .map_err(|e| e.to_string())?;
+            serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+        "tool.disable" => {
+            let request = serde_json::from_value::<ToolDisableRequest>(params)
+                .map_err(|e| format!("invalid tool.disable params: {e}"))?;
+            let result = broker
+                .tool_disable(request)
+                .await
+                .map_err(|e| e.to_string())?;
+            serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+        "tool.refresh" => {
+            let result = broker
+                .tool_catalog_update()
+                .await
+                .map_err(|e| e.to_string())?;
+            serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+        "trash.list" => {
+            let project_root = params["project_root"]
+                .as_str()
+                .ok_or("missing params.project_root")?;
+            let project_id = params["project_id"]
+                .as_str()
+                .ok_or("missing params.project_id")?;
+            let result = broker
+                .docs_trash_list(DocsTrashListRequest {
+                    project_root: project_root.to_string(),
+                    project_id: project_id.to_string(),
+                })
+                .await
+                .map_err(|e| e.to_string())?;
+            serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+        "trash.restore" => {
+            let project_root = params["project_root"]
+                .as_str()
+                .ok_or("missing params.project_root")?;
+            let project_id = params["project_id"]
+                .as_str()
+                .ok_or("missing params.project_id")?;
+            let path = params["path"].as_str().ok_or("missing params.path")?;
+            let result = broker
+                .docs_trash_restore(DocsTrashRestoreRequest {
+                    project_root: project_root.to_string(),
+                    project_id: project_id.to_string(),
+                    path: path.to_string(),
+                })
+                .await
+                .map_err(|e| e.to_string())?;
+            serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+        "trash.empty" => {
+            let project_root = params["project_root"]
+                .as_str()
+                .ok_or("missing params.project_root")?;
+            let project_id = params["project_id"]
+                .as_str()
+                .ok_or("missing params.project_id")?;
+            let result = broker
+                .docs_trash_empty(DocsTrashEmptyRequest {
+                    project_root: project_root.to_string(),
+                    project_id: project_id.to_string(),
+                })
+                .await
+                .map_err(|e| e.to_string())?;
+            serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+        _ => Err(format!("unknown maintain action: {action}")),
+    }
+}
+
+async fn dispatch_observe(broker: &McpBroker, args: Value) -> Result<Value, String> {
+    let action = args["action"].as_str().ok_or("missing action")?;
+    let params = args
+        .get("params")
+        .cloned()
+        .unwrap_or(Value::Object(Default::default()));
+    match action {
+        "metrics" => {
             let result = broker.metrics_snapshot();
             serde_json::to_value(result).map_err(|e| e.to_string())
         }
-        "audit.events" => {
-            let project_root = args["project_root"]
+        "events" => {
+            let project_root = params["project_root"]
                 .as_str()
-                .ok_or("missing project_root")?;
-            let project_id = args["project_id"].as_str().ok_or("missing project_id")?;
-            let limit = args["limit"].as_u64().unwrap_or(50) as usize;
+                .ok_or("missing params.project_root")?;
+            let project_id = params["project_id"]
+                .as_str()
+                .ok_or("missing params.project_id")?;
+            let limit = params["limit"].as_u64().unwrap_or(50) as usize;
             let result = broker
                 .audit_events(AuditEventsRequest {
                     project_root: project_root.to_string(),
@@ -554,12 +634,7 @@ async fn dispatch_tool(broker: &McpBroker, tool_name: &str, args: Value) -> Resu
                 .map_err(|e| e.to_string())?;
             serde_json::to_value(result).map_err(|e| e.to_string())
         }
-        "models.list" => {
-            let filter = args.get("filter").and_then(|v| v.as_str());
-            Ok(broker.models_list(filter))
-        }
-        "models.check_updates" => Ok(broker.models_check_updates()),
-        _ => Err(format!("unknown tool: {tool_name}")),
+        _ => Err(format!("unknown observe action: {action}")),
     }
 }
 
@@ -594,7 +669,7 @@ mod tests {
         let response = dispatch(&broker, request).await;
         assert!(response.error.is_none());
         let tools = response.result.unwrap()["tools"].as_array().unwrap().len();
-        assert_eq!(tools, 33);
+        assert_eq!(tools, 15);
     }
 
     #[tokio::test]
@@ -678,11 +753,166 @@ mod tests {
             id: Some(Value::Number(7.into())),
             method: "tools/call".to_string(),
             params: Some(serde_json::json!({
-                "name": "metrics.snapshot",
-                "arguments": {}
+                "name": "observe",
+                "arguments": {
+                    "action": "metrics"
+                }
             })),
         };
         let response = dispatch(&broker, request).await;
         assert!(response.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_docs_get_full() {
+        let broker = McpBroker::new();
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(Value::Number(10.into())),
+            method: "tools/call".to_string(),
+            params: Some(serde_json::json!({
+                "name": "docs.get",
+                "arguments": {
+                    "project_root": "/tmp/nonexistent",
+                    "project_id": "test",
+                    "path": "README.md"
+                }
+            })),
+        };
+        let response = dispatch(&broker, request).await;
+        // Will fail at broker level (no project), but should not be "unknown tool"
+        assert!(
+            response.error.is_none() || response.error.as_ref().unwrap().code != INVALID_PARAMS
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_docs_get_with_section() {
+        let broker = McpBroker::new();
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(Value::Number(11.into())),
+            method: "tools/call".to_string(),
+            params: Some(serde_json::json!({
+                "name": "docs.get",
+                "arguments": {
+                    "project_root": "/tmp/nonexistent",
+                    "project_id": "test",
+                    "path": "README.md",
+                    "section": "Installation"
+                }
+            })),
+        };
+        let response = dispatch(&broker, request).await;
+        assert!(
+            response.error.is_none() || response.error.as_ref().unwrap().code != INVALID_PARAMS
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_docs_save() {
+        let broker = McpBroker::new();
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(Value::Number(12.into())),
+            method: "tools/call".to_string(),
+            params: Some(serde_json::json!({
+                "name": "docs.save",
+                "arguments": {
+                    "project_root": "/tmp/nonexistent",
+                    "project_id": "test",
+                    "path": "notes.md",
+                    "content": "# Notes"
+                }
+            })),
+        };
+        let response = dispatch(&broker, request).await;
+        assert!(
+            response.error.is_none() || response.error.as_ref().unwrap().code != INVALID_PARAMS
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_tool_find() {
+        let broker = McpBroker::new();
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(Value::Number(13.into())),
+            method: "tools/call".to_string(),
+            params: Some(serde_json::json!({
+                "name": "tool.find",
+                "arguments": {
+                    "project_root": "/tmp/nonexistent",
+                    "project_id": "test",
+                    "mode": "search",
+                    "query": "linter"
+                }
+            })),
+        };
+        let response = dispatch(&broker, request).await;
+        assert!(
+            response.error.is_none() || response.error.as_ref().unwrap().code != INVALID_PARAMS
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_setup_action() {
+        let broker = McpBroker::new();
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(Value::Number(14.into())),
+            method: "tools/call".to_string(),
+            params: Some(serde_json::json!({
+                "name": "setup",
+                "arguments": {
+                    "action": "profile",
+                    "params": {
+                        "project_root": "/tmp/nonexistent",
+                        "project_id": "test"
+                    }
+                }
+            })),
+        };
+        let response = dispatch(&broker, request).await;
+        assert!(
+            response.error.is_none() || response.error.as_ref().unwrap().code != INVALID_PARAMS
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_observe_metrics_via_observe() {
+        let broker = McpBroker::new();
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(Value::Number(15.into())),
+            method: "tools/call".to_string(),
+            params: Some(serde_json::json!({
+                "name": "observe",
+                "arguments": {
+                    "action": "metrics"
+                }
+            })),
+        };
+        let response = dispatch(&broker, request).await;
+        assert!(response.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_unknown_action() {
+        let broker = McpBroker::new();
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(Value::Number(16.into())),
+            method: "tools/call".to_string(),
+            params: Some(serde_json::json!({
+                "name": "setup",
+                "arguments": {
+                    "action": "nonexistent",
+                    "params": {}
+                }
+            })),
+        };
+        let response = dispatch(&broker, request).await;
+        assert!(response.error.is_some());
     }
 }
