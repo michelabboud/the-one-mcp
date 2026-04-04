@@ -24,104 +24,97 @@ mod local {
     use super::*;
     use std::sync::Arc;
 
-    /// Supported local embedding models with tier aliases.
-    ///
-    /// | Tier        | Model                  | Dims | Download | Speed   |
-    /// |-------------|------------------------|------|----------|---------|
-    /// | fast        | all-MiniLM-L6-v2       | 384  | ~23MB    | ~30ms   |
-    /// | balanced    | BGE-base-en-v1.5       | 768  | ~50MB    | ~60ms   |
-    /// | quality     | BGE-large-en-v1.5      | 1024 | ~130MB   | ~120ms  |
-    /// | multilingual| multilingual-e5-large  | 1024 | ~220MB   | ~150ms  |
-    pub fn resolve_model(name: &str) -> (fastembed::EmbeddingModel, usize) {
-        match name.to_ascii_lowercase().trim() {
-            // ── Tier aliases ──
-            "fast" | "default" | "all-minilm-l6-v2" => {
-                (fastembed::EmbeddingModel::AllMiniLML6V2, 384)
+    fn enum_from_name(fastembed_enum: &str, dims: usize) -> (fastembed::EmbeddingModel, usize) {
+        let model = match fastembed_enum {
+            "AllMiniLML6V2" => fastembed::EmbeddingModel::AllMiniLML6V2,
+            "AllMiniLML12V2" => fastembed::EmbeddingModel::AllMiniLML12V2,
+            "BGESmallENV15" => fastembed::EmbeddingModel::BGESmallENV15,
+            "BGEBaseENV15" => fastembed::EmbeddingModel::BGEBaseENV15,
+            "BGELargeENV15" => fastembed::EmbeddingModel::BGELargeENV15,
+            "MultilingualE5Large" => fastembed::EmbeddingModel::MultilingualE5Large,
+            "MultilingualE5Base" => fastembed::EmbeddingModel::MultilingualE5Base,
+            "MultilingualE5Small" => fastembed::EmbeddingModel::MultilingualE5Small,
+            "ParaphraseMLMiniLML12V2" => fastembed::EmbeddingModel::ParaphraseMLMiniLML12V2,
+            "NomicEmbedTextV1" => fastembed::EmbeddingModel::NomicEmbedTextV1,
+            "NomicEmbedTextV15" => fastembed::EmbeddingModel::NomicEmbedTextV15,
+            "MxbaiEmbedLargeV1" => fastembed::EmbeddingModel::MxbaiEmbedLargeV1,
+            "GTEBaseENV15" => fastembed::EmbeddingModel::GTEBaseENV15,
+            "GTELargeENV15" => fastembed::EmbeddingModel::GTELargeENV15,
+            "AllMiniLML6V2Q" => fastembed::EmbeddingModel::AllMiniLML6V2Q,
+            "BGEBaseENV15Q" => fastembed::EmbeddingModel::BGEBaseENV15Q,
+            "BGELargeENV15Q" => fastembed::EmbeddingModel::BGELargeENV15Q,
+            _ => {
+                tracing::warn!(
+                    "Unknown fastembed enum '{}', falling back to BGELargeENV15",
+                    fastembed_enum
+                );
+                fastembed::EmbeddingModel::BGELargeENV15
             }
-            "balanced" | "bge-base-en-v1.5" => (fastembed::EmbeddingModel::BGEBaseENV15, 768),
-            "quality" | "bge-large-en-v1.5" => (fastembed::EmbeddingModel::BGELargeENV15, 1024),
-            "multilingual" | "multilingual-e5-large" => {
-                (fastembed::EmbeddingModel::MultilingualE5Large, 1024)
-            }
+        };
+        (model, dims)
+    }
 
-            // ── Additional models by name ──
+    pub fn resolve_model(name: &str) -> (fastembed::EmbeddingModel, usize) {
+        let name_lower = name.to_ascii_lowercase();
+        let name_trimmed = name_lower.trim();
+
+        // "default" → registry default (quality tier)
+        if name_trimmed == "default" {
+            let default = crate::models_registry::default_local_model();
+            return enum_from_name(&default.fastembed_enum, default.dims);
+        }
+
+        // Tier alias (fast, balanced, quality, multilingual)
+        // When multiple models share a tier, prefer installer_visible ones and pick largest dims
+        // (canonical representative — e.g. multilingual → multilingual-e5-large at 1024 dims).
+        let models = crate::models_registry::list_local_models();
+        let tier_match = models
+            .iter()
+            .filter(|m| m.tier == name_trimmed && m.installer_visible && !m.deprecated)
+            .max_by_key(|m| m.dims);
+        if let Some(m) = tier_match {
+            return enum_from_name(&m.fastembed_enum, m.dims);
+        }
+
+        // Model name match (case-insensitive)
+        if let Some(m) = models
+            .iter()
+            .find(|m| m.name.to_ascii_lowercase() == name_trimmed)
+        {
+            return enum_from_name(&m.fastembed_enum, m.dims);
+        }
+
+        // Direct string match as last resort (for backward compat)
+        match name_trimmed {
+            "all-minilm-l6-v2" => (fastembed::EmbeddingModel::AllMiniLML6V2, 384),
             "all-minilm-l12-v2" => (fastembed::EmbeddingModel::AllMiniLML12V2, 384),
             "bge-small-en-v1.5" => (fastembed::EmbeddingModel::BGESmallENV15, 384),
+            "bge-base-en-v1.5" => (fastembed::EmbeddingModel::BGEBaseENV15, 768),
+            "bge-large-en-v1.5" => (fastembed::EmbeddingModel::BGELargeENV15, 1024),
+            "multilingual-e5-large" => (fastembed::EmbeddingModel::MultilingualE5Large, 1024),
+            "multilingual-e5-base" => (fastembed::EmbeddingModel::MultilingualE5Base, 768),
+            "multilingual-e5-small" => (fastembed::EmbeddingModel::MultilingualE5Small, 384),
+            "paraphrase-ml-minilm-l12-v2" => {
+                (fastembed::EmbeddingModel::ParaphraseMLMiniLML12V2, 384)
+            }
             "nomic-embed-text-v1" => (fastembed::EmbeddingModel::NomicEmbedTextV1, 768),
             "nomic-embed-text-v1.5" => (fastembed::EmbeddingModel::NomicEmbedTextV15, 768),
             "mxbai-embed-large-v1" => (fastembed::EmbeddingModel::MxbaiEmbedLargeV1, 1024),
             "gte-base-en-v1.5" => (fastembed::EmbeddingModel::GTEBaseENV15, 768),
             "gte-large-en-v1.5" => (fastembed::EmbeddingModel::GTELargeENV15, 1024),
-            "multilingual-e5-small" => (fastembed::EmbeddingModel::MultilingualE5Small, 384),
-            "multilingual-e5-base" => (fastembed::EmbeddingModel::MultilingualE5Base, 768),
-            "paraphrase-ml-minilm-l12-v2" => {
-                (fastembed::EmbeddingModel::ParaphraseMLMiniLML12V2, 384)
-            }
-
-            // ── Quantized variants ──
-            "fast-q" | "all-minilm-l6-v2-q" => (fastembed::EmbeddingModel::AllMiniLML6V2Q, 384),
-            "balanced-q" | "bge-base-en-v1.5-q" => (fastembed::EmbeddingModel::BGEBaseENV15Q, 768),
-            "quality-q" | "bge-large-en-v1.5-q" => {
+            "all-minilm-l6-v2-q" | "fast-q" => (fastembed::EmbeddingModel::AllMiniLML6V2Q, 384),
+            "bge-base-en-v1.5-q" | "balanced-q" => (fastembed::EmbeddingModel::BGEBaseENV15Q, 768),
+            "bge-large-en-v1.5-q" | "quality-q" => {
                 (fastembed::EmbeddingModel::BGELargeENV15Q, 1024)
             }
-
-            // ── Default fallback ──
             _ => {
                 tracing::warn!(
-                    "Unknown embedding model '{}', falling back to all-MiniLM-L6-v2",
+                    "Unknown embedding model '{}', falling back to BGE-large-en-v1.5",
                     name
                 );
-                (fastembed::EmbeddingModel::AllMiniLML6V2, 384)
+                (fastembed::EmbeddingModel::BGELargeENV15, 1024)
             }
         }
-    }
-
-    /// List all available local embedding models.
-    pub fn available_models() -> Vec<ModelInfo> {
-        vec![
-            ModelInfo {
-                name: "fast",
-                aliases: &["all-MiniLM-L6-v2", "default"],
-                dims: 384,
-                description: "Fast, small. Best for getting started.",
-            },
-            ModelInfo {
-                name: "balanced",
-                aliases: &["BGE-base-en-v1.5"],
-                dims: 768,
-                description: "Good quality/speed tradeoff. Recommended for production.",
-            },
-            ModelInfo {
-                name: "quality",
-                aliases: &["BGE-large-en-v1.5"],
-                dims: 1024,
-                description: "Best local quality. Larger download and slower.",
-            },
-            ModelInfo {
-                name: "multilingual",
-                aliases: &["multilingual-e5-large"],
-                dims: 1024,
-                description: "Best for non-English or mixed-language projects.",
-            },
-            ModelInfo {
-                name: "nomic-embed-text-v1.5",
-                aliases: &[],
-                dims: 768,
-                description: "Nomic AI model. Good quality, 8192 token context.",
-            },
-            ModelInfo {
-                name: "mxbai-embed-large-v1",
-                aliases: &[],
-                dims: 1024,
-                description: "Mixedbread AI. Top-tier local quality.",
-            },
-            ModelInfo {
-                name: "gte-large-en-v1.5",
-                aliases: &[],
-                dims: 1024,
-                description: "Alibaba GTE. Strong English performance.",
-            },
-        ]
     }
 
     pub struct ModelInfo {
@@ -129,6 +122,105 @@ mod local {
         pub aliases: &'static [&'static str],
         pub dims: usize,
         pub description: &'static str,
+        pub size_mb: u32,
+        pub latency_vs_fast: &'static str,
+        pub multilingual: bool,
+    }
+
+    /// List all available local embedding models.
+    pub fn available_models() -> Vec<ModelInfo> {
+        vec![
+            ModelInfo {
+                name: "all-MiniLM-L6-v2",
+                aliases: &["fast", "default-fast"],
+                dims: 384,
+                description: "Fast, small. Good for getting started.",
+                size_mb: 23,
+                latency_vs_fast: "fastest",
+                multilingual: false,
+            },
+            ModelInfo {
+                name: "BGE-base-en-v1.5",
+                aliases: &["balanced"],
+                dims: 768,
+                description: "Good quality/speed tradeoff.",
+                size_mb: 50,
+                latency_vs_fast: "~2x slower",
+                multilingual: false,
+            },
+            ModelInfo {
+                name: "BGE-large-en-v1.5",
+                aliases: &["quality", "default"],
+                dims: 1024,
+                description: "Best local quality. Recommended default.",
+                size_mb: 130,
+                latency_vs_fast: "~4x slower",
+                multilingual: false,
+            },
+            ModelInfo {
+                name: "multilingual-e5-large",
+                aliases: &["multilingual"],
+                dims: 1024,
+                description: "Best for non-English or mixed-language projects.",
+                size_mb: 220,
+                latency_vs_fast: "~5x slower",
+                multilingual: true,
+            },
+            ModelInfo {
+                name: "multilingual-e5-base",
+                aliases: &[],
+                dims: 768,
+                description: "Multilingual, moderate size.",
+                size_mb: 90,
+                latency_vs_fast: "~3x slower",
+                multilingual: true,
+            },
+            ModelInfo {
+                name: "multilingual-e5-small",
+                aliases: &[],
+                dims: 384,
+                description: "Lightweight multilingual option.",
+                size_mb: 45,
+                latency_vs_fast: "~1.5x slower",
+                multilingual: true,
+            },
+            ModelInfo {
+                name: "paraphrase-ml-minilm-l12-v2",
+                aliases: &[],
+                dims: 384,
+                description: "Paraphrase-tuned multilingual model.",
+                size_mb: 45,
+                latency_vs_fast: "~1.5x slower",
+                multilingual: true,
+            },
+            ModelInfo {
+                name: "nomic-embed-text-v1.5",
+                aliases: &[],
+                dims: 768,
+                description: "Nomic AI model. Good quality, 8192 token context.",
+                size_mb: 55,
+                latency_vs_fast: "~2x slower",
+                multilingual: false,
+            },
+            ModelInfo {
+                name: "mxbai-embed-large-v1",
+                aliases: &[],
+                dims: 1024,
+                description: "Mixedbread AI. Top-tier local quality.",
+                size_mb: 130,
+                latency_vs_fast: "~4x slower",
+                multilingual: false,
+            },
+            ModelInfo {
+                name: "gte-large-en-v1.5",
+                aliases: &[],
+                dims: 1024,
+                description: "Alibaba GTE. Strong English performance.",
+                size_mb: 130,
+                latency_vs_fast: "~4x slower",
+                multilingual: false,
+            },
+        ]
     }
 
     /// Local embedding provider using fastembed-rs (ONNX Runtime).
@@ -315,14 +407,37 @@ mod tests {
         #[test]
         fn test_resolve_model_unknown_falls_back() {
             let (_, dims) = resolve_model("nonexistent-model");
-            assert_eq!(dims, 384);
+            assert_eq!(dims, 1024);
         }
 
         #[test]
         fn test_available_models_not_empty() {
             let models = available_models();
             assert!(models.len() >= 4);
-            assert_eq!(models[0].name, "fast");
+            assert_eq!(models[0].name, "all-MiniLM-L6-v2");
+        }
+
+        #[test]
+        fn test_resolve_model_default_is_quality() {
+            let (_, dims) = resolve_model("default");
+            assert_eq!(
+                dims, 1024,
+                "default should resolve to quality tier (1024 dims)"
+            );
+        }
+
+        #[test]
+        fn test_available_models_includes_all_registry_entries() {
+            let models = available_models();
+            assert!(
+                models.len() >= 7,
+                "expected at least 7 models, got {}",
+                models.len()
+            );
+            let names: Vec<&str> = models.iter().map(|m| m.name).collect();
+            assert!(names.contains(&"multilingual-e5-small"));
+            assert!(names.contains(&"multilingual-e5-base"));
+            assert!(names.contains(&"paraphrase-ml-minilm-l12-v2"));
         }
 
         #[tokio::test]
