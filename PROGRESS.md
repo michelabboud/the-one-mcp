@@ -1,27 +1,28 @@
 # Progress Report
 
-## Current Version: v0.3.0
+## Current Version: v0.4.0
 
 ## Overall Status
 
-All planned stages complete. Three major releases shipped:
+All planned stages complete. Four major releases shipped:
 - **v0.1.0** — Initial workspace: 8 crates, 14 MCP tools, stub implementations
 - **v0.2.0** — Production overhaul: async broker, real embeddings, 3 transports, 24 tools
 - **v0.3.0** — Tool catalog: SQLite + Qdrant semantic search, tool lifecycle, 31 tools
+- **v0.4.0** — Embedding model registry: TOML-based model registries, quality tier default, interactive installer selection, 33 tools
 
-Build/test gates: all green. 135 tests, 0 failures.
+Build/test gates: all green. 174 tests, 0 failures.
 
 ## Stats
 
-| Metric | v0.1.0 | v0.2.0 | v0.3.0 |
-|--------|--------|--------|--------|
-| MCP Tools | 14 | 24 | **31** |
-| Tests | 68 | 122 | **135** |
-| Rust LOC | 6,400 | ~10,000 | **~12,800** |
-| JSON Schemas | 33 | 49 | **63** |
-| Catalog Tools | — | — | **28** |
-| Platforms | 1 | 1 | **6** |
-| AI CLIs | 2 | 2 | **4** |
+| Metric | v0.1.0 | v0.2.0 | v0.3.0 | v0.4.0 |
+|--------|--------|--------|--------|--------|
+| MCP Tools | 14 | 24 | 31 | **33** |
+| Tests | 68 | 122 | 135 | **174** |
+| Rust LOC | 6,400 | ~10,000 | ~12,800 | **~14,000** |
+| JSON Schemas | 33 | 49 | 63 | **63** |
+| Catalog Tools | — | — | 28 | **28** |
+| Platforms | 1 | 1 | 6 | **6** |
+| AI CLIs | 2 | 2 | 4 | **4** |
 
 ## Stage Progress (v0.1.0)
 
@@ -93,6 +94,25 @@ All complete: Claude Code + Gemini CLI + OpenCode + Codex auto-detection, tiered
 - Per-provider health tracking with cooldown
 - TCP pre-flight checks
 
+## Embedding Model Registry (v0.4.0) — 8 Tasks
+
+- Task 1+2: TOML registry files + models_registry module — complete
+- Task 3: Rewrite embeddings.rs to use registry — complete
+- Task 4: Update config defaults to quality tier — complete
+- Task 5: Add models.list and models.check_updates MCP tools — complete
+- Task 6: Interactive model selection in installer — complete
+- Task 7: Maintenance scripts — complete
+- Task 8: Full integration validation — complete
+
+### Key Features Delivered
+
+- TOML model registries (models/local-models.toml, models/api-models.toml) embedded in binary
+- Default changed from all-MiniLM-L6-v2 (384d) to BGE-large-en-v1.5 (1024d)
+- Interactive model selection during install (7 local + API option)
+- API provider support: OpenAI, Voyage AI, Cohere (extensible)
+- 2 new MCP tools: models.list, models.check_updates
+- Maintenance scripts for tracking upstream model updates
+
 ## Infrastructure (v0.3.1)
 
 - SECURITY.md with vulnerability reporting policy and security design documentation
@@ -107,7 +127,7 @@ All complete: Claude Code + Gemini CLI + OpenCode + Codex auto-detection, tiered
 
 - `cargo fmt --check` — passing
 - `cargo clippy --workspace --all-targets -- -D warnings` — passing
-- `cargo test --workspace` — **135 tests passing**
+- `cargo test --workspace` — **174 tests passing**
 - `cargo build --release -p the-one-mcp --bin the-one-mcp` — passing
 - `bash scripts/release-gate.sh` — passing
 - `bash scripts/build.sh check` — full CI pipeline passing

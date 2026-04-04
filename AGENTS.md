@@ -1,6 +1,6 @@
 # AGENTS.md - The-One MCP Development Guide
 
-Rust MCP broker system (v0.3.1). All agents should follow these guidelines.
+Rust MCP broker system (v0.4.0). All agents should follow these guidelines.
 
 ## Build Commands
 
@@ -53,13 +53,13 @@ the-one-mcp/
 │   │       └── telemetry.rs   # Structured logging setup
 │   ├── the-one-mcp/           # Async broker + transport + CLI
 │   │   └── src/
-│   │       ├── broker.rs      # McpBroker (async, 24 tool methods)
+│   │       ├── broker.rs      # McpBroker (async, 26 tool methods)
 │   │       ├── api.rs         # Request/response types
 │   │       ├── adapter_core.rs # Shared adapter logic
 │   │       ├── swagger.rs     # OpenAPI embedding
 │   │       ├── transport/
 │   │       │   ├── jsonrpc.rs # JSON-RPC 2.0 dispatch
-│   │       │   ├── tools.rs   # 24 MCP tool definitions
+│   │       │   ├── tools.rs   # 33 MCP tool definitions
 │   │       │   ├── stdio.rs   # Stdio transport
 │   │       │   ├── sse.rs     # SSE HTTP transport
 │   │       │   └── stream.rs  # Streamable HTTP transport
@@ -70,6 +70,9 @@ the-one-mcp/
 │   │       ├── lib.rs         # Async MemoryEngine
 │   │       ├── chunker.rs     # Heading-aware markdown chunker
 │   │       ├── embeddings.rs  # fastembed (ONNX) + API provider
+│   │       ├── models_registry.rs # TOML model registry parser
+│   │       ├── reranker.rs    # Cross-encoder reranker
+│   │       └── graph.rs       # LightRAG knowledge graph
 │   │       └── qdrant.rs      # Async Qdrant HTTP backend
 │   ├── the-one-router/        # Routing + provider pool
 │   │   └── src/
@@ -81,13 +84,16 @@ the-one-mcp/
 │   ├── the-one-claude/        # Claude Code adapter
 │   ├── the-one-codex/         # Codex adapter
 │   └── the-one-ui/            # Embedded admin UI
-├── schemas/mcp/v1beta/        # 49 JSON Schema files
+├── schemas/mcp/v1beta/        # 63 JSON Schema files
+├── models/                        # Embedding model registries (TOML)
+│   ├── local-models.toml          # 17 fastembed models (embedded in binary)
+│   └── api-models.toml            # API providers: OpenAI, Voyage, Cohere
 ├── docs/                      # Guides, ADRs, runbooks, specs
 ├── scripts/release-gate.sh    # Release validation
 └── .github/workflows/ci.yml   # CI pipeline
 ```
 
-## MCP Tool Surface (31 tools)
+## MCP Tool Surface (33 tools)
 
 ### Project Lifecycle
 - `project.init` — detect project, create state, bootstrap catalog
@@ -136,6 +142,10 @@ the-one-mcp/
 - `metrics.snapshot` — broker + provider metrics
 - `audit.events` — query audit trail
 
+### Models
+- `models.list` — list all available embedding models (local + API) with metadata
+- `models.check_updates` — check for new model versions from upstream registries
+
 ## Code Style
 
 - Run `cargo fmt` before every commit
@@ -169,12 +179,12 @@ Tiered selection via config `"embedding_model"`:
 
 | Tier | Dims | Best For |
 |------|------|----------|
-| `fast` (default) | 384 | Getting started |
-| `balanced` | 768 | Production |
-| `quality` | 1024 | Best local |
+| `fast` | 384 | Getting started |
+| `balanced` | 768 | Good tradeoff |
+| `quality` (default) | 1024 | **Recommended** |
 | `multilingual` | 1024 | Non-English |
 
-Plus 15+ models by full name, quantized variants with `-q` suffix.
+17 local models total. Plus API models (OpenAI, Voyage, Cohere). Model registry in `models/local-models.toml` and `models/api-models.toml`.
 
 ## Key Decisions
 

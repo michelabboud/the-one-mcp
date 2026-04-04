@@ -7,7 +7,7 @@
 It provides:
 
 - **Project lifecycle** — detect languages, frameworks, and risk profile; cache results via fingerprinting
-- **Semantic memory** — production-grade RAG with fastembed (384-dim ONNX) or API embeddings over Qdrant
+- **Semantic memory** — production-grade RAG with fastembed (1024-dim ONNX) or API embeddings over Qdrant
 - **Managed documents** — full CRUD for markdown files with soft-delete, trash, and auto-sync
 - **Policy-gated tools** — risk-tier approval gates (once/session/forever) with headless deny-by-default
 - **Intelligent routing** — rules-first with optional nano LLM provider pool (priority/round-robin/latency)
@@ -18,7 +18,7 @@ It provides:
 | Crate | Responsibility |
 |-------|---------------|
 | `the-one-core` | Config layering, SQLite storage (WAL), policy engine, profiler, manifests, docs manager, configurable limits |
-| `the-one-mcp` | Async broker orchestrator, 24 MCP tool API types, JSON-RPC dispatch, transport layer (stdio/SSE/stream), CLI binary |
+| `the-one-mcp` | Async broker orchestrator, 33 MCP tool API types, JSON-RPC dispatch, transport layer (stdio/SSE/stream), CLI binary |
 | `the-one-memory` | Smart markdown chunker, embedding providers (fastembed local + OpenAI-compatible API), async Qdrant HTTP backend |
 | `the-one-router` | Rules-first request classification, OpenAI-compatible nano provider, provider pool with health tracking and 3 routing policies |
 | `the-one-registry` | Capability catalog with risk-tier filtering, visibility modes (core/project/dormant) |
@@ -64,7 +64,7 @@ The installer:
 5. Auto-detects Claude Code, Gemini CLI, OpenCode, Codex and registers the MCP
 6. Validates with a smoke test
 
-Options: `--version v0.2.0`, `--lean` (no swagger), `--local ./target/release`, `--uninstall`
+Options: `--version v0.4.0`, `--lean` (no swagger), `--local ./target/release`, `--uninstall`
 
 ### Build from Source
 
@@ -165,10 +165,10 @@ Configuration follows a 5-layer precedence model (lowest to highest):
   "qdrant_strict_auth": true,
 
   "embedding_provider": "local",
-  "embedding_model": "all-MiniLM-L6-v2",
+  "embedding_model": "BGE-large-en-v1.5",
   "embedding_api_base_url": null,
   "embedding_api_key": null,
-  "embedding_dimensions": 384,
+  "embedding_dimensions": 1024,
 
   "nano_routing_policy": "priority",
   "nano_providers": [
@@ -221,10 +221,10 @@ Configuration follows a 5-layer precedence model (lowest to highest):
 | `qdrant_tls_insecure` | `false` | Skip TLS verification (development only) |
 | `qdrant_strict_auth` | `true` | Require API key for remote Qdrant connections |
 | `embedding_provider` | `"local"` | `"local"` (fastembed ONNX) or `"api"` (OpenAI-compatible) |
-| `embedding_model` | `"all-MiniLM-L6-v2"` | Model name for embeddings |
+| `embedding_model` | `"BGE-large-en-v1.5"` | Model name for embeddings |
 | `embedding_api_base_url` | `null` | Base URL for API embeddings |
 | `embedding_api_key` | `null` | API key for embedding endpoint |
-| `embedding_dimensions` | `384` | Vector dimensions (384 for local, configurable for API) |
+| `embedding_dimensions` | `1024` | Vector dimensions (1024 for local quality model, configurable for API) |
 | `nano_routing_policy` | `"priority"` | Provider pool routing: `"priority"`, `"round_robin"`, or `"latency"` |
 | `nano_providers` | `[]` | Array of OpenAI-compatible provider configurations |
 | `external_docs_root` | `null` | External docs directory to ingest read-only |
@@ -283,12 +283,12 @@ Use a tier alias or full model name in config:
 
 | Tier | Model | Dims | Download | Speed | Use Case |
 |------|-------|------|----------|-------|----------|
-| `fast` (default) | all-MiniLM-L6-v2 | 384 | ~23MB | ~30ms | Getting started, fast iteration |
+| `fast` | all-MiniLM-L6-v2 | 384 | ~23MB | ~30ms | Getting started, fast iteration |
 | `balanced` | BGE-base-en-v1.5 | 768 | ~50MB | ~60ms | **Production recommended** |
-| `quality` | BGE-large-en-v1.5 | 1024 | ~130MB | ~120ms | Best local quality |
+| `quality` (default) | BGE-large-en-v1.5 | 1024 | ~130MB | ~120ms | Best local quality |
 | `multilingual` | multilingual-e5-large | 1024 | ~220MB | ~150ms | Non-English / mixed-language |
 
-Config: `"embedding_model": "balanced"` or `"embedding_model": "BGE-base-en-v1.5"`
+Config: `"embedding_model": "quality"` or `"embedding_model": "BGE-large-en-v1.5"`
 
 #### Additional Models
 
@@ -407,7 +407,7 @@ Set `external_docs_root` to ingest an external directory read-only into RAG. No 
 ### Search
 
 ```
-Query -> Embed (384-dim) -> Qdrant cosine search -> Top-k results (score >= threshold)
+Query -> Embed (1024-dim) -> Qdrant cosine search -> Top-k results (score >= threshold)
 ```
 
 Returns chunks with source paths and headings. Follow up with `docs.get` for full context.

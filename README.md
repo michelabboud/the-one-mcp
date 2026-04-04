@@ -52,7 +52,7 @@ Claude Code / Gemini CLI / OpenCode / Codex
     v
 the-one-mcp broker
     |
-    +-- Tool Catalog         31 MCP tools, SQLite + Qdrant semantic search
+    +-- Tool Catalog         33 MCP tools, SQLite + Qdrant semantic search
     +-- Project Lifecycle    Detect languages/frameworks, fingerprint caching
     +-- Knowledge (RAG)      fastembed (384-1024 dim) + Qdrant vector search
     +-- Documents (CRUD)     Managed folder with soft-delete, auto-sync
@@ -61,7 +61,7 @@ the-one-mcp broker
     +-- SQLite               Project state, catalog, approvals, audit trail
 ```
 
-## 31 MCP Tools
+## 33 MCP Tools
 
 | Category | Tools |
 |----------|-------|
@@ -74,6 +74,7 @@ the-one-mcp broker
 | **Tool Lifecycle** | `tool.add`, `tool.remove`, `tool.enable`, `tool.disable`, `tool.install`, `tool.run`, `tool.update` |
 | **Config** | `config.export`, `config.update` |
 | **Observability** | `metrics.snapshot`, `audit.events` |
+| **Models** | `models.list`, `models.check_updates` |
 
 ## Tool Catalog
 
@@ -95,12 +96,12 @@ Contribute tools via [GitHub PR or Issue](CONTRIBUTING.md).
 
 | Tier | Model | Dims | Use Case |
 |------|-------|------|----------|
-| `fast` (default) | all-MiniLM-L6-v2 | 384 | Getting started |
-| `balanced` | BGE-base-en-v1.5 | 768 | Production recommended |
-| `quality` | BGE-large-en-v1.5 | 1024 | Best local quality |
+| `fast` | all-MiniLM-L6-v2 | 384 | Getting started |
+| `balanced` | BGE-base-en-v1.5 | 768 | Good quality/speed tradeoff |
+| `quality` (default) | BGE-large-en-v1.5 | 1024 | **Recommended** |
 | `multilingual` | multilingual-e5-large | 1024 | Non-English projects |
 
-15+ models supported. Or use any OpenAI-compatible API.
+17 local models supported (including quantized variants). Interactive model selection during install. Or use any OpenAI-compatible API (OpenAI, Voyage, Cohere).
 
 ## Documentation
 
@@ -120,7 +121,7 @@ Contribute tools via [GitHub PR or Issue](CONTRIBUTING.md).
 |-------|---------|
 | `the-one-core` | Config, storage, policy, profiler, docs manager, limits, **tool catalog** |
 | `the-one-mcp` | Async broker, API types, JSON-RPC transport, CLI binary |
-| `the-one-memory` | RAG: chunker, embeddings (fastembed + API), async Qdrant |
+| `the-one-memory` | RAG: chunker, embeddings (fastembed + API), async Qdrant, **model registry** |
 | `the-one-router` | Rules-first routing, provider pool, health tracking |
 | `the-one-registry` | Capability catalog with risk-tier filtering |
 | `the-one-claude` | Claude Code adapter |
@@ -147,8 +148,8 @@ Releases are **manual only** — tagging does not auto-trigger builds. You decid
 
 | Metric | Count |
 |--------|-------|
-| MCP Tools | 31 |
-| Tests | 135 |
+| MCP Tools | 33 |
+| Tests | 174 |
 | Rust LOC | ~12,800 |
 | JSON Schemas | 63 |
 | Catalog Tools | 28 (growing) |

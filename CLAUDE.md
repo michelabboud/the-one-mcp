@@ -59,7 +59,7 @@ the-one-codex  ──> the-one-mcp
 
 **Transport-agnostic dispatch**: JSON-RPC requests arrive via any transport (stdio/SSE/stream), get deserialized in `transport/jsonrpc.rs`, dispatched to `McpBroker` methods, and serialized back. The broker never knows which transport is in use.
 
-**Embedding provider abstraction**: `EmbeddingProvider` trait with two implementations — `FastEmbedProvider` (local ONNX, tiered: fast/balanced/quality/multilingual) and `ApiEmbeddingProvider` (OpenAI-compatible HTTP). Use `resolve_model("balanced")` for tier aliases. The `MemoryEngine` holds a `Box<dyn EmbeddingProvider>`.
+**Embedding provider abstraction**: `EmbeddingProvider` trait with two implementations — `FastEmbedProvider` (local ONNX, tiered: fast/balanced/quality/multilingual) and `ApiEmbeddingProvider` (OpenAI-compatible HTTP). Use `resolve_model("quality")` for tier aliases (quality is the default). The `models_registry` module in `the-one-memory` parses TOML model definitions from `models/local-models.toml` and `models/api-models.toml` (embedded via `include_str!`). The `MemoryEngine` holds a `Box<dyn EmbeddingProvider>`.
 
 **Client-aware tool loading**: The MCP `initialize` handshake carries `clientInfo.name`. The broker reads this to load per-CLI custom tools from `~/.the-one/registry/custom-<client>.json` alongside universal `custom.json` and `recommended.json`.
 
@@ -80,8 +80,9 @@ All crates use `CoreError` from `the-one-core::error`. Library code uses `thiser
 - JSON schema files in `schemas/mcp/v1beta/` use `$id` prefix `the-one.mcp.v1beta.` and JSON Schema draft 2020-12
 - The `fastembed` model downloads on first use (~23-220MB depending on tier) and caches in `.fastembed_cache/` (gitignored)
 - `scripts/install.sh` handles full installation: download, config, CLI registration (Claude/Gemini/OpenCode/Codex)
+- `scripts/update-local-models.sh` and `scripts/update-api-models.sh` check for new embedding model versions
 - `scripts/build.sh` is the build + release manager: `build`, `build --lean`, `dev`, `test`, `check`, `package`, `install`, `release`
 - Releases are manual-only via `build.sh release v0.4.0` (triggers GitHub Actions workflow_dispatch, does NOT auto-trigger on tags)
 - Tool catalog: `tools/catalog/` (curated JSON), `~/.the-one/catalog.db` (SQLite with FTS5), Qdrant `the_one_tools` collection (semantic)
 - Custom tools: `~/.the-one/registry/custom.json` (shared), `custom-<cli>.json` (per-CLI)
-- 31 MCP tools (see `crates/the-one-mcp/src/transport/tools.rs`), 135 tests, 63 schemas, 28 catalog entries
+- 33 MCP tools (see `crates/the-one-mcp/src/transport/tools.rs`), 174 tests, 63 schemas, 28 catalog entries

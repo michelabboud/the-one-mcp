@@ -22,7 +22,7 @@ This will:
 
 ```bash
 # Install specific version
-bash install.sh --version v0.3.0
+bash install.sh --version v0.4.0
 
 # Install from a local build (after building from source)
 bash install.sh --local ./target/release
@@ -98,7 +98,7 @@ opencode mcp add --name the-one-mcp --command ~/.the-one/bin/the-one-mcp --args 
 # Smoke test
 echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' | ~/.the-one/bin/the-one-mcp serve
 
-# List all 31 tools
+# List all 33 tools
 echo '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' | ~/.the-one/bin/the-one-mcp serve
 ```
 
@@ -114,7 +114,7 @@ $EDITOR ~/.the-one/config.json
 
 ```json
 {
-  "embedding_model": "balanced",
+  "embedding_model": "quality",
   "limits": {
     "max_search_hits": 10,
     "max_chunk_tokens": 1024
@@ -126,10 +126,12 @@ $EDITOR ~/.the-one/config.json
 
 | Tier | Model | Dims | Use Case |
 |------|-------|------|----------|
-| `fast` (default) | all-MiniLM-L6-v2 | 384 | Getting started |
-| `balanced` | BGE-base-en-v1.5 | 768 | **Production recommended** |
-| `quality` | BGE-large-en-v1.5 | 1024 | Best local quality |
+| `fast` | all-MiniLM-L6-v2 | 384 | Getting started |
+| `balanced` | BGE-base-en-v1.5 | 768 | Good quality/speed tradeoff |
+| `quality` (default) | BGE-large-en-v1.5 | 1024 | **Recommended** |
 | `multilingual` | multilingual-e5-large | 1024 | Non-English projects |
+
+The installer prompts you to choose a model interactively. Use `--yes` to accept the default (quality tier). 17 local models plus API options (OpenAI, Voyage, Cohere) are available.
 
 ### Add Nano LLM Routing (Optional)
 
@@ -222,7 +224,7 @@ rm -rf ~/.the-one
 | Problem | Solution |
 |---------|----------|
 | `command not found: the-one-mcp` | Add `~/.the-one/bin` to PATH, or re-run installer |
-| Slow first search | ONNX embedding model downloading (~23MB), cached after |
+| Slow first search | ONNX embedding model downloading (~130MB for quality tier), cached after |
 | `remote qdrant requires api key` | Set `qdrant_api_key` in config, or `qdrant_strict_auth: false` |
 | No search results | Run `tool.update` to refresh catalog, or `docs.reindex` for docs |
 | Installer can't download | Use `--local ./target/release` after building from source |
