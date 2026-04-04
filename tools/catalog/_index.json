@@ -2,7 +2,7 @@
   "version": "0.1.0",
   "last_updated": "2026-04-03",
   "schema": "_schema.json",
-  "total_tools": 28,
+  "total_tools": 125,
   "files": {
     "languages": [
       "languages/rust.json",
