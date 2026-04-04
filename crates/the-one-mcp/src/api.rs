@@ -328,6 +328,43 @@ pub struct DocsReindexResponse {
     pub unchanged: usize,
 }
 
+// ---------------------------------------------------------------------------
+// Merged tool types
+// ---------------------------------------------------------------------------
+
+/// docs.save — upsert: create if missing, update if exists
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DocsSaveRequest {
+    pub project_root: String,
+    pub project_id: String,
+    pub path: String,
+    pub content: String,
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DocsSaveResponse {
+    pub path: String,
+    pub created: bool,
+}
+
+/// tool.find — unified discovery (list / suggest / search)
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToolFindRequest {
+    pub project_root: String,
+    pub project_id: String,
+    pub mode: String,
+    #[serde(default)]
+    pub filter: Option<String>,
+    #[serde(default)]
+    pub query: Option<String>,
+    #[serde(default)]
+    pub cli: Option<String>,
+    #[serde(default)]
+    pub max: Option<usize>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfigUpdateRequest {
     pub project_root: String,
@@ -455,8 +492,9 @@ pub struct ToolListResponse {
 #[cfg(test)]
 mod tests {
     use super::{
-        ConfigExportRequest, ConfigExportResponse, DocsListRequest, MemoryFetchChunkRequest,
-        MemorySearchRequest, ProjectInitRequest, ToolRunRequest,
+        ConfigExportRequest, ConfigExportResponse, DocsSaveRequest, DocsListRequest,
+        MemoryFetchChunkRequest, MemorySearchRequest, ProjectInitRequest, ToolFindRequest,
+        ToolRunRequest,
     };
 
     #[test]
@@ -537,5 +575,43 @@ mod tests {
         let decoded: ConfigExportRequest =
             serde_json::from_str(&json).expect("deserialize should succeed");
         assert_eq!(decoded, config_request);
+    }
+
+    #[test]
+    fn test_docs_save_request_roundtrip() {
+        let save = DocsSaveRequest {
+            project_root: "/tmp/repo".to_string(),
+            project_id: "p1".to_string(),
+            path: "guide.md".to_string(),
+            content: "# Guide".to_string(),
+            tags: Some(vec!["howto".to_string()]),
+        };
+        let json = serde_json::to_string(&save).expect("serialize");
+        let decoded: DocsSaveRequest = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded.project_root, "/tmp/repo");
+        assert_eq!(decoded.tags, Some(vec!["howto".to_string()]));
+
+        // tags omitted
+        let no_tags: DocsSaveRequest =
+            serde_json::from_str(r#"{"project_root":"/tmp","project_id":"p","path":"a.md","content":"x"}"#)
+                .expect("deserialize without tags");
+        assert_eq!(no_tags.tags, None);
+    }
+
+    #[test]
+    fn test_tool_find_request_roundtrip() {
+        let find = ToolFindRequest {
+            project_root: "/tmp/repo".to_string(),
+            project_id: "p1".to_string(),
+            mode: "search".to_string(),
+            filter: None,
+            query: Some("linter".to_string()),
+            cli: None,
+            max: None,
+        };
+        let json = serde_json::to_string(&find).expect("serialize");
+        let decoded: ToolFindRequest = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded.mode, "search");
+        assert_eq!(decoded.query, Some("linter".to_string()));
     }
 }
