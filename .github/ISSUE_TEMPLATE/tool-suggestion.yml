@@ -1,0 +1,129 @@
+name: Tool Suggestion
+description: Suggest a developer tool, LSP, or MCP server for the catalog
+title: "[Tool] "
+labels: ["tool-suggestion"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting a tool! Fill in the fields below and we'll add it to the catalog.
+
+  - type: input
+    id: tool_name
+    attributes:
+      label: Tool Name
+      placeholder: "e.g., cargo-audit"
+    validations:
+      required: true
+
+  - type: input
+    id: github_url
+    attributes:
+      label: GitHub URL
+      placeholder: "https://github.com/org/repo"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: tool_type
+    attributes:
+      label: Type
+      options:
+        - cli
+        - lsp
+        - mcp
+        - framework
+        - library
+        - extension
+    validations:
+      required: true
+
+  - type: input
+    id: languages
+    attributes:
+      label: Languages
+      description: "Comma-separated. Leave empty for language-agnostic tools."
+      placeholder: "rust, python, javascript"
+
+  - type: dropdown
+    id: category
+    attributes:
+      label: Category
+      multiple: true
+      options:
+        - build
+        - test
+        - lint
+        - formatting
+        - qa
+        - security
+        - ci-cd
+        - database
+        - cloud
+        - docs
+        - automation
+        - monitoring
+        - debugging
+        - profiling
+        - coverage
+        - mutation-testing
+        - e2e
+        - api-testing
+        - load-testing
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: "One clear sentence explaining what this tool does. Written for LLMs to match user intent."
+      placeholder: "Audit Cargo.lock for crates with known security vulnerabilities from the RustSec Advisory Database"
+    validations:
+      required: true
+
+  - type: textarea
+    id: when_to_use
+    attributes:
+      label: When to Use
+      placeholder: "Before releases, in CI, after dependency updates"
+
+  - type: input
+    id: install_command
+    attributes:
+      label: Install Command
+      placeholder: "cargo install cargo-audit"
+    validations:
+      required: true
+
+  - type: input
+    id: run_command
+    attributes:
+      label: Run Command
+      placeholder: "cargo audit"
+    validations:
+      required: true
+
+  - type: input
+    id: common_flags
+    attributes:
+      label: Common Flags
+      description: "Comma-separated common flags"
+      placeholder: "--json, --deny warnings"
+
+  - type: dropdown
+    id: risk_level
+    attributes:
+      label: Risk Level
+      options:
+        - low
+        - medium
+        - high
+      default: 0
+
+  - type: input
+    id: tags
+    attributes:
+      label: Tags
+      description: "Comma-separated search tags"
+      placeholder: "security, audit, cve, dependencies"

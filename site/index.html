@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>the-one-mcp — Tool Catalog</title>
+<style>
+:root{--bg:#0d1117;--surface:#161b22;--border:#30363d;--text:#e6edf3;--text-dim:#8b949e;--accent:#58a6ff;--green:#3fb950;--yellow:#d29922;--radius:8px}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;background:var(--bg);color:var(--text);line-height:1.6}
+.container{max-width:900px;margin:0 auto;padding:0 24px}
+header{border-bottom:1px solid var(--border);padding:20px 0;margin-bottom:32px}
+header h1{font-size:24px;font-weight:600}
+header h1 span{color:var(--accent)}
+header p{color:var(--text-dim);margin-top:4px}
+nav{display:flex;gap:16px;margin-top:12px}
+nav a{color:var(--accent);text-decoration:none;font-size:14px;padding:4px 8px;border-radius:4px}
+nav a:hover{background:rgba(88,166,255,.1)}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:32px}
+.stat{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px;text-align:center}
+.stat .number{font-size:28px;font-weight:700;color:var(--accent)}
+.stat .label{font-size:12px;color:var(--text-dim);text-transform:uppercase}
+.section{margin-bottom:40px}
+.section h2{font-size:20px;margin-bottom:16px;padding-bottom:8px;border-bottom:1px solid var(--border)}
+.form-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px}
+.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.form-grid .full{grid-column:1/-1}
+label{display:block;font-size:13px;font-weight:500;color:var(--text-dim);margin-bottom:6px}
+input,select,textarea{width:100%;padding:8px 12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:14px;font-family:inherit}
+input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(88,166,255,.15)}
+textarea{resize:vertical;min-height:60px}
+.hint{font-size:11px;color:var(--text-dim);margin-top:2px}
+.actions{margin-top:20px;display:flex;gap:12px}
+.btn{padding:10px 20px;border:none;border-radius:6px;font-size:14px;font-weight:500;cursor:pointer}
+.btn-primary{background:var(--green);color:#000}
+.btn-primary:hover{background:#46d15a}
+.btn-secondary{background:var(--border);color:var(--text)}
+.btn-secondary:hover{background:#3d444d}
+#preview{margin-top:16px;display:none}
+#preview pre{background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:16px;overflow-x:auto;font-size:13px}
+.search-bar{margin-bottom:16px}
+.search-bar input{width:100%;padding:12px 16px;font-size:16px;border-radius:var(--radius)}
+.tool-list{display:flex;flex-direction:column;gap:8px}
+.tool-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px;display:flex;justify-content:space-between;align-items:flex-start;gap:12px}
+.tool-card:hover{border-color:var(--accent)}
+.tool-info{flex:1}
+.tool-name{font-weight:600;color:var(--accent)}
+.tool-desc{font-size:14px;color:var(--text-dim);margin-top:2px}
+.tool-meta{margin-top:8px;display:flex;gap:8px;flex-wrap:wrap}
+.tag{font-size:11px;padding:2px 8px;border-radius:12px;background:rgba(88,166,255,.1);color:var(--accent)}
+.tag.lang{background:rgba(63,185,80,.1);color:var(--green)}
+.tag.cat{background:rgba(210,153,34,.1);color:var(--yellow)}
+.install-cmd{font-family:'SFMono-Regular',Consolas,monospace;font-size:12px;color:var(--text-dim);background:var(--bg);padding:4px 8px;border-radius:4px;white-space:nowrap}
+.tabs{display:flex;gap:4px;margin-bottom:24px}
+.tab{padding:8px 16px;border:1px solid var(--border);border-radius:6px;background:transparent;color:var(--text-dim);cursor:pointer;font-size:14px}
+.tab.active{background:var(--accent);color:#000;border-color:var(--accent)}
+footer{border-top:1px solid var(--border);padding:24px 0;margin-top:48px;text-align:center;color:var(--text-dim);font-size:13px}
+footer a{color:var(--accent);text-decoration:none}
+@media(max-width:600px){.form-grid{grid-template-columns:1fr}.stats{grid-template-columns:repeat(2,1fr)}}
+</style>
+</head>
+<body>
+
+<div class="container">
+  <header>
+    <h1><span>the-one-mcp</span> — Tool Catalog</h1>
+    <p>125+ curated developer tools, LSPs, and MCP servers for AI coding assistants</p>
+    <nav>
+      <a href="https://github.com/michelabboud/the-one-mcp">GitHub</a>
+      <a href="https://github.com/michelabboud/the-one-mcp/blob/main/INSTALL.md">Install</a>
+      <a href="https://github.com/michelabboud/the-one-mcp/blob/main/docs/guides/the-one-mcp-complete-guide.md">Docs</a>
+      <a href="https://github.com/michelabboud/the-one-mcp/blob/main/CONTRIBUTING.md">Contribute</a>
+    </nav>
+  </header>
+
+  <div class="stats">
+    <div class="stat"><div class="number" id="stat-total">125</div><div class="label">Tools</div></div>
+    <div class="stat"><div class="number">6</div><div class="label">Languages</div></div>
+    <div class="stat"><div class="number">31</div><div class="label">MCP Tools</div></div>
+    <div class="stat"><div class="number">4</div><div class="label">AI CLIs</div></div>
+    <div class="stat"><div class="number">6</div><div class="label">Platforms</div></div>
+  </div>
+
+  <div class="tabs">
+    <button class="tab active" id="tab-btn-browse" onclick="showTab('browse')">Browse Catalog</button>
+    <button class="tab" id="tab-btn-submit" onclick="showTab('submit')">Submit a Tool</button>
+  </div>
+
+  <div id="tab-browse" class="section">
+    <div class="search-bar">
+      <input type="text" id="search" placeholder="Search tools... (e.g., security, pytest, linter)" oninput="filterTools()">
+    </div>
+    <div id="tool-list" class="tool-list"></div>
+  </div>
+
+  <div id="tab-submit" class="section" style="display:none">
+    <h2>Submit a Tool</h2>
+    <p style="color:var(--text-dim);margin-bottom:16px">Fill in the form. Clicking "Submit" opens a pre-filled GitHub Issue.</p>
+    <div class="form-card">
+      <div class="form-grid">
+        <div><label>Tool ID *</label><input id="f-id" placeholder="my-tool"></div>
+        <div><label>Display Name *</label><input id="f-name" placeholder="My Tool"></div>
+        <div><label>Type *</label><select id="f-type"><option value="cli">CLI Tool</option><option value="lsp">LSP</option><option value="mcp">MCP Server</option><option value="framework">Framework</option></select></div>
+        <div><label>Risk Level</label><select id="f-risk"><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select></div>
+        <div><label>Languages</label><input id="f-languages" placeholder="rust, python"><div class="hint">Comma-separated. Empty = language-agnostic.</div></div>
+        <div><label>Categories *</label><input id="f-category" placeholder="test, security"><div class="hint">build, test, lint, qa, security, ci-cd, etc.</div></div>
+        <div class="full"><label>Description *</label><textarea id="f-description" placeholder="What this tool does — written for LLMs to match user intent"></textarea></div>
+        <div class="full"><label>When to Use</label><textarea id="f-when" placeholder="Before releases, in CI, after dependency updates"></textarea></div>
+        <div><label>Install Command *</label><input id="f-install" placeholder="cargo install my-tool"></div>
+        <div><label>Run Command *</label><input id="f-run" placeholder="my-tool check"></div>
+        <div><label>Common Flags</label><input id="f-flags" placeholder="--json, --verbose"></div>
+        <div><label>GitHub URL</label><input id="f-github" placeholder="https://github.com/org/repo"></div>
+        <div class="full"><label>Tags</label><input id="f-tags" placeholder="security, audit, dependencies"><div class="hint">Comma-separated search keywords</div></div>
+      </div>
+      <div class="actions">
+        <button class="btn btn-primary" onclick="submitTool()">Submit via GitHub Issue</button>
+        <button class="btn btn-secondary" onclick="previewJSON()">Preview JSON</button>
+      </div>
+      <div id="preview"><pre id="preview-json"></pre></div>
+    </div>
+  </div>
+
+  <footer><p><a href="https://github.com/michelabboud/the-one-mcp">the-one-mcp</a> — MCP broker for AI coding assistants. Apache-2.0.</p></footer>
+</div>
+
+<script>
+const REPO='michelabboud/the-one-mcp';
+const CATALOG_BASE='https://raw.githubusercontent.com/'+REPO+'/main/tools/catalog';
+let allTools=[];
+
+async function loadCatalog(){
+  const files=['languages/rust.json','languages/python.json','languages/javascript.json',
+    'languages/go.json','languages/java.json','categories/security.json',
+    'categories/testing.json','categories/ci-cd.json','mcps/official.json'];
+  const results=await Promise.allSettled(
+    files.map(f=>fetch(CATALOG_BASE+'/'+f).then(r=>r.ok?r.json():[]))
+  );
+  allTools=results.flatMap(r=>r.status==='fulfilled'?r.value:[]);
+  document.getElementById('stat-total').textContent=allTools.length;
+  renderTools(allTools);
+}
+
+function renderTools(tools){
+  const list=document.getElementById('tool-list');
+  list.textContent='';
+  if(!tools.length){
+    const p=document.createElement('p');
+    p.style.color='var(--text-dim)';
+    p.textContent='No tools match your search.';
+    list.appendChild(p);
+    return;
+  }
+  tools.forEach(t=>{
+    const card=document.createElement('div');
+    card.className='tool-card';
+    const info=document.createElement('div');
+    info.className='tool-info';
+    const name=document.createElement('div');
+    name.className='tool-name';
+    name.textContent=t.name||t.id;
+    const desc=document.createElement('div');
+    desc.className='tool-desc';
+    desc.textContent=t.description||'';
+    const meta=document.createElement('div');
+    meta.className='tool-meta';
+    (t.languages||[]).forEach(l=>{const s=document.createElement('span');s.className='tag lang';s.textContent=l;meta.appendChild(s);});
+    (t.category||[]).forEach(c=>{const s=document.createElement('span');s.className='tag cat';s.textContent=c;meta.appendChild(s);});
+    const typeTag=document.createElement('span');typeTag.className='tag';typeTag.textContent=t.type||'cli';meta.appendChild(typeTag);
+    info.appendChild(name);info.appendChild(desc);info.appendChild(meta);card.appendChild(info);
+    const installCmd=t.install?(t.install.command||''):'';
+    if(installCmd){const cmd=document.createElement('div');cmd.className='install-cmd';cmd.textContent=installCmd;card.appendChild(cmd);}
+    list.appendChild(card);
+  });
+}
+
+function filterTools(){
+  const q=document.getElementById('search').value.toLowerCase().trim();
+  if(!q){renderTools(allTools);return;}
+  const words=q.split(/\s+/);
+  const filtered=allTools.filter(t=>{
+    const text=[t.id,t.name,t.description,t.when_to_use,t.what_it_finds,
+      ...(t.tags||[]),...(t.languages||[]),...(t.category||[])].filter(Boolean).join(' ').toLowerCase();
+    return words.every(w=>text.includes(w));
+  });
+  renderTools(filtered);
+}
+
+function showTab(tab){
+  document.getElementById('tab-btn-browse').classList.toggle('active',tab==='browse');
+  document.getElementById('tab-btn-submit').classList.toggle('active',tab==='submit');
+  document.getElementById('tab-browse').style.display=tab==='browse'?'block':'none';
+  document.getElementById('tab-submit').style.display=tab==='submit'?'block':'none';
+}
+
+function val(id){return document.getElementById(id).value.trim();}
+function csvArr(id){return val(id).split(',').map(s=>s.trim()).filter(Boolean);}
+
+function buildToolJSON(){
+  return {
+    id:val('f-id'),name:val('f-name'),type:val('f-type'),
+    category:csvArr('f-category'),languages:csvArr('f-languages'),
+    description:val('f-description'),when_to_use:val('f-when')||undefined,
+    install:{command:val('f-install'),binary_name:val('f-id')},
+    run:{command:val('f-run'),common_flags:csvArr('f-flags')},
+    risk_level:val('f-risk'),requires:[],
+    cli_support:['claude','gemini','opencode','codex'],
+    tags:csvArr('f-tags'),github:val('f-github')||undefined,
+    security:{trust_level:'community'}
+  };
+}
+
+function previewJSON(){
+  const el=document.getElementById('preview');
+  document.getElementById('preview-json').textContent=JSON.stringify(buildToolJSON(),null,2);
+  el.style.display=el.style.display==='none'?'block':'none';
+}
+
+function submitTool(){
+  const t=buildToolJSON();
+  if(!t.id||!t.name||!t.description||!t.install.command||!t.run.command){
+    alert('Please fill in all required fields (marked with *)');return;
+  }
+  const body='## Tool Suggestion\n\n'+
+    '**Name:** '+t.name+'\n**ID:** '+t.id+'\n**Type:** '+t.type+'\n'+
+    '**Languages:** '+((t.languages||[]).join(', ')||'language-agnostic')+'\n'+
+    '**Categories:** '+((t.category||[]).join(', '))+'\n'+
+    '**GitHub:** '+(t.github||'N/A')+'\n\n'+
+    '### Description\n'+t.description+'\n\n'+
+    (t.when_to_use?'### When to Use\n'+t.when_to_use+'\n\n':'')+
+    '### Install\n`'+t.install.command+'`\n\n'+
+    '### Run\n`'+t.run.command+'`\n\n'+
+    '### JSON Entry\n```json\n'+JSON.stringify(t,null,2)+'\n```\n';
+  const params=new URLSearchParams({title:'[Tool] '+t.name,body:body,labels:'tool-suggestion'});
+  window.open('https://github.com/'+REPO+'/issues/new?'+params.toString(),'_blank');
+}
+
+loadCatalog();
+</script>
+</body>
+</html>
