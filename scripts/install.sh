@@ -333,7 +333,8 @@ create_default_config() {
   "provider": "local",
   "log_level": "info",
   "embedding_provider": "local",
-  "embedding_model": "all-MiniLM-L6-v2",
+  "embedding_model": "BGE-large-en-v1.5",
+  "embedding_dimensions": 1024,
   "qdrant_url": "http://127.0.0.1:6334",
   "qdrant_strict_auth": true,
   "nano_routing_policy": "priority",
@@ -356,6 +357,181 @@ create_default_config() {
 CONFIGEOF
 
     ok "Default config created: ${CONFIG_FILE}"
+}
+
+# ── Embedding Model Selection ─────────────────────────────────────────────
+select_embedding_model() {
+    # Skip in non-interactive mode
+    if [ "$YES" = true ] || [ ! -t 0 ]; then
+        info "Using default embedding model: BGE-large-en-v1.5 (quality)"
+        return 0
+    fi
+
+    echo ""
+    echo "${CYAN}${BOLD}╔══════════════════════════════════════════════════════════════════════════╗${NC}"
+    echo "${CYAN}${BOLD}║  Embedding Model Selection                                              ║${NC}"
+    echo "${CYAN}${BOLD}╠══════════════════════════════════════════════════════════════════════════╣${NC}"
+    echo "${CYAN}${BOLD}║                                                                          ║${NC}"
+    printf "${CYAN}${BOLD}║${NC}  ${DIM}#${NC}   ${BOLD}%-26s${NC} ${DIM}%-6s %-7s %-14s %-12s${NC}${CYAN}${BOLD}║${NC}\n" \
+        "Model" "Dims" "Size" "Latency" "Multilingual"
+    printf "${CYAN}${BOLD}║${NC}  ${DIM}%-3s${NC} ${DIM}%-26s %-6s %-7s %-14s %-12s${NC}${CYAN}${BOLD}║${NC}\n" \
+        "───" "──────────────────────────" "──────" "───────" "──────────────" "────────────"
+    printf "${CYAN}${BOLD}║${NC}  ${DIM}1${NC}   %-26s %-6s %-7s %-14s %-12s${CYAN}${BOLD}║${NC}\n" \
+        "all-MiniLM-L6-v2" "384" "23MB" "fastest" "No"
+    printf "${CYAN}${BOLD}║${NC}  ${DIM}2${NC}   %-26s %-6s %-7s %-14s %-12s${CYAN}${BOLD}║${NC}\n" \
+        "BGE-base-en-v1.5" "768" "50MB" "~2x slower" "No"
+    printf "${CYAN}${BOLD}║${NC} ${GREEN}[3]${NC}  ${BOLD}%-22s${NC} ${GREEN}★${NC}  %-6s %-7s %-14s %-12s${CYAN}${BOLD}║${NC}\n" \
+        "BGE-large-en-v1.5" "1024" "130MB" "~4x slower" "No"
+    printf "${CYAN}${BOLD}║${NC}  ${DIM}4${NC}   %-26s %-6s %-7s %-14s %-12s${CYAN}${BOLD}║${NC}\n" \
+        "multilingual-e5-large" "1024" "220MB" "~5x slower" "Yes"
+    printf "${CYAN}${BOLD}║${NC}  ${DIM}5${NC}   %-26s %-6s %-7s %-14s %-12s${CYAN}${BOLD}║${NC}\n" \
+        "multilingual-e5-base" "768" "90MB" "~3x slower" "Yes"
+    printf "${CYAN}${BOLD}║${NC}  ${DIM}6${NC}   %-26s %-6s %-7s %-14s %-12s${CYAN}${BOLD}║${NC}\n" \
+        "multilingual-e5-small" "384" "45MB" "~1.5x slower" "Yes"
+    printf "${CYAN}${BOLD}║${NC}  ${DIM}7${NC}   %-26s %-6s %-7s %-14s %-12s${CYAN}${BOLD}║${NC}\n" \
+        "paraphrase-ml-minilm" "384" "45MB" "~1.5x slower" "Yes"
+    printf "${CYAN}${BOLD}║${NC}  ${DIM}8${NC}   %-26s %-6s %-7s %-14s %-12s${CYAN}${BOLD}║${NC}\n" \
+        "API (OpenAI/Voyage/Cohere)" "—" "—" "—" "Depends"
+    echo "${CYAN}${BOLD}║                                                                          ║${NC}"
+    echo "${CYAN}${BOLD}║  ${GREEN}★${NC} ${DIM}= recommended${NC}                                                         ${CYAN}${BOLD}║${NC}"
+    echo "${CYAN}${BOLD}╚══════════════════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+
+    echo -en "${YELLOW}Select model [3]: ${NC}"
+    read -r model_choice
+
+    # Default to 3 if empty
+    model_choice="${model_choice:-3}"
+
+    local model_name dims
+    case "$model_choice" in
+        1) model_name="all-MiniLM-L6-v2"; dims=384 ;;
+        2) model_name="BGE-base-en-v1.5"; dims=768 ;;
+        3) model_name="BGE-large-en-v1.5"; dims=1024 ;;
+        4) model_name="multilingual-e5-large"; dims=1024 ;;
+        5) model_name="multilingual-e5-base"; dims=768 ;;
+        6) model_name="multilingual-e5-small"; dims=384 ;;
+        7) model_name="paraphrase-ml-minilm-l12-v2"; dims=384 ;;
+        8)
+            select_api_model
+            return $?
+            ;;
+        *)
+            warn "Invalid choice '$model_choice', using default (BGE-large-en-v1.5)"
+            model_name="BGE-large-en-v1.5"; dims=1024
+            ;;
+    esac
+
+    # Update config.json with chosen model
+    update_config_model "local" "$model_name" "$dims" "" ""
+    ok "Selected: ${model_name} (${dims}d)"
+}
+
+select_api_model() {
+    echo ""
+    echo "${BOLD}API Provider:${NC}"
+    echo "  ${DIM}1${NC}  OpenAI"
+    echo "  ${DIM}2${NC}  Voyage AI"
+    echo "  ${DIM}3${NC}  Cohere"
+    echo "  ${DIM}4${NC}  Custom (enter base URL)"
+    echo ""
+    echo -en "${YELLOW}Select provider [1]: ${NC}"
+    read -r provider_choice
+    provider_choice="${provider_choice:-1}"
+
+    local provider_name base_url default_env default_model default_dims
+    case "$provider_choice" in
+        1)
+            provider_name="OpenAI"
+            base_url="https://api.openai.com/v1"
+            default_env="OPENAI_API_KEY"
+            default_model="text-embedding-3-small"
+            default_dims=1536
+            ;;
+        2)
+            provider_name="Voyage AI"
+            base_url="https://api.voyageai.com/v1"
+            default_env="VOYAGE_API_KEY"
+            default_model="voyage-3"
+            default_dims=1024
+            ;;
+        3)
+            provider_name="Cohere"
+            base_url="https://api.cohere.com/v2"
+            default_env="COHERE_API_KEY"
+            default_model="embed-v4.0"
+            default_dims=1024
+            ;;
+        4)
+            echo -en "${YELLOW}Base URL: ${NC}"
+            read -r base_url
+            default_env=""
+            default_model=""
+            default_dims=1536
+            provider_name="Custom"
+            ;;
+        *)
+            warn "Invalid choice, using OpenAI"
+            provider_name="OpenAI"
+            base_url="https://api.openai.com/v1"
+            default_env="OPENAI_API_KEY"
+            default_model="text-embedding-3-small"
+            default_dims=1536
+            ;;
+    esac
+
+    echo ""
+    echo -en "${YELLOW}API Key (or env var name) [${default_env}]: ${NC}"
+    read -r api_key
+    api_key="${api_key:-$default_env}"
+
+    echo -en "${YELLOW}Model [${default_model}]: ${NC}"
+    read -r model_name
+    model_name="${model_name:-$default_model}"
+
+    echo -en "${YELLOW}Dimensions [${default_dims}]: ${NC}"
+    read -r dims
+    dims="${dims:-$default_dims}"
+
+    update_config_model "api" "$model_name" "$dims" "$base_url" "$api_key"
+    ok "Selected: ${provider_name} / ${model_name} (${dims}d)"
+}
+
+update_config_model() {
+    local provider="$1" model="$2" dims="$3" base_url="$4" api_key="$5"
+
+    if [ ! -f "$CONFIG_FILE" ]; then
+        warn "Config file not found, skipping model update"
+        return 1
+    fi
+
+    # Use a temp file for atomic update
+    local tmp_file="${CONFIG_FILE}.tmp"
+
+    if command -v python3 &>/dev/null; then
+        python3 -c "
+import json, sys
+with open('${CONFIG_FILE}') as f:
+    config = json.load(f)
+config['embedding_provider'] = '${provider}'
+config['embedding_model'] = '${model}'
+config['embedding_dimensions'] = ${dims}
+if '${base_url}':
+    config['embedding_api_base_url'] = '${base_url}'
+if '${api_key}':
+    config['embedding_api_key'] = '${api_key}'
+with open('${tmp_file}', 'w') as f:
+    json.dump(config, f, indent=2)
+    f.write('\n')
+" && mv "$tmp_file" "$CONFIG_FILE"
+    else
+        # Fallback: sed-based replacement (less robust but works without python)
+        sed -i "s/\"embedding_provider\": \"[^\"]*\"/\"embedding_provider\": \"${provider}\"/" "$CONFIG_FILE"
+        sed -i "s/\"embedding_model\": \"[^\"]*\"/\"embedding_model\": \"${model}\"/" "$CONFIG_FILE"
+        if grep -q '"embedding_dimensions"' "$CONFIG_FILE"; then
+            sed -i "s/\"embedding_dimensions\": [0-9]*/\"embedding_dimensions\": ${dims}/" "$CONFIG_FILE"
+        fi
+    fi
 }
 
 # ── Download Recommended Tools ─────────────────────────────────────────────
@@ -822,30 +998,34 @@ fi
 
 # Step 1: Get binaries
 if [ -n "$LOCAL_DIR" ]; then
-    log "Step 1/5: Installing from local build (${LOCAL_DIR})"
+    log "Step 1/6: Installing from local build (${LOCAL_DIR})"
     install_local
 else
     resolve_version
-    log "Step 1/5: Downloading ${VERSION} for ${PLATFORM_NAME}${LEAN:+ (lean)}"
+    log "Step 1/6: Downloading ${VERSION} for ${PLATFORM_NAME}${LEAN:+ (lean)}"
     download_release
 fi
 
 # Step 2: Default config
-log "Step 2/5: Setting up configuration"
+log "Step 2/6: Setting up configuration"
 mkdir -p "$INSTALL_DIR"
 create_default_config
 
-# Step 3: Recommended tools
-log "Step 3/5: Setting up tools catalog"
+# Step 3: Embedding model selection
+log "Step 3/6: Selecting embedding model"
+select_embedding_model
+
+# Step 4: Recommended tools
+log "Step 4/6: Setting up tools catalog"
 download_recommended_tools
 
-# Step 4: PATH and CLI registration
-log "Step 4/5: Registering with AI assistants"
+# Step 5: PATH and CLI registration
+log "Step 5/6: Registering with AI assistants"
 ensure_path
 register_all_clis
 
-# Step 5: Validate
-log "Step 5/5: Validating installation"
+# Step 6: Validate
+log "Step 6/6: Validating installation"
 validate_install
 
 # ── Summary ────────────────────────────────────────────────────────────────
@@ -856,6 +1036,7 @@ log "${GREEN}${BOLD}Installation complete!${NC}"
 echo ""
 echo "  Binary:          ${BIN_DIR}/${BIN_NAME}${PLATFORM_EXT}"
 echo "  Config:          ${CONFIG_FILE}"
+echo "  Model:           $(grep -o '"embedding_model": "[^"]*"' "$CONFIG_FILE" | cut -d'"' -f4)"
 echo "  Tools:           ${REGISTRY_DIR}/recommended.json"
 echo "  Custom tools:    ${REGISTRY_DIR}/custom.json"
 echo ""
