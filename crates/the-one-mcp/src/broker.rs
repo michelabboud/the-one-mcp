@@ -18,7 +18,7 @@ use the_one_core::policy::PolicyEngine;
 use the_one_core::project::{project_init, project_refresh, RefreshMode};
 use the_one_core::storage::sqlite::ProjectDatabase;
 use the_one_memory::qdrant::QdrantOptions;
-use the_one_memory::{MemoryEngine, MemorySearchRequest as EngineSearchRequest};
+use the_one_memory::{MemoryEngine, MemorySearchRequest as EngineSearchRequest, RetrievalMode};
 use the_one_registry::CapabilityRegistry;
 use the_one_router::providers::{ApiNanoProvider, LmStudioNanoProvider, OllamaNanoProvider};
 use the_one_router::{NanoBudget, RouteTelemetry, RoutedDecision, Router};
@@ -150,7 +150,7 @@ impl McpBroker {
         let max_chunk_tokens = config.limits.max_chunk_tokens;
 
         // Determine embedding + qdrant setup from config
-        if config.embedding_provider == "api" {
+        let mut engine = if config.embedding_provider == "api" {
             // API embeddings + Qdrant
             MemoryEngine::new_api(the_one_memory::ApiEngineConfig {
                 embedding_base_url: config.embedding_api_base_url.as_deref().unwrap_or(""),
@@ -169,7 +169,7 @@ impl McpBroker {
                 },
                 max_chunk_tokens,
             })
-            .map_err(CoreError::Embedding)
+            .map_err(CoreError::Embedding)?
         } else {
             // Local fastembed (requires "local-embeddings" feature)
             #[cfg(feature = "local-embeddings")]
@@ -199,29 +199,68 @@ impl McpBroker {
                         },
                         max_chunk_tokens,
                     ) {
-                        Ok(engine) => Ok(engine),
-                        Err(_) => MemoryEngine::new_local(
-                            &config.embedding_model,
-                            max_chunk_tokens,
-                        )
-                        .map_err(CoreError::Embedding),
+                        Ok(engine) => engine,
+                        Err(_) => {
+                            MemoryEngine::new_local(&config.embedding_model, max_chunk_tokens)
+                                .map_err(CoreError::Embedding)?
+                        }
                     }
                 } else {
                     MemoryEngine::new_local(&config.embedding_model, max_chunk_tokens)
-                        .map_err(CoreError::Embedding)
+                        .map_err(CoreError::Embedding)?
                 }
             }
 
             // Without local embeddings, fall back to API-only
             #[cfg(not(feature = "local-embeddings"))]
             {
-                Err(CoreError::Embedding(
+                return Err(CoreError::Embedding(
                     "local embeddings not available (built without local-embeddings feature). \
                      Set embedding_provider to 'api' in config."
                         .to_string(),
-                ))
+                ));
+            }
+        };
+
+        // Attach cross-encoder reranker if enabled (LightRAG-inspired improvement)
+        #[cfg(feature = "local-embeddings")]
+        if config.reranker_enabled {
+            match the_one_memory::reranker::FastEmbedReranker::new(&config.reranker_model) {
+                Ok(reranker) => {
+                    tracing::info!(
+                        "reranker enabled: {} (model: {})",
+                        reranker.name(),
+                        config.reranker_model
+                    );
+                    engine.set_reranker(Box::new(reranker));
+                }
+                Err(e) => {
+                    tracing::warn!("failed to init reranker, continuing without: {e}");
+                }
             }
         }
+
+        // Load knowledge graph if it exists
+        let graph_path = config.project_state_dir.join("knowledge_graph.json");
+        match the_one_memory::graph::KnowledgeGraph::load_from_file(&graph_path) {
+            Ok(graph) => {
+                let entity_count = graph.entity_count();
+                let relation_count = graph.relation_count();
+                if entity_count > 0 {
+                    tracing::info!(
+                        "loaded knowledge graph: {} entities, {} relations",
+                        entity_count,
+                        relation_count
+                    );
+                }
+                *engine.graph_mut() = graph;
+            }
+            Err(e) => {
+                tracing::warn!("failed to load knowledge graph: {e}");
+            }
+        }
+
+        Ok(engine)
     }
 
     async fn route_query(&self, project_root: &Path, query: &str) -> RoutedDecision {
@@ -359,8 +398,7 @@ impl McpBroker {
                 // Rebuild as local-only and retry (requires local-embeddings)
                 #[cfg(feature = "local-embeddings")]
                 {
-                    let config =
-                        AppConfig::load(project_root, RuntimeOverrides::default())?;
+                    let config = AppConfig::load(project_root, RuntimeOverrides::default())?;
                     let fallback = MemoryEngine::new_local(
                         &config.embedding_model,
                         config.limits.max_chunk_tokens,
@@ -368,9 +406,7 @@ impl McpBroker {
                     .map_err(CoreError::Embedding)?;
                     memories.insert(key.clone(), fallback);
                     let memory = memories.get_mut(&key).ok_or_else(|| {
-                        CoreError::InvalidProjectConfig(
-                            "project memory not indexed".to_string(),
-                        )
+                        CoreError::InvalidProjectConfig("project memory not indexed".to_string())
                     })?;
                     memory.ingest_markdown_tree(docs_root).await.map_err(|e2| {
                         CoreError::Embedding(format!(
@@ -447,12 +483,22 @@ impl McpBroker {
         let project_id = request.project_id.clone();
         let query = request.query;
 
+        // Load score threshold from config (LightRAG-inspired improvement)
+        let score_threshold = AppConfig::load(project_root, RuntimeOverrides::default())
+            .map(|c| c.limits.search_score_threshold)
+            .unwrap_or(0.0);
+
         let hits = if route.decision.requires_memory_search {
             let key = Self::project_memory_key(project_root, &project_id);
             let memories = self.memory_by_project.read().await;
             if let Some(memory) = memories.get(&key) {
                 memory
-                    .search(&EngineSearchRequest { query, top_k })
+                    .search(&EngineSearchRequest {
+                        query,
+                        top_k,
+                        score_threshold,
+                        mode: RetrievalMode::Hybrid,
+                    })
                     .await
                     .into_iter()
                     .map(|item| MemorySearchItem {
@@ -881,7 +927,10 @@ impl McpBroker {
             }
             #[cfg(not(feature = "local-embeddings"))]
             {
-                Err("local embeddings not available (built without local-embeddings feature)".into())
+                Err(
+                    "local embeddings not available (built without local-embeddings feature)"
+                        .into(),
+                )
             }
         }
     }

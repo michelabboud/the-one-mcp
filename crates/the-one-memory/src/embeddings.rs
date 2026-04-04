@@ -60,9 +60,7 @@ mod local {
 
             // ── Quantized variants ──
             "fast-q" | "all-minilm-l6-v2-q" => (fastembed::EmbeddingModel::AllMiniLML6V2Q, 384),
-            "balanced-q" | "bge-base-en-v1.5-q" => {
-                (fastembed::EmbeddingModel::BGEBaseENV15Q, 768)
-            }
+            "balanced-q" | "bge-base-en-v1.5-q" => (fastembed::EmbeddingModel::BGEBaseENV15Q, 768),
             "quality-q" | "bge-large-en-v1.5-q" => {
                 (fastembed::EmbeddingModel::BGELargeENV15Q, 1024)
             }
