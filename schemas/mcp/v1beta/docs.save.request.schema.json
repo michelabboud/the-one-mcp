@@ -1,13 +1,13 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "the-one.mcp.v1beta.docs.get.request",
+  "$id": "the-one.mcp.v1beta.docs.save.request",
   "type": "object",
   "properties": {
     "project_root": { "type": "string" },
     "project_id": { "type": "string" },
     "path": { "type": "string" },
-    "section": { "type": "string" },
-    "max_bytes": { "type": "integer" }
+    "content": { "type": "string" },
+    "tags": { "type": "array", "items": { "type": "string" } }
   },
-  "required": ["project_root", "project_id", "path"]
+  "required": ["project_root", "project_id", "path", "content"]
 }

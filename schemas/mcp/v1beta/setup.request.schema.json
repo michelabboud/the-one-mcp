@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "the-one.mcp.v1beta.setup.request",
+  "type": "object",
+  "properties": {
+    "action": { "type": "string", "enum": ["project", "refresh", "profile"] },
+    "params": { "type": "object" }
+  },
+  "required": ["action", "params"]
+}

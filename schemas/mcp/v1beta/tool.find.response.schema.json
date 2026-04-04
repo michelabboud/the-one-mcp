@@ -1,0 +1,6 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "the-one.mcp.v1beta.tool.find.response",
+  "type": "object",
+  "description": "Response varies by mode: list returns {tools}, suggest returns {suggestions}, search returns {matches}"
+}

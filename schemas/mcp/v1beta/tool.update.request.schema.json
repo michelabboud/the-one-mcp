@@ -1,9 +1,0 @@
-{
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "the-one.mcp.v1beta.tool.update.request",
-  "title": "tool.update request",
-  "type": "object",
-  "required": [],
-  "properties": {},
-  "additionalProperties": false
-}

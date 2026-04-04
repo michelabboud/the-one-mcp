@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "the-one.mcp.v1beta.tool.find.request",
+  "type": "object",
+  "properties": {
+    "project_root": { "type": "string" },
+    "project_id": { "type": "string" },
+    "mode": { "type": "string", "enum": ["list", "suggest", "search"] },
+    "filter": { "type": "string", "enum": ["enabled", "available", "recommended", "all"] },
+    "query": { "type": "string" },
+    "cli": { "type": "string" },
+    "max": { "type": "integer" }
+  },
+  "required": ["project_root", "project_id", "mode"]
+}
