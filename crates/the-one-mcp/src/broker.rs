@@ -171,44 +171,55 @@ impl McpBroker {
             })
             .map_err(CoreError::Embedding)
         } else {
-            // Local fastembed
-            let qdrant_url = &config.qdrant_url;
-            if qdrant_url.starts_with("http") {
-                // Check strict auth for remote qdrant
-                let remote = !(qdrant_url.contains("localhost")
-                    || qdrant_url.starts_with("http://127.0.0.1"));
-                if remote && config.qdrant_strict_auth && config.qdrant_api_key.is_none() {
-                    return Err(CoreError::InvalidProjectConfig(
-                        "remote qdrant requires api key when strict auth is enabled".to_string(),
-                    ));
-                }
-
-                // Try qdrant, fall back to pure local if it fails
-                match MemoryEngine::new_with_qdrant(
-                    &config.embedding_model,
-                    qdrant_url,
-                    project_id,
-                    QdrantOptions {
-                        api_key: config.qdrant_api_key.clone(),
-                        ca_cert_path: config
-                            .qdrant_ca_cert_path
-                            .as_ref()
-                            .map(|p| p.to_string_lossy().to_string()),
-                        tls_insecure: config.qdrant_tls_insecure,
-                    },
-                    max_chunk_tokens,
-                ) {
-                    Ok(engine) => Ok(engine),
-                    Err(_) => {
-                        // Qdrant unavailable, fall back to local-only
-                        MemoryEngine::new_local(&config.embedding_model, max_chunk_tokens)
-                            .map_err(CoreError::Embedding)
+            // Local fastembed (requires "local-embeddings" feature)
+            #[cfg(feature = "local-embeddings")]
+            {
+                let qdrant_url = &config.qdrant_url;
+                if qdrant_url.starts_with("http") {
+                    let remote = !(qdrant_url.contains("localhost")
+                        || qdrant_url.starts_with("http://127.0.0.1"));
+                    if remote && config.qdrant_strict_auth && config.qdrant_api_key.is_none() {
+                        return Err(CoreError::InvalidProjectConfig(
+                            "remote qdrant requires api key when strict auth is enabled"
+                                .to_string(),
+                        ));
                     }
+
+                    match MemoryEngine::new_with_qdrant(
+                        &config.embedding_model,
+                        qdrant_url,
+                        project_id,
+                        QdrantOptions {
+                            api_key: config.qdrant_api_key.clone(),
+                            ca_cert_path: config
+                                .qdrant_ca_cert_path
+                                .as_ref()
+                                .map(|p| p.to_string_lossy().to_string()),
+                            tls_insecure: config.qdrant_tls_insecure,
+                        },
+                        max_chunk_tokens,
+                    ) {
+                        Ok(engine) => Ok(engine),
+                        Err(_) => MemoryEngine::new_local(
+                            &config.embedding_model,
+                            max_chunk_tokens,
+                        )
+                        .map_err(CoreError::Embedding),
+                    }
+                } else {
+                    MemoryEngine::new_local(&config.embedding_model, max_chunk_tokens)
+                        .map_err(CoreError::Embedding)
                 }
-            } else {
-                // Pure local, no Qdrant
-                MemoryEngine::new_local(&config.embedding_model, max_chunk_tokens)
-                    .map_err(CoreError::Embedding)
+            }
+
+            // Without local embeddings, fall back to API-only
+            #[cfg(not(feature = "local-embeddings"))]
+            {
+                Err(CoreError::Embedding(
+                    "local embeddings not available (built without local-embeddings feature). \
+                     Set embedding_provider to 'api' in config."
+                        .to_string(),
+                ))
             }
         }
     }
@@ -345,23 +356,30 @@ impl McpBroker {
         match memory.ingest_markdown_tree(docs_root).await {
             Ok(count) => Ok(count),
             Err(e) => {
-                // If qdrant-backed engine failed (e.g. qdrant unreachable),
-                // rebuild as local-only and retry
-                let config = AppConfig::load(project_root, RuntimeOverrides::default())?;
-                let fallback = MemoryEngine::new_local(
-                    &config.embedding_model,
-                    config.limits.max_chunk_tokens,
-                )
-                .map_err(CoreError::Embedding)?;
-                memories.insert(key.clone(), fallback);
-                let memory = memories.get_mut(&key).ok_or_else(|| {
-                    CoreError::InvalidProjectConfig("project memory not indexed".to_string())
-                })?;
-                memory.ingest_markdown_tree(docs_root).await.map_err(|e2| {
-                    CoreError::Embedding(format!(
-                        "ingest failed with qdrant ({e}) and local ({e2})"
-                    ))
-                })
+                // Rebuild as local-only and retry (requires local-embeddings)
+                #[cfg(feature = "local-embeddings")]
+                {
+                    let config =
+                        AppConfig::load(project_root, RuntimeOverrides::default())?;
+                    let fallback = MemoryEngine::new_local(
+                        &config.embedding_model,
+                        config.limits.max_chunk_tokens,
+                    )
+                    .map_err(CoreError::Embedding)?;
+                    memories.insert(key.clone(), fallback);
+                    let memory = memories.get_mut(&key).ok_or_else(|| {
+                        CoreError::InvalidProjectConfig(
+                            "project memory not indexed".to_string(),
+                        )
+                    })?;
+                    memory.ingest_markdown_tree(docs_root).await.map_err(|e2| {
+                        CoreError::Embedding(format!(
+                            "ingest failed with qdrant ({e}) and local ({e2})"
+                        ))
+                    })
+                }
+                #[cfg(not(feature = "local-embeddings"))]
+                Err(CoreError::Embedding(format!("ingest failed: {e}")))
             }
         }
     }
@@ -854,10 +872,17 @@ impl McpBroker {
                 ),
             ))
         } else {
-            Ok(Box::new(
-                the_one_memory::embeddings::FastEmbedProvider::new(&config.embedding_model)
-                    .map_err(|e| format!("fastembed: {e}"))?,
-            ))
+            #[cfg(feature = "local-embeddings")]
+            {
+                Ok(Box::new(
+                    the_one_memory::embeddings::FastEmbedProvider::new(&config.embedding_model)
+                        .map_err(|e| format!("fastembed: {e}"))?,
+                ))
+            }
+            #[cfg(not(feature = "local-embeddings"))]
+            {
+                Err("local embeddings not available (built without local-embeddings feature)".into())
+            }
         }
     }
 

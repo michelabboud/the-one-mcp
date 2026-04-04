@@ -61,6 +61,8 @@ pub struct MemoryEngine {
 
 impl MemoryEngine {
     /// Create with fastembed local embeddings, no Qdrant (in-memory keyword fallback).
+    /// Only available with the `local-embeddings` feature (default).
+    #[cfg(feature = "local-embeddings")]
     pub fn new_local(model_name: &str, max_chunk_tokens: usize) -> Result<Self, String> {
         let provider = crate::embeddings::FastEmbedProvider::new(model_name)?;
         Ok(Self {
@@ -73,6 +75,8 @@ impl MemoryEngine {
     }
 
     /// Create with fastembed local embeddings + Qdrant HTTP backend.
+    /// Only available with the `local-embeddings` feature (default).
+    #[cfg(feature = "local-embeddings")]
     pub fn new_with_qdrant(
         model_name: &str,
         qdrant_url: &str,
@@ -92,6 +96,7 @@ impl MemoryEngine {
     }
 
     /// Create with API embeddings + Qdrant HTTP backend.
+    /// Always available — does not require local ONNX runtime.
     pub fn new_api(config: ApiEngineConfig<'_>) -> Result<Self, String> {
         let provider = crate::embeddings::ApiEmbeddingProvider::new(
             config.embedding_base_url,
@@ -344,6 +349,7 @@ impl MemoryEngine {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[cfg(feature = "local-embeddings")]
 mod tests {
     use super::*;
     use std::sync::LazyLock;

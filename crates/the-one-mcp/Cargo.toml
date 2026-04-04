@@ -5,8 +5,9 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-default = ["embed-swagger"]
+default = ["embed-swagger", "local-embeddings"]
 embed-swagger = []
+local-embeddings = ["the-one-memory/local-embeddings"]
 
 [[bin]]
 name = "the-one-mcp"
@@ -20,7 +21,7 @@ clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 the-one-core = { path = "../the-one-core" }
-the-one-memory = { path = "../the-one-memory" }
+the-one-memory = { path = "../the-one-memory", default-features = false }
 the-one-registry = { path = "../the-one-registry" }
 the-one-router = { path = "../the-one-router" }
 tokio.workspace = true
