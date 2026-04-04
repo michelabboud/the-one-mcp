@@ -1,0 +1,217 @@
+# Local embedding models — backed by fastembed (ONNX Runtime).
+# This file is embedded in the binary via include_str! and is the source of
+# truth for available local models.
+
+[meta]
+fastembed_crate_version = "4"
+updated = "2026-04-04"
+
+# ── Primary tiers (shown in installer) ──────────────────────────────────
+
+[models.all-minilm-l6-v2]
+name = "all-MiniLM-L6-v2"
+tier = "fast"
+dims = 384
+size_mb = 23
+latency_vs_fast = "fastest"
+multilingual = false
+description = "Fast, small. Good for getting started."
+fastembed_enum = "AllMiniLML6V2"
+default = false
+installer_visible = true
+
+[models.bge-base-en-v1_5]
+name = "BGE-base-en-v1.5"
+tier = "balanced"
+dims = 768
+size_mb = 50
+latency_vs_fast = "~2x slower"
+multilingual = false
+description = "Good quality/speed tradeoff."
+fastembed_enum = "BGEBaseENV15"
+default = false
+installer_visible = true
+
+[models.bge-large-en-v1_5]
+name = "BGE-large-en-v1.5"
+tier = "quality"
+dims = 1024
+size_mb = 130
+latency_vs_fast = "~4x slower"
+multilingual = false
+description = "Best local quality. Recommended default."
+fastembed_enum = "BGELargeENV15"
+default = true
+installer_visible = true
+
+[models.multilingual-e5-large]
+name = "multilingual-e5-large"
+tier = "multilingual"
+dims = 1024
+size_mb = 220
+latency_vs_fast = "~5x slower"
+multilingual = true
+description = "Best for non-English or mixed-language projects."
+fastembed_enum = "MultilingualE5Large"
+default = false
+installer_visible = true
+
+[models.multilingual-e5-base]
+name = "multilingual-e5-base"
+tier = "multilingual"
+dims = 768
+size_mb = 90
+latency_vs_fast = "~3x slower"
+multilingual = true
+description = "Multilingual, moderate size."
+fastembed_enum = "MultilingualE5Base"
+default = false
+installer_visible = true
+
+[models.multilingual-e5-small]
+name = "multilingual-e5-small"
+tier = "multilingual"
+dims = 384
+size_mb = 45
+latency_vs_fast = "~1.5x slower"
+multilingual = true
+description = "Lightweight multilingual option."
+fastembed_enum = "MultilingualE5Small"
+default = false
+installer_visible = true
+
+[models.paraphrase-ml-minilm-l12-v2]
+name = "paraphrase-ml-minilm-l12-v2"
+tier = "multilingual"
+dims = 384
+size_mb = 45
+latency_vs_fast = "~1.5x slower"
+multilingual = true
+description = "Paraphrase-tuned multilingual model."
+fastembed_enum = "ParaphraseMLMiniLML12V2"
+default = false
+installer_visible = true
+
+# ── Additional models (shown in models.list only) ───────────────────────
+
+[models.all-minilm-l12-v2]
+name = "all-MiniLM-L12-v2"
+tier = "fast"
+dims = 384
+size_mb = 33
+latency_vs_fast = "~1.3x slower"
+multilingual = false
+description = "Slightly better than L6, slightly slower."
+fastembed_enum = "AllMiniLML12V2"
+default = false
+installer_visible = false
+
+[models.bge-small-en-v1_5]
+name = "BGE-small-en-v1.5"
+tier = "fast"
+dims = 384
+size_mb = 24
+latency_vs_fast = "~1x"
+multilingual = false
+description = "Compact BGE model."
+fastembed_enum = "BGESmallENV15"
+default = false
+installer_visible = false
+
+[models.nomic-embed-text-v1]
+name = "nomic-embed-text-v1"
+tier = "balanced"
+dims = 768
+size_mb = 55
+latency_vs_fast = "~2x slower"
+multilingual = false
+description = "Nomic AI model. 8192 token context."
+fastembed_enum = "NomicEmbedTextV1"
+default = false
+installer_visible = false
+
+[models.nomic-embed-text-v1_5]
+name = "nomic-embed-text-v1.5"
+tier = "balanced"
+dims = 768
+size_mb = 55
+latency_vs_fast = "~2x slower"
+multilingual = false
+description = "Nomic AI v1.5. 8192 token context."
+fastembed_enum = "NomicEmbedTextV15"
+default = false
+installer_visible = false
+
+[models.mxbai-embed-large-v1]
+name = "mxbai-embed-large-v1"
+tier = "quality"
+dims = 1024
+size_mb = 130
+latency_vs_fast = "~4x slower"
+multilingual = false
+description = "Mixedbread AI. Top-tier local quality."
+fastembed_enum = "MxbaiEmbedLargeV1"
+default = false
+installer_visible = false
+
+[models.gte-base-en-v1_5]
+name = "gte-base-en-v1.5"
+tier = "balanced"
+dims = 768
+size_mb = 50
+latency_vs_fast = "~2x slower"
+multilingual = false
+description = "Alibaba GTE. Strong English performance."
+fastembed_enum = "GTEBaseENV15"
+default = false
+installer_visible = false
+
+[models.gte-large-en-v1_5]
+name = "gte-large-en-v1.5"
+tier = "quality"
+dims = 1024
+size_mb = 130
+latency_vs_fast = "~4x slower"
+multilingual = false
+description = "Alibaba GTE large. Top English quality."
+fastembed_enum = "GTELargeENV15"
+default = false
+installer_visible = false
+
+# ── Quantized variants ──────────────────────────────────────────────────
+
+[models.all-minilm-l6-v2-q]
+name = "all-MiniLM-L6-v2-Q"
+tier = "fast"
+dims = 384
+size_mb = 7
+latency_vs_fast = "fastest"
+multilingual = false
+description = "Quantized fast model. Smallest download."
+fastembed_enum = "AllMiniLML6V2Q"
+default = false
+installer_visible = false
+
+[models.bge-base-en-v1_5-q]
+name = "BGE-base-en-v1.5-Q"
+tier = "balanced"
+dims = 768
+size_mb = 15
+latency_vs_fast = "~1.5x slower"
+multilingual = false
+description = "Quantized balanced model."
+fastembed_enum = "BGEBaseENV15Q"
+default = false
+installer_visible = false
+
+[models.bge-large-en-v1_5-q]
+name = "BGE-large-en-v1.5-Q"
+tier = "quality"
+dims = 1024
+size_mb = 40
+latency_vs_fast = "~2.5x slower"
+multilingual = false
+description = "Quantized quality model. Smaller download."
+fastembed_enum = "BGELargeENV15Q"
+default = false
+installer_visible = false

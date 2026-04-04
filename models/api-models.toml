@@ -1,0 +1,72 @@
+# API embedding models — external providers with OpenAI-compatible endpoints.
+# This file is embedded in the binary and can be overridden at
+# ~/.the-one/api-models.toml for user extensions.
+
+[meta]
+updated = "2026-04-04"
+
+# ── OpenAI ──────────────────────────────────────────────────────────────
+
+[providers.openai]
+name = "OpenAI"
+base_url = "https://api.openai.com/v1"
+auth_env = "OPENAI_API_KEY"
+docs_url = "https://platform.openai.com/docs/guides/embeddings"
+
+[providers.openai.models.text-embedding-3-small]
+name = "text-embedding-3-small"
+dims = 1536
+multilingual = true
+description = "Fast, cheap. Good default for API users."
+default = true
+
+[providers.openai.models.text-embedding-3-large]
+name = "text-embedding-3-large"
+dims = 3072
+multilingual = true
+description = "Best quality from OpenAI."
+default = false
+
+# ── Voyage AI ───────────────────────────────────────────────────────────
+
+[providers.voyage]
+name = "Voyage AI"
+base_url = "https://api.voyageai.com/v1"
+auth_env = "VOYAGE_API_KEY"
+docs_url = "https://docs.voyageai.com/docs/embeddings"
+
+[providers.voyage.models.voyage-3]
+name = "voyage-3"
+dims = 1024
+multilingual = true
+description = "Best quality from Voyage. Strong code understanding."
+default = true
+
+[providers.voyage.models.voyage-3-lite]
+name = "voyage-3-lite"
+dims = 512
+multilingual = true
+description = "Lighter, faster Voyage model."
+default = false
+
+# ── Cohere ──────────────────────────────────────────────────────────────
+
+[providers.cohere]
+name = "Cohere"
+base_url = "https://api.cohere.com/v2"
+auth_env = "COHERE_API_KEY"
+docs_url = "https://docs.cohere.com/reference/embed"
+
+[providers.cohere.models.embed-v4_0]
+name = "embed-v4.0"
+dims = 1024
+multilingual = true
+description = "Latest Cohere embedding model."
+default = true
+
+[providers.cohere.models.embed-multilingual-v3_0]
+name = "embed-multilingual-v3.0"
+dims = 1024
+multilingual = true
+description = "Optimized for 100+ languages."
+default = false

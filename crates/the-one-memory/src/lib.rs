@@ -1,6 +1,7 @@
 pub mod chunker;
 pub mod embeddings;
 pub mod graph;
+pub mod models_registry;
 pub mod qdrant;
 pub mod reranker;
 
