@@ -554,6 +554,11 @@ async fn dispatch_tool(broker: &McpBroker, tool_name: &str, args: Value) -> Resu
                 .map_err(|e| e.to_string())?;
             serde_json::to_value(result).map_err(|e| e.to_string())
         }
+        "models.list" => {
+            let filter = args.get("filter").and_then(|v| v.as_str());
+            Ok(broker.models_list(filter))
+        }
+        "models.check_updates" => Ok(broker.models_check_updates()),
         _ => Err(format!("unknown tool: {tool_name}")),
     }
 }
@@ -589,7 +594,7 @@ mod tests {
         let response = dispatch(&broker, request).await;
         assert!(response.error.is_none());
         let tools = response.result.unwrap()["tools"].as_array().unwrap().len();
-        assert_eq!(tools, 31);
+        assert_eq!(tools, 33);
     }
 
     #[tokio::test]

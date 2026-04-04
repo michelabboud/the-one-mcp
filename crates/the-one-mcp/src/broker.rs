@@ -1521,6 +1521,52 @@ impl McpBroker {
         })
     }
 
+    /// List all available embedding models.
+    pub fn models_list(&self, filter: Option<&str>) -> serde_json::Value {
+        use the_one_memory::models_registry;
+
+        let mut result = serde_json::json!({});
+
+        let include_local = matches!(
+            filter,
+            None | Some("local") | Some("installer") | Some("multilingual")
+        );
+        let include_api = matches!(filter, None | Some("api"));
+
+        if include_local {
+            let models = match filter {
+                Some("installer") => models_registry::list_installer_models(),
+                Some("multilingual") => models_registry::list_local_models()
+                    .into_iter()
+                    .filter(|m| m.multilingual)
+                    .collect(),
+                _ => models_registry::list_local_models(),
+            };
+            result["local_models"] = serde_json::to_value(&models).unwrap_or_default();
+            let default = models_registry::default_local_model();
+            result["default_local_model"] = serde_json::json!(default.name);
+        }
+
+        if include_api {
+            let providers = models_registry::list_api_providers();
+            result["api_providers"] = serde_json::to_value(&providers).unwrap_or_default();
+        }
+
+        result
+    }
+
+    /// Check for model registry updates (stub — returns current versions).
+    pub fn models_check_updates(&self) -> serde_json::Value {
+        use the_one_memory::models_registry;
+
+        serde_json::json!({
+            "fastembed_crate_version": models_registry::fastembed_crate_version(),
+            "local_model_count": models_registry::list_local_models().len(),
+            "api_provider_count": models_registry::list_api_providers().len(),
+            "message": "To update models, run: scripts/update-local-models.sh and scripts/update-api-models.sh"
+        })
+    }
+
     #[instrument(skip_all)]
     pub async fn config_update(
         &self,
@@ -2327,6 +2373,43 @@ mod tests {
             .await
             .expect("reindex should succeed");
         assert!(result.new >= 1);
+    }
+
+    #[tokio::test]
+    async fn test_models_list_returns_local_and_api() {
+        let broker = McpBroker::new();
+        let result = broker.models_list(None);
+        assert!(result["local_models"].is_array());
+        assert!(result["api_providers"].is_array());
+        assert!(result["default_local_model"].is_string());
+        assert_eq!(result["default_local_model"], "BGE-large-en-v1.5");
+    }
+
+    #[tokio::test]
+    async fn test_models_list_filter_installer() {
+        let broker = McpBroker::new();
+        let result = broker.models_list(Some("installer"));
+        let models = result["local_models"].as_array().unwrap();
+        assert_eq!(models.len(), 7);
+    }
+
+    #[tokio::test]
+    async fn test_models_list_filter_multilingual() {
+        let broker = McpBroker::new();
+        let result = broker.models_list(Some("multilingual"));
+        let models = result["local_models"].as_array().unwrap();
+        for model in models {
+            assert_eq!(model["multilingual"], true);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_models_check_updates() {
+        let broker = McpBroker::new();
+        let result = broker.models_check_updates();
+        assert!(result["fastembed_crate_version"].is_string());
+        assert!(result["local_model_count"].as_u64().unwrap() >= 10);
+        assert_eq!(result["api_provider_count"].as_u64().unwrap(), 3);
     }
 
     #[tokio::test]

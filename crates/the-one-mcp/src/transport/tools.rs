@@ -281,6 +281,18 @@ pub fn tool_definitions() -> Vec<Value> {
             },
             "required": ["project_root", "project_id"]
         })),
+        tool_def("models.list", "List all available embedding models (local and API) with metadata including dimensions, size, latency, and multilingual support.", json!({
+            "type": "object",
+            "properties": {
+                "filter": { "type": "string", "description": "Optional filter: 'local', 'api', 'multilingual', 'installer'. Defaults to all." }
+            },
+            "required": []
+        })),
+        tool_def("models.check_updates", "Check for new embedding model versions from upstream registries.", json!({
+            "type": "object",
+            "properties": {},
+            "required": []
+        })),
     ]
 }
 
@@ -291,7 +303,7 @@ mod tests {
     #[test]
     fn test_tool_definitions_count() {
         let tools = tool_definitions();
-        assert_eq!(tools.len(), 31); // 24 original + 7 new (tool.list, tool.add, tool.remove, tool.disable, tool.install, tool.info, tool.update)
+        assert_eq!(tools.len(), 33); // 24 original + 7 new (tool.list, tool.add, tool.remove, tool.disable, tool.install, tool.info, tool.update) + 2 models (models.list, models.check_updates)
     }
 
     #[test]
