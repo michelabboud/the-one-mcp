@@ -16,8 +16,8 @@ const DEFAULT_NANO_MODEL: &str = "none";
 const DEFAULT_QDRANT_TLS_INSECURE: bool = false;
 const DEFAULT_QDRANT_STRICT_AUTH: bool = true;
 const DEFAULT_EMBEDDING_PROVIDER: &str = "local";
-const DEFAULT_EMBEDDING_MODEL: &str = "all-MiniLM-L6-v2";
-const DEFAULT_EMBEDDING_DIMENSIONS: usize = 384;
+const DEFAULT_EMBEDDING_MODEL: &str = "BGE-base-en-v1.5";
+const DEFAULT_EMBEDDING_DIMENSIONS: usize = 768;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NanoProviderKind {
@@ -94,6 +94,8 @@ pub struct RuntimeOverrides {
     pub nano_routing_policy: Option<NanoRoutingPolicy>,
     pub external_docs_root: Option<String>,
     pub limits: Option<ConfigurableLimits>,
+    pub reranker_enabled: Option<bool>,
+    pub reranker_model: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -116,6 +118,8 @@ pub struct ProjectConfigUpdate {
     pub nano_routing_policy: Option<NanoRoutingPolicy>,
     pub external_docs_root: Option<String>,
     pub limits: Option<ConfigurableLimits>,
+    pub reranker_enabled: Option<bool>,
+    pub reranker_model: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -141,6 +145,10 @@ pub struct AppConfig {
     pub nano_routing_policy: NanoRoutingPolicy,
     pub external_docs_root: Option<PathBuf>,
     pub limits: ConfigurableLimits,
+    /// Enable cross-encoder reranking for improved search quality.
+    pub reranker_enabled: bool,
+    /// Reranker model name (e.g. "bge-reranker-base", "bge-reranker-v2-m3").
+    pub reranker_model: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -163,6 +171,8 @@ struct FileConfig {
     nano_routing_policy: Option<NanoRoutingPolicy>,
     external_docs_root: Option<String>,
     limits: Option<ConfigurableLimits>,
+    reranker_enabled: Option<bool>,
+    reranker_model: Option<String>,
 }
 
 impl AppConfig {
@@ -190,6 +200,8 @@ impl AppConfig {
             nano_routing_policy: None,
             external_docs_root: None,
             limits: None,
+            reranker_enabled: Some(false),
+            reranker_model: Some("bge-reranker-base".to_string()),
         };
 
         apply_file_layer(&global_state_dir.join("config.json"), &mut merged)?;
@@ -242,6 +254,10 @@ impl AppConfig {
             nano_routing_policy: merged.nano_routing_policy.unwrap_or_default(),
             external_docs_root: merged.external_docs_root.map(PathBuf::from),
             limits: merged.limits.map(|l| l.validated()).unwrap_or_default(),
+            reranker_enabled: merged.reranker_enabled.unwrap_or(false),
+            reranker_model: merged
+                .reranker_model
+                .unwrap_or_else(|| "bge-reranker-base".to_string()),
         })
     }
 }
@@ -315,6 +331,12 @@ pub fn update_project_config(
     }
     if update.limits.is_some() {
         merged.limits = update.limits;
+    }
+    if update.reranker_enabled.is_some() {
+        merged.reranker_enabled = update.reranker_enabled;
+    }
+    if update.reranker_model.is_some() {
+        merged.reranker_model = update.reranker_model;
     }
 
     let tmp_path = project_state_dir.join("config.json.tmp");
@@ -435,6 +457,12 @@ fn apply_env_layer(merged: &mut FileConfig) {
     }
     if let Ok(v) = env::var("THE_ONE_EXTERNAL_DOCS_ROOT") {
         merged.external_docs_root = Some(v);
+    }
+    if let Ok(v) = env::var("THE_ONE_RERANKER_ENABLED") {
+        merged.reranker_enabled = parse_bool_env(&v);
+    }
+    if let Ok(v) = env::var("THE_ONE_RERANKER_MODEL") {
+        merged.reranker_model = Some(v);
     }
     // Limit env vars
     apply_limit_env_vars(merged);
@@ -577,6 +605,12 @@ fn apply_runtime_layer(runtime: RuntimeOverrides, merged: &mut FileConfig) {
     if runtime.limits.is_some() {
         merged.limits = runtime.limits;
     }
+    if runtime.reranker_enabled.is_some() {
+        merged.reranker_enabled = runtime.reranker_enabled;
+    }
+    if runtime.reranker_model.is_some() {
+        merged.reranker_model = runtime.reranker_model;
+    }
 }
 
 fn merge(base: &mut FileConfig, overlay: FileConfig) {
@@ -633,6 +667,12 @@ fn merge(base: &mut FileConfig, overlay: FileConfig) {
     }
     if overlay.limits.is_some() {
         base.limits = overlay.limits;
+    }
+    if overlay.reranker_enabled.is_some() {
+        base.reranker_enabled = overlay.reranker_enabled;
+    }
+    if overlay.reranker_model.is_some() {
+        base.reranker_model = overlay.reranker_model;
     }
 }
 

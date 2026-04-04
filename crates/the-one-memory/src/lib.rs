@@ -1,6 +1,8 @@
 pub mod chunker;
 pub mod embeddings;
+pub mod graph;
 pub mod qdrant;
+pub mod reranker;
 
 use std::collections::HashMap;
 use std::fs;
@@ -8,7 +10,9 @@ use std::path::Path;
 
 use crate::chunker::{chunk_markdown, ChunkMeta};
 use crate::embeddings::EmbeddingProvider;
+use crate::graph::KnowledgeGraph;
 use crate::qdrant::{AsyncQdrantBackend, QdrantOptions, QdrantPayload, QdrantPoint};
+use crate::reranker::Reranker;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -26,10 +30,30 @@ pub struct ApiEngineConfig<'a> {
     pub max_chunk_tokens: usize,
 }
 
+/// Retrieval mode inspired by LightRAG.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RetrievalMode {
+    /// Pure vector similarity search (original behavior).
+    Naive,
+    /// Entity-focused: search the knowledge graph for entities, then fetch
+    /// associated chunks. Best for "what is X?" queries.
+    Local,
+    /// Relationship-focused: traverse graph relations to find connected chunks.
+    /// Best for "how does X relate to Y?" queries.
+    Global,
+    /// Combines vector search + graph search for comprehensive results.
+    #[default]
+    Hybrid,
+}
+
 #[derive(Debug, Clone)]
 pub struct MemorySearchRequest {
     pub query: String,
     pub top_k: usize,
+    /// Minimum similarity score for results (0.0 = no filtering).
+    pub score_threshold: f32,
+    /// Which retrieval strategy to use.
+    pub mode: RetrievalMode,
 }
 
 impl Default for MemorySearchRequest {
@@ -37,6 +61,8 @@ impl Default for MemorySearchRequest {
         Self {
             query: String::new(),
             top_k: 5,
+            score_threshold: 0.0,
+            mode: RetrievalMode::default(),
         }
     }
 }
@@ -57,6 +83,10 @@ pub struct MemoryEngine {
     embedding_provider: Box<dyn EmbeddingProvider>,
     qdrant: Option<AsyncQdrantBackend>,
     max_chunk_tokens: usize,
+    /// Optional cross-encoder reranker for improved result quality.
+    reranker: Option<Box<dyn Reranker>>,
+    /// Knowledge graph for entity-relation enhanced retrieval.
+    graph: KnowledgeGraph,
 }
 
 impl MemoryEngine {
@@ -71,6 +101,8 @@ impl MemoryEngine {
             embedding_provider: Box::new(provider),
             qdrant: None,
             max_chunk_tokens,
+            reranker: None,
+            graph: KnowledgeGraph::new(),
         })
     }
 
@@ -92,6 +124,8 @@ impl MemoryEngine {
             embedding_provider: Box::new(provider),
             qdrant: Some(qdrant),
             max_chunk_tokens,
+            reranker: None,
+            graph: KnowledgeGraph::new(),
         })
     }
 
@@ -113,7 +147,25 @@ impl MemoryEngine {
             embedding_provider: Box::new(provider),
             qdrant: Some(qdrant),
             max_chunk_tokens,
+            reranker: None,
+            graph: KnowledgeGraph::new(),
         })
+    }
+
+    /// Attach a reranker to this engine. When set, search results from Qdrant
+    /// are re-scored using the cross-encoder before being returned.
+    pub fn set_reranker(&mut self, reranker: Box<dyn Reranker>) {
+        self.reranker = Some(reranker);
+    }
+
+    /// Get a mutable reference to the knowledge graph.
+    pub fn graph_mut(&mut self) -> &mut KnowledgeGraph {
+        &mut self.graph
+    }
+
+    /// Get a reference to the knowledge graph.
+    pub fn graph(&self) -> &KnowledgeGraph {
+        &self.graph
     }
 
     /// Ingest all `.md` files from a directory tree.
@@ -211,23 +263,46 @@ impl MemoryEngine {
         Ok(count)
     }
 
-    /// Search for relevant chunks.
+    /// Search for relevant chunks using the configured retrieval mode.
+    ///
+    /// Retrieval modes (inspired by LightRAG):
+    /// - **Naive**: Pure vector similarity search (original behavior).
+    /// - **Local**: Entity-focused graph search → fetch associated chunks.
+    /// - **Global**: Relationship-focused graph traversal.
+    /// - **Hybrid**: Combines vector search + graph search, deduplicates,
+    ///   and optionally reranks using a cross-encoder.
     pub async fn search(&self, request: &MemorySearchRequest) -> Vec<MemorySearchResult> {
-        if let Some(qdrant) = &self.qdrant {
-            // Embed the query
+        match request.mode {
+            RetrievalMode::Naive => self.search_vector(request).await,
+            RetrievalMode::Local | RetrievalMode::Global => self.search_graph(request),
+            RetrievalMode::Hybrid => self.search_hybrid(request).await,
+        }
+    }
+
+    /// Pure vector similarity search via Qdrant (or keyword fallback).
+    async fn search_vector(&self, request: &MemorySearchRequest) -> Vec<MemorySearchResult> {
+        // Over-fetch when reranker is available so reranking has more candidates
+        let fetch_k = if self.reranker.is_some() {
+            (request.top_k * 3).max(10)
+        } else {
+            request.top_k
+        };
+
+        let mut results = if let Some(qdrant) = &self.qdrant {
             let query_vector = match self.embedding_provider.embed_single(&request.query).await {
                 Ok(v) => v,
                 Err(_) => return Vec::new(),
             };
 
-            // Search qdrant
-            let results = match qdrant.search(query_vector, request.top_k, 0.0).await {
+            let qdrant_results = match qdrant
+                .search(query_vector, fetch_k, request.score_threshold)
+                .await
+            {
                 Ok(r) => r,
                 Err(_) => return Vec::new(),
             };
 
-            // Map results back to ChunkMeta
-            results
+            qdrant_results
                 .into_iter()
                 .filter_map(|r| {
                     self.by_id
@@ -240,46 +315,233 @@ impl MemoryEngine {
                 })
                 .collect()
         } else {
-            // Fallback: in-memory keyword search
-            let query_words: Vec<String> = request
-                .query
-                .split_whitespace()
-                .map(|w| w.to_lowercase())
-                .collect();
+            self.search_keyword(request)
+        };
 
-            if query_words.is_empty() {
-                return Vec::new();
+        // Apply cross-encoder reranking if available
+        if let Some(reranker) = &self.reranker {
+            results = self
+                .apply_reranking(reranker.as_ref(), &request.query, results)
+                .await;
+        }
+
+        results.truncate(request.top_k);
+        results
+    }
+
+    /// Keyword-based fallback search (no Qdrant).
+    fn search_keyword(&self, request: &MemorySearchRequest) -> Vec<MemorySearchResult> {
+        let query_words: Vec<String> = request
+            .query
+            .split_whitespace()
+            .map(|w| w.to_lowercase())
+            .collect();
+
+        if query_words.is_empty() {
+            return Vec::new();
+        }
+
+        let total_words = query_words.len() as f32;
+
+        let mut scored: Vec<MemorySearchResult> = self
+            .chunks
+            .iter()
+            .filter_map(|chunk| {
+                let content_lower = chunk.content.to_lowercase();
+                let matches = query_words
+                    .iter()
+                    .filter(|w| content_lower.contains(w.as_str()))
+                    .count() as f32;
+                let score = matches / total_words;
+                if score > request.score_threshold {
+                    Some(MemorySearchResult {
+                        chunk: chunk.clone(),
+                        score,
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        scored.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        scored.truncate(request.top_k);
+        scored
+    }
+
+    /// Graph-based search: find entities matching query terms, then return
+    /// chunks associated with those entities and their neighbors.
+    fn search_graph(&self, request: &MemorySearchRequest) -> Vec<MemorySearchResult> {
+        let terms: Vec<String> = request
+            .query
+            .split_whitespace()
+            .map(|w| w.to_string())
+            .collect();
+
+        let graph_results = self.graph.search(&terms, request.top_k);
+        if graph_results.is_empty() {
+            return Vec::new();
+        }
+
+        // Collect unique chunk IDs from graph results, weighted by graph relevance
+        let mut chunk_scores: HashMap<String, f32> = HashMap::new();
+        for (rank, result) in graph_results.iter().enumerate() {
+            let base_score = 1.0 - (rank as f32 * 0.1).min(0.9);
+            // Direct entity chunks get full score
+            for cid in &result.entity.source_chunks {
+                let entry = chunk_scores.entry(cid.clone()).or_insert(0.0);
+                *entry = entry.max(base_score);
             }
+            // Neighbor chunks get slightly lower score
+            for (_, neighbor) in &result.neighbors {
+                for cid in &neighbor.source_chunks {
+                    let entry = chunk_scores.entry(cid.clone()).or_insert(0.0);
+                    *entry = entry.max(base_score * 0.8);
+                }
+            }
+        }
 
-            let total_words = query_words.len() as f32;
+        let mut results: Vec<MemorySearchResult> = chunk_scores
+            .into_iter()
+            .filter_map(|(cid, score)| {
+                self.by_id
+                    .get(&cid)
+                    .and_then(|&idx| self.chunks.get(idx))
+                    .map(|chunk| MemorySearchResult {
+                        chunk: chunk.clone(),
+                        score,
+                    })
+            })
+            .collect();
 
-            let mut scored: Vec<MemorySearchResult> = self
-                .chunks
-                .iter()
-                .filter_map(|chunk| {
-                    let content_lower = chunk.content.to_lowercase();
-                    let matches = query_words
-                        .iter()
-                        .filter(|w| content_lower.contains(w.as_str()))
-                        .count() as f32;
-                    if matches > 0.0 {
-                        Some(MemorySearchResult {
-                            chunk: chunk.clone(),
-                            score: matches / total_words,
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        results.truncate(request.top_k);
+        results
+    }
+
+    /// Hybrid search: combine vector search + graph search, deduplicate,
+    /// and optionally rerank.
+    async fn search_hybrid(&self, request: &MemorySearchRequest) -> Vec<MemorySearchResult> {
+        // Get vector search results (without reranking — we'll rerank the merged set)
+        let vector_results = {
+            let fetch_k = (request.top_k * 2).max(10);
+            if let Some(qdrant) = &self.qdrant {
+                let query_vector = match self.embedding_provider.embed_single(&request.query).await
+                {
+                    Ok(v) => v,
+                    Err(_) => return self.search_graph(request),
+                };
+
+                match qdrant
+                    .search(query_vector, fetch_k, request.score_threshold)
+                    .await
+                {
+                    Ok(r) => r
+                        .into_iter()
+                        .filter_map(|r| {
+                            self.by_id
+                                .get(&r.chunk_id)
+                                .and_then(|&idx| self.chunks.get(idx))
+                                .map(|chunk| MemorySearchResult {
+                                    chunk: chunk.clone(),
+                                    score: r.score,
+                                })
                         })
-                    } else {
-                        None
-                    }
-                })
-                .collect();
+                        .collect(),
+                    Err(_) => Vec::new(),
+                }
+            } else {
+                self.search_keyword(request)
+            }
+        };
 
-            scored.sort_by(|a, b| {
-                b.score
-                    .partial_cmp(&a.score)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
-            scored.truncate(request.top_k);
-            scored
+        // Get graph search results
+        let graph_results = self.search_graph(request);
+
+        // Merge and deduplicate: graph results boost vector results
+        let mut merged: HashMap<String, MemorySearchResult> = HashMap::new();
+        for result in vector_results {
+            merged
+                .entry(result.chunk.id.clone())
+                .and_modify(|existing| {
+                    existing.score = existing.score.max(result.score);
+                })
+                .or_insert(result);
+        }
+        for result in graph_results {
+            merged
+                .entry(result.chunk.id.clone())
+                .and_modify(|existing| {
+                    // Boost: if chunk appears in both vector and graph results,
+                    // increase its score (reciprocal rank fusion inspired)
+                    existing.score += result.score * 0.3;
+                })
+                .or_insert(result);
+        }
+
+        let mut results: Vec<MemorySearchResult> = merged.into_values().collect();
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        // Apply cross-encoder reranking if available
+        if let Some(reranker) = &self.reranker {
+            results = self
+                .apply_reranking(reranker.as_ref(), &request.query, results)
+                .await;
+        }
+
+        results.truncate(request.top_k);
+        results
+    }
+
+    /// Apply cross-encoder reranking to a set of results.
+    async fn apply_reranking(
+        &self,
+        reranker: &dyn Reranker,
+        query: &str,
+        results: Vec<MemorySearchResult>,
+    ) -> Vec<MemorySearchResult> {
+        if results.is_empty() {
+            return results;
+        }
+
+        let documents: Vec<String> = results.iter().map(|r| r.chunk.content.clone()).collect();
+
+        match reranker.rerank(query, &documents).await {
+            Ok(reranked) => {
+                let mut reranked_results: Vec<MemorySearchResult> = reranked
+                    .into_iter()
+                    .filter_map(|r| {
+                        results
+                            .get(r.original_index)
+                            .map(|orig| MemorySearchResult {
+                                chunk: orig.chunk.clone(),
+                                score: r.score,
+                            })
+                    })
+                    .collect();
+                reranked_results.sort_by(|a, b| {
+                    b.score
+                        .partial_cmp(&a.score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                reranked_results
+            }
+            Err(e) => {
+                tracing::warn!("reranking failed, using original scores: {e}");
+                results
+            }
         }
     }
 
