@@ -90,8 +90,9 @@ mod local {
             let model = Arc::clone(&self.model);
 
             tokio::task::spawn_blocking(move || {
+                let doc_refs: Vec<&String> = docs.iter().collect();
                 let results = model
-                    .rerank(&query, docs, false, None)
+                    .rerank(&query, doc_refs, false, None)
                     .map_err(|e| format!("fastembed rerank failed: {e}"))?;
                 Ok(results
                     .into_iter()

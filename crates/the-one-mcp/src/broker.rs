@@ -18,6 +18,7 @@ use the_one_core::policy::PolicyEngine;
 use the_one_core::project::{project_init, project_refresh, RefreshMode};
 use the_one_core::storage::sqlite::ProjectDatabase;
 use the_one_memory::qdrant::QdrantOptions;
+use the_one_memory::reranker::Reranker;
 use the_one_memory::{MemoryEngine, MemorySearchRequest as EngineSearchRequest, RetrievalMode};
 use the_one_registry::CapabilityRegistry;
 use the_one_router::providers::{ApiNanoProvider, LmStudioNanoProvider, OllamaNanoProvider};

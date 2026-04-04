@@ -659,6 +659,7 @@ mod tests {
             .search(&MemorySearchRequest {
                 query: "routing memory".to_string(),
                 top_k: 5,
+                ..Default::default()
             })
             .await;
         assert!(
