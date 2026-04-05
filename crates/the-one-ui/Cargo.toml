@@ -6,11 +6,12 @@ license.workspace = true
 
 [dependencies]
 axum = "0.8"
+rusqlite = { version = "0.39", features = ["bundled"] }
 serde.workspace = true
 serde_json.workspace = true
 the-one-core = { path = "../the-one-core" }
 the-one-mcp = { path = "../the-one-mcp" }
-tokio = { version = "1", features = ["macros", "net", "rt", "signal", "sync"] }
+tokio = { version = "1", features = ["fs", "macros", "net", "rt", "signal", "sync"] }
 
 [dev-dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
