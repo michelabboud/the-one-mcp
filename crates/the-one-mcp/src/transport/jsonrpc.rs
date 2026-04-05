@@ -637,6 +637,43 @@ async fn dispatch_maintain(broker: &McpBroker, args: Value) -> Result<Value, Str
                 .map_err(|e| e.to_string())?;
             serde_json::to_value(result).map_err(|e| e.to_string())
         }
+        "images.rescan" => {
+            let project_root = params["project_root"]
+                .as_str()
+                .ok_or("missing params.project_root")?;
+            let project_id = params["project_id"]
+                .as_str()
+                .ok_or("missing params.project_id")?;
+            broker
+                .image_rescan(Path::new(project_root), project_id)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "images.clear" => {
+            let project_root = params["project_root"]
+                .as_str()
+                .ok_or("missing params.project_root")?;
+            let project_id = params["project_id"]
+                .as_str()
+                .ok_or("missing params.project_id")?;
+            broker
+                .image_clear(Path::new(project_root), project_id)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "images.delete" => {
+            let project_root = params["project_root"]
+                .as_str()
+                .ok_or("missing params.project_root")?;
+            let project_id = params["project_id"]
+                .as_str()
+                .ok_or("missing params.project_id")?;
+            let path = params["path"].as_str().ok_or("missing params.path")?;
+            broker
+                .image_delete(Path::new(project_root), project_id, path)
+                .await
+                .map_err(|e| e.to_string())
+        }
         _ => Err(format!("unknown maintain action: {action}")),
     }
 }
