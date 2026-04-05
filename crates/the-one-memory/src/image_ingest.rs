@@ -62,7 +62,7 @@ pub fn discover_images(root: &Path, extensions: &[&str]) -> Vec<DiscoveredImage>
                 .unwrap_or("")
                 .to_ascii_lowercase();
 
-            if !extensions.iter().any(|e| *e == ext.as_str()) {
+            if !extensions.contains(&ext.as_str()) {
                 continue;
             }
 
@@ -76,7 +76,10 @@ pub fn discover_images(root: &Path, extensions: &[&str]) -> Vec<DiscoveredImage>
                 let mut hasher = Sha256::new();
                 hasher.update(&bytes);
                 let result = hasher.finalize();
-                result.iter().map(|b| format!("{b:02x}")).collect::<String>()
+                result
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>()
             };
 
             let size_bytes = bytes.len() as u64;
@@ -200,7 +203,11 @@ mod tests {
 
         let found = discover_images(tmp.path(), DEFAULT_IMAGE_EXTENSIONS);
         let paths: Vec<_> = found.iter().map(|d| d.path.clone()).collect();
-        assert_eq!(found.len(), 1, "should find only visible.png, got: {paths:?}");
+        assert_eq!(
+            found.len(),
+            1,
+            "should find only visible.png, got: {paths:?}"
+        );
         assert!(
             paths[0].ends_with("visible.png"),
             "should find visible.png, got: {paths:?}"

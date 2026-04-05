@@ -746,9 +746,21 @@ mod tests {
     fn test_image_model_fields_populated() {
         for model in list_image_models() {
             assert!(!model.name.is_empty(), "image model has empty name");
-            assert!(model.size_mb > 0, "image model `{}` has zero size_mb", model.name);
-            assert!(!model.description.is_empty(), "image model `{}` has empty description", model.name);
-            assert!(!model.fastembed_enum.is_empty(), "image model `{}` has empty fastembed_enum", model.name);
+            assert!(
+                model.size_mb > 0,
+                "image model `{}` has zero size_mb",
+                model.name
+            );
+            assert!(
+                !model.description.is_empty(),
+                "image model `{}` has empty description",
+                model.name
+            );
+            assert!(
+                !model.fastembed_enum.is_empty(),
+                "image model `{}` has empty fastembed_enum",
+                model.name
+            );
             assert!(model.dims > 0, "image model `{}` has zero dims", model.name);
         }
     }

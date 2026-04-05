@@ -126,8 +126,7 @@ mod local_image {
             let (model_enum, dims) = resolve_image_model(model_name);
 
             let model = fastembed::ImageEmbedding::try_new(
-                fastembed::ImageInitOptions::new(model_enum)
-                    .with_show_download_progress(false),
+                fastembed::ImageInitOptions::new(model_enum).with_show_download_progress(false),
             )
             .map_err(|e| format!("fastembed ImageEmbedding init failed: {e}"))?;
 
@@ -187,7 +186,10 @@ mod tests {
         fn test_resolve_image_model_default() {
             // Just verifies no panic — "default" → NomicEmbedVisionV15
             let (_, dims) = resolve_image_model("default");
-            assert_eq!(dims, 768, "default image model should be NomicEmbedVisionV15 (768 dims)");
+            assert_eq!(
+                dims, 768,
+                "default image model should be NomicEmbedVisionV15 (768 dims)"
+            );
         }
 
         #[test]

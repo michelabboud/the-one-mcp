@@ -25,9 +25,7 @@ pub fn extract_text(image_path: &std::path::Path, language: &str) -> Result<Stri
     let tess = tess
         .set_image(path_str)
         .map_err(|e| format!("set_image: {e}"))?;
-    let text = tess
-        .get_text()
-        .map_err(|e| format!("get_text: {e}"))?;
+    let text = tess.get_text().map_err(|e| format!("get_text: {e}"))?;
     Ok(text.trim().to_string())
 }
 

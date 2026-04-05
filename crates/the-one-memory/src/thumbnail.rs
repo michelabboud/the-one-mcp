@@ -21,7 +21,9 @@ pub fn generate_thumbnail(
     if let Some(parent) = output.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {e}"))?;
     }
-    thumbnail.save(output).map_err(|e| format!("thumbnail save: {e}"))?;
+    thumbnail
+        .save(output)
+        .map_err(|e| format!("thumbnail save: {e}"))?;
     Ok(())
 }
 
@@ -50,10 +52,12 @@ mod tests {
             let tmp = tempfile::tempdir().expect("tempdir");
             let output = tmp.path().join("thumb.png");
 
-            generate_thumbnail(&input, &output, 64)
-                .expect("thumbnail generation should succeed");
+            generate_thumbnail(&input, &output, 64).expect("thumbnail generation should succeed");
 
-            assert!(output.exists(), "thumbnail file should exist after generation");
+            assert!(
+                output.exists(),
+                "thumbnail file should exist after generation"
+            );
         }
 
         #[test]
