@@ -26,4 +26,6 @@ pub enum CoreError {
     Catalog(String),
     #[error("feature not enabled: {0}")]
     NotEnabled(String),
+    #[error("invalid request: {0}")]
+    InvalidRequest(String),
 }

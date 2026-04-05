@@ -493,11 +493,14 @@ pub struct ToolListResponse {
 // Image search / ingest types
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ImageSearchRequest {
     pub project_root: String,
     pub project_id: String,
-    pub query: String,
+    #[serde(default)]
+    pub query: Option<String>,
+    #[serde(default)]
+    pub image_base64: Option<String>,
     pub top_k: usize,
 }
 
@@ -538,8 +541,8 @@ pub struct ImageIngestResponse {
 mod tests {
     use super::{
         ConfigExportRequest, ConfigExportResponse, DocsListRequest, DocsSaveRequest,
-        ImageIngestRequest, MemoryFetchChunkRequest, MemorySearchRequest, ProjectInitRequest,
-        ToolFindRequest, ToolRunRequest,
+        ImageIngestRequest, ImageSearchRequest, MemoryFetchChunkRequest, MemorySearchRequest,
+        ProjectInitRequest, ToolFindRequest, ToolRunRequest,
     };
 
     #[test]
@@ -659,6 +662,21 @@ mod tests {
         let decoded: ToolFindRequest = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(decoded.mode, "search");
         assert_eq!(decoded.query, Some("linter".to_string()));
+    }
+
+    #[test]
+    fn test_image_search_request_with_base64() {
+        let req = ImageSearchRequest {
+            project_root: "/tmp/repo".to_string(),
+            project_id: "p1".to_string(),
+            query: None,
+            image_base64: Some("aGVsbG8=".to_string()),
+            top_k: 5,
+        };
+        let json = serde_json::to_string(&req).expect("serialize");
+        let decoded: ImageSearchRequest = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded.image_base64.as_deref(), Some("aGVsbG8="));
+        assert_eq!(decoded.query, None);
     }
 
     #[test]

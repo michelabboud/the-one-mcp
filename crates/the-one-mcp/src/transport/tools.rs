@@ -30,15 +30,16 @@ pub fn tool_definitions() -> Vec<Value> {
             },
             "required": ["project_root", "project_id", "id"]
         })),
-        tool_def("memory.search_images", "Semantic search over indexed project images. Finds screenshots, diagrams, photos, and mockups matching a natural-language query.", json!({
+        tool_def("memory.search_images", "Semantic search over indexed project images. Supply either 'query' (natural-language text) or 'image_base64' (base64-encoded PNG/JPEG/WebP) to find similar images. Exactly one must be provided.", json!({
             "type": "object",
             "properties": {
                 "project_root": { "type": "string", "description": "Absolute path to the project root" },
                 "project_id": { "type": "string", "description": "Unique project identifier" },
-                "query": { "type": "string", "description": "Natural-language search query" },
+                "query": { "type": "string", "description": "Text query (mutually exclusive with image_base64)" },
+                "image_base64": { "type": "string", "description": "Base64-encoded image bytes (mutually exclusive with query)" },
                 "top_k": { "type": "integer", "description": "Maximum number of results (default 5)", "default": 5 }
             },
-            "required": ["project_root", "project_id", "query"]
+            "required": ["project_root", "project_id"]
         })),
         tool_def("memory.ingest_image", "Manually index an image file. Extracts OCR text (if enabled) and generates a thumbnail.", json!({
             "type": "object",

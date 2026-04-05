@@ -8,7 +8,7 @@ license.workspace = true
 default = ["embed-swagger", "local-embeddings"]
 embed-swagger = []
 local-embeddings = ["the-one-memory/local-embeddings"]
-image-embeddings = ["the-one-memory/image-embeddings"]
+image-embeddings = ["the-one-memory/image-embeddings", "dep:image"]
 image-ocr = ["the-one-memory/image-ocr"]
 
 [[bin]]
@@ -19,10 +19,13 @@ path = "src/bin/the-one-mcp.rs"
 anyhow.workspace = true
 async-trait.workspace = true
 axum = "0.8"
+base64 = "0.22"
 clap.workspace = true
+image = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.11"
+tempfile = "3.27"
 the-one-core = { path = "../the-one-core" }
 the-one-memory = { path = "../the-one-memory", default-features = false }
 the-one-registry = { path = "../the-one-registry" }
@@ -32,4 +35,3 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 tracing.workspace = true
 
 [dev-dependencies]
-tempfile = "3.27"

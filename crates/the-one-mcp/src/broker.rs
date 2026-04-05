@@ -1678,6 +1678,21 @@ impl McpBroker {
         &self,
         request: crate::api::ImageSearchRequest,
     ) -> Result<crate::api::ImageSearchResponse, CoreError> {
+        // Validate mutual exclusion regardless of feature flag.
+        match (&request.query, &request.image_base64) {
+            (Some(_), Some(_)) => {
+                return Err(CoreError::InvalidRequest(
+                    "provide exactly one of query or image_base64, not both".to_string(),
+                ))
+            }
+            (None, None) => {
+                return Err(CoreError::InvalidRequest(
+                    "must provide either query or image_base64".to_string(),
+                ))
+            }
+            _ => {}
+        }
+
         #[cfg(feature = "image-embeddings")]
         {
             self._image_search_impl(request).await
@@ -1696,6 +1711,10 @@ impl McpBroker {
         &self,
         request: crate::api::ImageSearchRequest,
     ) -> Result<crate::api::ImageSearchResponse, CoreError> {
+        use base64::Engine as _;
+        use the_one_memory::image_embeddings::ImageEmbeddingProvider as _;
+
+        // Mutual exclusion already validated in the outer image_search.
         let project_root = PathBuf::from(&request.project_root);
         let config = AppConfig::load(&project_root, RuntimeOverrides::default())?;
 
@@ -1711,14 +1730,61 @@ impl McpBroker {
             .max(1);
         let threshold = config.limits.image_search_score_threshold;
 
-        // Build text embedding provider to embed the text query into image space.
-        // Nomic text embeddings are in the same vector space as Nomic vision embeddings.
-        let text_provider =
-            Self::try_build_embedding_provider(&config).map_err(CoreError::Embedding)?;
-        let query_vector = text_provider
-            .embed_single(&request.query)
-            .await
-            .map_err(CoreError::Embedding)?;
+        // Produce a query vector — either from text (dual-encoder text→image space)
+        // or from a base64-encoded image (image→image space).
+        let query_vector = if let Some(ref text) = request.query {
+            // Build text embedding provider to embed the text query into image space.
+            // Nomic text embeddings are in the same vector space as Nomic vision embeddings.
+            let text_provider =
+                Self::try_build_embedding_provider(&config).map_err(CoreError::Embedding)?;
+            text_provider
+                .embed_single(text)
+                .await
+                .map_err(CoreError::Embedding)?
+        } else {
+            // image_base64 path: decode → validate → write to temp file → embed
+            let b64 = request.image_base64.as_deref().unwrap();
+
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(b64)
+                .map_err(|e| CoreError::InvalidRequest(format!("invalid base64 encoding: {e}")))?;
+
+            // Validate size
+            if bytes.len() > config.limits.max_image_size_bytes {
+                return Err(CoreError::InvalidRequest(
+                    "image exceeds max_image_size_bytes limit".to_string(),
+                ));
+            }
+
+            // Validate image format
+            let fmt = image::guess_format(&bytes).map_err(|_| {
+                CoreError::InvalidRequest(
+                    "unsupported image format, expected PNG/JPEG/WebP".to_string(),
+                )
+            })?;
+            match fmt {
+                image::ImageFormat::Png | image::ImageFormat::Jpeg | image::ImageFormat::WebP => {}
+                _ => {
+                    return Err(CoreError::InvalidRequest(
+                        "unsupported image format, expected PNG/JPEG/WebP".to_string(),
+                    ))
+                }
+            }
+
+            // Write to temp file so FastEmbedImageProvider can read it from disk
+            let mut tmp = tempfile::NamedTempFile::new()
+                .map_err(|e| CoreError::Embedding(format!("temp file creation failed: {e}")))?;
+            std::io::Write::write_all(&mut tmp, &bytes)
+                .map_err(|e| CoreError::Embedding(format!("temp file write failed: {e}")))?;
+
+            let image_provider =
+                the_one_memory::image_embeddings::FastEmbedImageProvider::new("default")
+                    .map_err(CoreError::Embedding)?;
+            image_provider
+                .embed_image(tmp.path())
+                .await
+                .map_err(CoreError::Embedding)?
+        };
 
         // Build Qdrant backend (project-independent — we use the same client)
         let qdrant = the_one_memory::qdrant::AsyncQdrantBackend::new(
@@ -2165,9 +2231,9 @@ mod tests {
     use crate::api::{
         AuditEventsRequest, DocsCreateRequest, DocsDeleteRequest, DocsGetSectionRequest,
         DocsListRequest, DocsMoveRequest, DocsReindexRequest, DocsTrashEmptyRequest,
-        DocsTrashListRequest, DocsTrashRestoreRequest, DocsUpdateRequest, MemorySearchRequest,
-        ProjectInitRequest, ProjectProfileGetRequest, ProjectRefreshRequest, ToolEnableRequest,
-        ToolRunRequest, ToolSuggestRequest,
+        DocsTrashListRequest, DocsTrashRestoreRequest, DocsUpdateRequest, ImageSearchRequest,
+        MemorySearchRequest, ProjectInitRequest, ProjectProfileGetRequest, ProjectRefreshRequest,
+        ToolEnableRequest, ToolRunRequest, ToolSuggestRequest,
     };
 
     #[tokio::test]
@@ -2960,5 +3026,52 @@ mod tests {
             .expect("export should work");
         assert_eq!(config.nano_provider, "ollama");
         assert_eq!(config.nano_model, "tiny");
+    }
+
+    #[tokio::test]
+    async fn test_image_search_rejects_both_query_and_base64() {
+        let broker = McpBroker::new();
+        let req = ImageSearchRequest {
+            project_root: "/tmp/nonexistent".to_string(),
+            project_id: "test".to_string(),
+            query: Some("hello".to_string()),
+            image_base64: Some("aGVsbG8=".to_string()),
+            top_k: 5,
+        };
+        let result = broker.image_search(req).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("exactly one") || err.contains("mutually exclusive"),
+            "expected exclusive error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_image_search_rejects_neither_query_nor_base64() {
+        let broker = McpBroker::new();
+        let req = ImageSearchRequest {
+            project_root: "/tmp/nonexistent".to_string(),
+            project_id: "test".to_string(),
+            query: None,
+            image_base64: None,
+            top_k: 5,
+        };
+        let result = broker.image_search(req).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_image_search_rejects_invalid_base64() {
+        let broker = McpBroker::new();
+        let req = ImageSearchRequest {
+            project_root: "/tmp/nonexistent".to_string(),
+            project_id: "test".to_string(),
+            query: None,
+            image_base64: Some("!!!invalid!!!".to_string()),
+            top_k: 5,
+        };
+        let result = broker.image_search(req).await;
+        assert!(result.is_err());
     }
 }

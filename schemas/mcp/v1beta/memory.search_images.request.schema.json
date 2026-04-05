@@ -3,7 +3,7 @@
   "$id": "the-one.mcp.v1beta.memory.search_images.request",
   "title": "memory.search_images request",
   "type": "object",
-  "required": ["project_root", "project_id", "query"],
+  "required": ["project_root", "project_id"],
   "properties": {
     "project_root": {
       "type": "string",
@@ -15,7 +15,12 @@
     },
     "query": {
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "description": "Natural-language text query (mutually exclusive with image_base64)"
+    },
+    "image_base64": {
+      "type": "string",
+      "description": "Base64-encoded PNG/JPEG/WebP image bytes (mutually exclusive with query)"
     },
     "top_k": {
       "type": "integer",

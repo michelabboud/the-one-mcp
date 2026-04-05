@@ -387,13 +387,18 @@ async fn dispatch_tool(broker: &McpBroker, tool_name: &str, args: Value) -> Resu
                 .as_str()
                 .ok_or("missing project_root")?;
             let project_id = args["project_id"].as_str().ok_or("missing project_id")?;
-            let query = args["query"].as_str().ok_or("missing query")?;
+            let query = args.get("query").and_then(|v| v.as_str()).map(String::from);
+            let image_base64 = args
+                .get("image_base64")
+                .and_then(|v| v.as_str())
+                .map(String::from);
             let top_k = args["top_k"].as_u64().unwrap_or(5) as usize;
             let result = broker
                 .image_search(ImageSearchRequest {
                     project_root: project_root.to_string(),
                     project_id: project_id.to_string(),
-                    query: query.to_string(),
+                    query,
+                    image_base64,
                     top_k,
                 })
                 .await
