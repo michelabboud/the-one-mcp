@@ -29,3 +29,5 @@ fastembed = "5.13"
 async-trait = "0.1"
 toml = "0.8"
 clap = { version = "4", features = ["derive"] }
+image = "0.25"
+tesseract = "0.15"

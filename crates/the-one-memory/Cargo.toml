@@ -5,8 +5,10 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-default = ["local-embeddings"]
-local-embeddings = ["fastembed"]
+default = ["local-embeddings", "image-embeddings"]
+local-embeddings = ["dep:fastembed"]
+image-embeddings = ["local-embeddings", "dep:image"]
+image-ocr = ["image-embeddings", "dep:tesseract"]
 
 [dependencies]
 async-trait.workspace = true
@@ -18,6 +20,8 @@ serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 toml = { workspace = true }
+image = { workspace = true, optional = true }
+tesseract = { workspace = true, optional = true }
 
 [dev-dependencies]
 httpmock = "0.7"
