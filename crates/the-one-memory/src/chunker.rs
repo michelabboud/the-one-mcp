@@ -1,5 +1,6 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::path::Path;
 
 #[derive(Debug, Clone)]
 pub struct ChunkMeta {
@@ -11,6 +12,21 @@ pub struct ChunkMeta {
     pub byte_length: usize,
     pub content_hash: String,
     pub content: String,
+
+    /// Programming language, if this chunk came from a source file.
+    /// E.g. "rust", "python", "typescript". None for markdown and unknown types.
+    pub language: Option<String>,
+
+    /// Symbol name for code chunks (e.g. "fn parse_config", "struct Broker", "impl MyTrait for MyStruct").
+    /// None for markdown or fallback text chunks.
+    pub symbol: Option<String>,
+
+    /// First line of the item as a signature (function signature, struct declaration, etc.).
+    /// Useful as LLM context.
+    pub signature: Option<String>,
+
+    /// 1-indexed line range (start, end) in the source file.
+    pub line_range: Option<(usize, usize)>,
 }
 
 /// Estimate token count: ~1 token per 4 characters.
@@ -176,6 +192,10 @@ pub fn chunk_markdown(source_path: &str, content: &str, max_chunk_tokens: usize)
             byte_length: content.len(),
             content_hash: content_hash(content),
             content: content.to_string(),
+            language: None,
+            symbol: None,
+            signature: None,
+            line_range: None,
         }];
     }
 
@@ -196,6 +216,10 @@ pub fn chunk_markdown(source_path: &str, content: &str, max_chunk_tokens: usize)
                 byte_length: section_text.len(),
                 content_hash: content_hash(section_text),
                 content: section_text.clone(),
+                language: None,
+                symbol: None,
+                signature: None,
+                line_range: None,
             });
             chunk_index += 1;
         } else {
@@ -222,6 +246,10 @@ pub fn chunk_markdown(source_path: &str, content: &str, max_chunk_tokens: usize)
                         byte_length,
                         content_hash: content_hash(&chunk_content),
                         content: chunk_content,
+                        language: None,
+                        symbol: None,
+                        signature: None,
+                        line_range: None,
                     });
                     chunk_index += 1;
                     current_parts.clear();
@@ -249,6 +277,10 @@ pub fn chunk_markdown(source_path: &str, content: &str, max_chunk_tokens: usize)
                     byte_length,
                     content_hash: content_hash(&chunk_content),
                     content: chunk_content,
+                    language: None,
+                    symbol: None,
+                    signature: None,
+                    line_range: None,
                 });
                 chunk_index += 1;
             }
@@ -266,10 +298,120 @@ pub fn chunk_markdown(source_path: &str, content: &str, max_chunk_tokens: usize)
             byte_length: content.len(),
             content_hash: content_hash(content),
             content: content.to_string(),
+            language: None,
+            symbol: None,
+            signature: None,
+            line_range: None,
         });
     }
 
     chunks
+}
+
+/// Dispatch to the appropriate chunker based on file extension.
+///
+/// Returns chunks with `language`/`symbol`/`signature`/`line_range` metadata
+/// populated for supported programming languages, or heading-based metadata
+/// for markdown, or plain text chunks for unknown extensions.
+pub fn chunk_file(path: &Path, content: &str, max_tokens: usize) -> Vec<ChunkMeta> {
+    let path_str = path.to_str().unwrap_or("");
+    match path
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("md") | Some("markdown") => chunk_markdown(path_str, content, max_tokens),
+        Some("rs") => crate::chunker_rust::chunk_rust(path_str, content, max_tokens),
+        // Python, TypeScript, JavaScript, Go in Phase D
+        _ => chunk_text_fallback(path_str, content, max_tokens),
+    }
+}
+
+/// Generic fallback chunker for unknown file types.
+/// Splits on blank lines, packs chunks up to max_tokens.
+pub fn chunk_text_fallback(source_path: &str, content: &str, max_tokens: usize) -> Vec<ChunkMeta> {
+    // Estimate 4 chars per token
+    let max_chars = max_tokens * 4;
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    let mut chunk_index = 0;
+    let mut current_start_line: usize = 1;
+    let mut current_line: usize = 1;
+
+    for line in content.lines() {
+        if line.trim().is_empty() && !current.is_empty() && current.len() >= max_chars / 2 {
+            // Flush on blank line if we have enough content
+            push_text_chunk(
+                &mut chunks,
+                source_path,
+                chunk_index,
+                &current,
+                current_start_line,
+                current_line,
+            );
+            chunk_index += 1;
+            current.clear();
+            current_start_line = current_line + 1;
+        } else if current.len() + line.len() + 1 > max_chars && !current.is_empty() {
+            // Flush on size overflow
+            push_text_chunk(
+                &mut chunks,
+                source_path,
+                chunk_index,
+                &current,
+                current_start_line,
+                current_line,
+            );
+            chunk_index += 1;
+            current.clear();
+            current_start_line = current_line;
+        }
+        current.push_str(line);
+        current.push('\n');
+        current_line += 1;
+    }
+
+    if !current.is_empty() {
+        push_text_chunk(
+            &mut chunks,
+            source_path,
+            chunk_index,
+            &current,
+            current_start_line,
+            current_line,
+        );
+    }
+
+    chunks
+}
+
+fn push_text_chunk(
+    chunks: &mut Vec<ChunkMeta>,
+    source_path: &str,
+    chunk_index: usize,
+    content: &str,
+    start_line: usize,
+    end_line: usize,
+) {
+    chunks.push(ChunkMeta {
+        id: format!("{source_path}:{chunk_index}"),
+        source_path: source_path.to_string(),
+        chunk_index,
+        content: content.trim_end().to_string(),
+        heading_hierarchy: Vec::new(),
+        byte_offset: 0,
+        byte_length: content.len(),
+        content_hash: {
+            let mut hasher = DefaultHasher::new();
+            content.hash(&mut hasher);
+            format!("{:x}", hasher.finish())
+        },
+        language: None,
+        symbol: None,
+        signature: None,
+        line_range: Some((start_line, end_line)),
+    });
 }
 
 #[cfg(test)]
@@ -374,5 +516,46 @@ mod tests {
         // The last chunk (with "Content here") should have full hierarchy
         let deep_chunk = chunks.last().unwrap();
         assert_eq!(deep_chunk.heading_hierarchy, vec!["Top", "Sub", "Deep"]);
+    }
+
+    #[test]
+    fn test_chunk_markdown_new_fields_are_none() {
+        let md = "# Title\nSome content";
+        let chunks = chunk_markdown("docs/test.md", md, 500);
+        assert!(!chunks.is_empty());
+        assert!(chunks[0].language.is_none());
+        assert!(chunks[0].symbol.is_none());
+        assert!(chunks[0].signature.is_none());
+        assert!(chunks[0].line_range.is_none());
+    }
+
+    #[test]
+    fn test_chunk_file_dispatches_to_markdown() {
+        let chunks = chunk_file(Path::new("readme.md"), "# Title\nHello", 500);
+        assert!(!chunks.is_empty());
+        assert!(chunks[0].language.is_none());
+    }
+
+    #[test]
+    fn test_chunk_file_dispatches_to_fallback_for_unknown() {
+        let chunks = chunk_file(Path::new("config.ini"), "key=value\nother=data", 500);
+        assert!(!chunks.is_empty());
+        assert!(chunks[0].language.is_none());
+        assert!(chunks[0].symbol.is_none());
+    }
+
+    #[test]
+    fn test_chunk_text_fallback_respects_max_tokens() {
+        let content = "Line one\n\nLine two\n\nLine three\n\nLine four";
+        let chunks = chunk_text_fallback("test.txt", content, 500);
+        assert!(!chunks.is_empty());
+    }
+
+    #[test]
+    fn test_chunk_file_rust_path() {
+        let content = "pub fn hello() -> &'static str { \"world\" }";
+        let chunks = chunk_file(Path::new("test.rs"), content, 500);
+        assert!(!chunks.is_empty());
+        assert_eq!(chunks[0].language.as_deref(), Some("rust"));
     }
 }
