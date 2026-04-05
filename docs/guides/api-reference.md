@@ -1,6 +1,6 @@
 # The-One MCP API Reference
 
-> Complete reference for all 17 MCP tools exposed by the-one-mcp v0.7.0.
+> Complete reference for all 17 MCP tools exposed by the-one-mcp v0.8.0.
 >
 > Tools are invoked via JSON-RPC 2.0 over stdio/SSE/stream. Every tool call uses
 > `method: "tools/call"` with `params.name` and `params.arguments`. Results are
@@ -157,6 +157,7 @@ response includes routing metadata from the intelligent router.
 - The project must be initialized with `setup` (action: `project`) before searching.
 - Scores above ~0.85 are typically strong matches; below 0.70 may be tangential.
 - `top_k` is capped by the number of indexed chunks; requesting more than exist is safe.
+- **v0.8.0:** Each chunk now carries extended metadata internally — `language`, `symbol`, `signature`, `line_range` — populated for Rust, Python, TypeScript, JavaScript, and Go source files. Use `memory.fetch_chunk` to retrieve the full chunk text; the code-chunking metadata is used to improve chunk boundaries and will be surfaced in API responses in a future release. See the [Code Chunking Guide](code-chunking.md) for details.
 
 ---
 

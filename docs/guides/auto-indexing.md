@@ -1,6 +1,6 @@
 # Auto-Indexing Guide
 
-> v0.7.0 — background file watcher for `.the-one/docs/` and `.the-one/images/`.
+> v0.8.0 — background file watcher with automatic re-ingestion for `.the-one/docs/` markdown files.
 
 ## What the File Watcher Does
 
@@ -9,15 +9,15 @@ When `auto_index_enabled` is true, the-one-mcp starts a background tokio task at
 - `.the-one/docs/` — Markdown files (`*.md`)
 - `.the-one/images/` — Image files (`*.png`, `*.jpg`, `*.jpeg`, `*.webp`)
 
-Whenever a file is created, modified, or deleted in these directories, the watcher detects the event and logs it. A configurable debounce timer (default 2000ms) prevents rapid bursts of events from triggering redundant processing — editor save operations often generate multiple filesystem events in quick succession, and debouncing waits until the activity settles.
+Whenever a file is created, modified, or deleted in these directories, the watcher detects the event. A configurable debounce timer (default 2000ms) prevents rapid bursts of events from triggering redundant processing — editor save operations often generate multiple filesystem events in quick succession, and debouncing waits until the activity settles.
 
-### Current Scope (v0.7.0)
+### Current Scope (v0.8.0)
 
-In v0.7.0, the watcher **detects and logs** file change events. It does not yet automatically re-ingest changed files into Qdrant. Full auto-reingestion is planned for v0.7.1.
+In v0.8.0, the watcher **automatically re-ingests changed markdown files** into Qdrant. When a `.md` file is created or modified, the broker runs `ingest_single_markdown` on it. When a `.md` file is deleted, the broker calls `remove_by_path` to remove its chunks from the index.
 
-**What this means in practice:** you can see in server logs when files change, but to update the search index you still need to run `maintain (action: reindex)` manually or from an AI session.
+**Image auto-reindex** (`.png`, `.jpg`, `.jpeg`, `.webp`) still logs events only. Automatic image re-ingestion is planned for v0.8.1.
 
-This staged approach lets you verify the watcher is running and receiving events correctly before the more complex auto-ingest behavior is added.
+**What this means in practice:** changes to your docs are now reflected in search results automatically after the debounce settles. You no longer need to run `maintain (action: reindex)` after every doc edit when auto-indexing is enabled.
 
 ---
 
@@ -149,25 +149,20 @@ In practice, the watcher has negligible CPU and battery impact during normal dev
 
 ## Current Limitations
 
-- **No auto-reingestion yet** — events are logged but not ingested into Qdrant automatically. This is planned for v0.7.1.
+- **No image auto-reingestion yet** — image events (`.png`, `.jpg`, `.jpeg`, `.webp`) are detected and logged but not automatically re-ingested into Qdrant. This is planned for v0.8.1.
 - **No recursive directory watching** — only the top-level docs/ and images/ directories are watched. Subdirectory support is planned.
 - **No watch on project source files** — if you want to index your `src/` or other directories, you still need to use `docs.save` or `maintain reindex` manually.
 - **One watcher per active project** — the watcher is started when a project is initialized via `setup (action: init)`. Projects that have not been initialized in the current server session do not have an active watcher.
 
 ---
 
-## Workflow Until v0.7.1
+## Recommended Workflow (v0.8.0)
 
-Until auto-reingestion lands, the recommended workflow is:
+With auto-reingestion live for markdown files:
 
-1. Enable `auto_index_enabled: true` to get event logging (useful for debugging and confirming file writes).
-2. After editing or adding docs, manually trigger reindex in your AI session:
-
-   ```
-   maintain (action: reindex)
-   ```
-
-3. In v0.7.1, step 2 will happen automatically after the debounce fires.
+1. Enable `auto_index_enabled: true` in your config.
+2. Edit or create files in `.the-one/docs/` — the watcher re-ingests them automatically after the debounce settles.
+3. For images, still run `maintain (action: reindex)` manually after adding or changing image files (until v0.8.1).
 
 ---
 
@@ -196,9 +191,13 @@ sudo sysctl fs.inotify.max_user_watches=524288
 echo "fs.inotify.max_user_watches=524288" | sudo tee /etc/sysctl.d/99-inotify.conf
 ```
 
-### Events fire but nothing is indexed
+### Markdown events fire but chunks are stale
 
-This is expected in v0.7.0. Event detection works; automatic re-ingestion is not implemented yet. Run `maintain (action: reindex)` manually to update the search index.
+Ensure the project was initialized (`setup (action: init)` was called in the current server session) — the watcher is started per-project at init time, and a fresh session won't have an active watcher until init runs. Also verify `auto_index_enabled: true` is set. If after init changes still don't appear, run `maintain (action: reindex)` to force a full reindex.
+
+### Image events fire but images are not re-indexed
+
+This is expected in v0.8.0. Image event detection works; automatic image re-ingestion is planned for v0.8.1. Run `maintain (action: images.rescan)` manually to update image search.
 
 ### High debounce latency during saves
 
@@ -218,3 +217,10 @@ If the watcher background task panics or is dropped, the server continues runnin
 
 - `notify 6.1` — cross-platform filesystem event API
 - `notify-debouncer-mini 0.4` — lightweight debounce wrapper over notify
+
+## Changes in v0.8.0
+
+- Watcher task now calls `MemoryEngine::ingest_single_markdown` on `Create`/`Modify` events for `.md` files
+- Watcher task now calls `MemoryEngine::remove_by_path` on `Remove` events for `.md` files
+- `MemoryEngine` HashMap promoted to `Arc<RwLock<...>>` in the broker, allowing the watcher's spawned tokio task to hold its own reference
+- Image auto-reindex still deferred (v0.8.1)
