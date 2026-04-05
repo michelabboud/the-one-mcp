@@ -12,6 +12,7 @@ image-ocr = ["image-embeddings", "dep:tesseract"]
 
 [dependencies]
 async-trait.workspace = true
+regex = "1"
 fastembed = { workspace = true, optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 sha2 = "0.11"

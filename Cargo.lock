@@ -3833,6 +3833,7 @@ dependencies = [
  "image",
  "notify",
  "notify-debouncer-mini",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",

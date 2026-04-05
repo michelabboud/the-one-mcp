@@ -1,4 +1,5 @@
 pub mod chunker;
+pub mod chunker_rust;
 pub mod embeddings;
 pub mod graph;
 pub mod image_embeddings;
