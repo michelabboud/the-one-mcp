@@ -24,4 +24,6 @@ pub enum CoreError {
     Document(String),
     #[error("catalog error: {0}")]
     Catalog(String),
+    #[error("feature not enabled: {0}")]
+    NotEnabled(String),
 }

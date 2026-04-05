@@ -1567,6 +1567,426 @@ impl McpBroker {
         })
     }
 
+    // -----------------------------------------------------------------------
+    // Image search and ingest
+    // -----------------------------------------------------------------------
+
+    #[instrument(skip_all)]
+    pub async fn image_search(
+        &self,
+        request: crate::api::ImageSearchRequest,
+    ) -> Result<crate::api::ImageSearchResponse, CoreError> {
+        #[cfg(feature = "image-embeddings")]
+        {
+            self._image_search_impl(request).await
+        }
+        #[cfg(not(feature = "image-embeddings"))]
+        {
+            let _ = request;
+            Err(CoreError::NotEnabled(
+                "image-embeddings feature not compiled in".to_string(),
+            ))
+        }
+    }
+
+    #[cfg(feature = "image-embeddings")]
+    async fn _image_search_impl(
+        &self,
+        request: crate::api::ImageSearchRequest,
+    ) -> Result<crate::api::ImageSearchResponse, CoreError> {
+        let project_root = PathBuf::from(&request.project_root);
+        let config = AppConfig::load(&project_root, RuntimeOverrides::default())?;
+
+        if !config.image_embedding_enabled {
+            return Err(CoreError::NotEnabled(
+                "image embeddings not enabled".to_string(),
+            ));
+        }
+
+        let top_k = request
+            .top_k
+            .min(config.limits.max_image_search_hits)
+            .max(1);
+        let threshold = config.limits.image_search_score_threshold;
+
+        // Build text embedding provider to embed the text query into image space.
+        // Nomic text embeddings are in the same vector space as Nomic vision embeddings.
+        let text_provider =
+            Self::try_build_embedding_provider(&config).map_err(CoreError::Embedding)?;
+        let query_vector = text_provider
+            .embed_single(&request.query)
+            .await
+            .map_err(CoreError::Embedding)?;
+
+        // Build Qdrant backend (project-independent — we use the same client)
+        let qdrant = the_one_memory::qdrant::AsyncQdrantBackend::new(
+            &config.qdrant_url,
+            "images", // we need any valid project_id for the client — unused for image methods
+            the_one_memory::qdrant::QdrantOptions {
+                api_key: config.qdrant_api_key.clone(),
+                ca_cert_path: config
+                    .qdrant_ca_cert_path
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().to_string()),
+                tls_insecure: config.qdrant_tls_insecure,
+            },
+        )
+        .map_err(CoreError::Embedding)?;
+
+        let results = qdrant
+            .search_images(&request.project_id, query_vector, top_k, threshold)
+            .await
+            .map_err(CoreError::Embedding)?;
+
+        let hits = results
+            .into_iter()
+            .map(|r| crate::api::ImageSearchHit {
+                id: r.id,
+                source_path: r.source_path,
+                thumbnail_path: r.thumbnail_path,
+                caption: r.caption,
+                ocr_text: r.ocr_text,
+                score: r.score,
+            })
+            .collect();
+
+        Ok(crate::api::ImageSearchResponse { hits })
+    }
+
+    #[instrument(skip_all)]
+    pub async fn image_ingest(
+        &self,
+        request: crate::api::ImageIngestRequest,
+    ) -> Result<crate::api::ImageIngestResponse, CoreError> {
+        #[cfg(feature = "image-embeddings")]
+        {
+            self._image_ingest_impl(request).await
+        }
+        #[cfg(not(feature = "image-embeddings"))]
+        {
+            let _ = request;
+            Err(CoreError::NotEnabled(
+                "image-embeddings feature not compiled in".to_string(),
+            ))
+        }
+    }
+
+    #[cfg(feature = "image-embeddings")]
+    async fn _image_ingest_impl(
+        &self,
+        request: crate::api::ImageIngestRequest,
+    ) -> Result<crate::api::ImageIngestResponse, CoreError> {
+        use the_one_memory::image_embeddings::FastEmbedImageProvider;
+        use the_one_memory::image_ingest::DEFAULT_IMAGE_EXTENSIONS;
+        use the_one_memory::qdrant::{AsyncQdrantBackend, ImagePoint, QdrantOptions};
+
+        let project_root = PathBuf::from(&request.project_root);
+        let config = AppConfig::load(&project_root, RuntimeOverrides::default())?;
+
+        if !config.image_embedding_enabled {
+            return Err(CoreError::NotEnabled(
+                "image embeddings not enabled".to_string(),
+            ));
+        }
+
+        // Validate path
+        let image_path = if std::path::Path::new(&request.path).is_absolute() {
+            PathBuf::from(&request.path)
+        } else {
+            project_root.join(&request.path)
+        };
+
+        if !image_path.exists() {
+            return Err(CoreError::InvalidProjectConfig(format!(
+                "image path does not exist: {}",
+                image_path.display()
+            )));
+        }
+
+        // Check extension
+        let ext = image_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if !DEFAULT_IMAGE_EXTENSIONS.contains(&ext.as_str()) {
+            return Err(CoreError::InvalidProjectConfig(format!(
+                "unsupported image extension: .{ext}"
+            )));
+        }
+
+        // Check file size
+        let metadata = std::fs::metadata(&image_path)?;
+        let file_size = metadata.len();
+        if file_size as usize > config.limits.max_image_size_bytes {
+            return Err(CoreError::InvalidProjectConfig(format!(
+                "image file too large: {} bytes (limit: {})",
+                file_size, config.limits.max_image_size_bytes
+            )));
+        }
+
+        // Compute SHA-256 hash for deduplication id
+        let file_bytes = std::fs::read(&image_path)?;
+        let hash = {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(&file_bytes);
+            let result = hasher.finalize();
+            result
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        };
+
+        let mtime_epoch = metadata
+            .modified()
+            .ok()
+            .and_then(|t| {
+                t.duration_since(std::time::UNIX_EPOCH)
+                    .ok()
+                    .map(|d| d.as_secs() as i64)
+            })
+            .unwrap_or(0);
+
+        // Build image embedding provider
+        let provider = tokio::task::spawn_blocking({
+            let model_name = config.image_embedding_model.clone();
+            move || FastEmbedImageProvider::new(&model_name)
+        })
+        .await
+        .map_err(|e| CoreError::Embedding(format!("join error: {e}")))?
+        .map_err(CoreError::Embedding)?;
+
+        let dims = provider.dimensions();
+        let vector = provider
+            .embed_image(&image_path)
+            .await
+            .map_err(CoreError::Embedding)?;
+
+        // OCR extraction (feature-gated)
+        let ocr_text: Option<String>;
+        #[cfg(feature = "image-ocr")]
+        {
+            ocr_text = if config.image_ocr_enabled {
+                match the_one_memory::ocr::extract_text(&image_path, &config.image_ocr_language) {
+                    Ok(text) if !text.trim().is_empty() => Some(text),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+        }
+        #[cfg(not(feature = "image-ocr"))]
+        {
+            ocr_text = None;
+        }
+        let ocr_extracted = ocr_text.is_some();
+
+        // Thumbnail generation (feature-gated via image-embeddings which pulls in `image` crate)
+        let thumbnail_path: Option<String>;
+        let thumbnail_generated: bool;
+
+        let thumbnails_dir = config.project_state_dir.join("thumbnails");
+        std::fs::create_dir_all(&thumbnails_dir)?;
+        let thumb_file = thumbnails_dir.join(format!("{hash}.webp"));
+
+        if config.image_thumbnail_enabled {
+            match the_one_memory::thumbnail::generate_thumbnail(
+                &image_path,
+                &thumb_file,
+                config.image_thumbnail_max_px,
+            ) {
+                Ok(()) => {
+                    thumbnail_path = Some(thumb_file.to_string_lossy().to_string());
+                    thumbnail_generated = true;
+                }
+                Err(e) => {
+                    tracing::warn!("thumbnail generation failed for {:?}: {e}", image_path);
+                    thumbnail_path = None;
+                    thumbnail_generated = false;
+                }
+            }
+        } else {
+            thumbnail_path = None;
+            thumbnail_generated = false;
+        }
+
+        // Build Qdrant backend and upsert
+        let qdrant = AsyncQdrantBackend::new(
+            &config.qdrant_url,
+            "images",
+            QdrantOptions {
+                api_key: config.qdrant_api_key.clone(),
+                ca_cert_path: config
+                    .qdrant_ca_cert_path
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().to_string()),
+                tls_insecure: config.qdrant_tls_insecure,
+            },
+        )
+        .map_err(CoreError::Embedding)?;
+
+        // Create collection if needed
+        qdrant
+            .create_image_collection(&request.project_id, dims)
+            .await
+            .map_err(CoreError::Embedding)?;
+
+        let point = ImagePoint {
+            id: hash,
+            vector,
+            source_path: image_path.to_string_lossy().to_string(),
+            file_size,
+            mtime_epoch,
+            caption: request.caption,
+            ocr_text,
+            thumbnail_path,
+        };
+
+        qdrant
+            .upsert_image_points(&request.project_id, vec![point])
+            .await
+            .map_err(CoreError::Embedding)?;
+
+        Ok(crate::api::ImageIngestResponse {
+            path: image_path.to_string_lossy().to_string(),
+            dims,
+            ocr_extracted,
+            thumbnail_generated,
+        })
+    }
+
+    // -----------------------------------------------------------------------
+    // Image maintenance: rescan, clear, delete
+    // -----------------------------------------------------------------------
+
+    #[instrument(skip_all)]
+    pub async fn image_rescan(
+        &self,
+        project_root: &Path,
+        project_id: &str,
+    ) -> Result<serde_json::Value, CoreError> {
+        #[cfg(feature = "image-embeddings")]
+        {
+            self._image_rescan_impl(project_root, project_id).await
+        }
+        #[cfg(not(feature = "image-embeddings"))]
+        {
+            let _ = (project_root, project_id);
+            Err(CoreError::NotEnabled(
+                "image-embeddings feature not compiled in".to_string(),
+            ))
+        }
+    }
+
+    #[cfg(feature = "image-embeddings")]
+    async fn _image_rescan_impl(
+        &self,
+        project_root: &Path,
+        project_id: &str,
+    ) -> Result<serde_json::Value, CoreError> {
+        use the_one_memory::image_ingest::{discover_images, DEFAULT_IMAGE_EXTENSIONS};
+
+        let config = AppConfig::load(project_root, RuntimeOverrides::default())?;
+
+        if !config.image_embedding_enabled {
+            return Err(CoreError::NotEnabled(
+                "image embeddings not enabled".to_string(),
+            ));
+        }
+
+        // Walk project root for images
+        let images = discover_images(project_root, DEFAULT_IMAGE_EXTENSIONS);
+        let total = images.len();
+        let mut ingested = 0usize;
+
+        for img in images {
+            if img.size_bytes as usize > config.limits.max_image_size_bytes {
+                continue;
+            }
+            let result = self
+                .image_ingest(crate::api::ImageIngestRequest {
+                    project_root: project_root.to_string_lossy().to_string(),
+                    project_id: project_id.to_string(),
+                    path: img.path.to_string_lossy().to_string(),
+                    caption: None,
+                })
+                .await;
+            if result.is_ok() {
+                ingested += 1;
+            }
+            if ingested >= config.limits.max_images_per_project {
+                break;
+            }
+        }
+
+        Ok(serde_json::json!({
+            "discovered": total,
+            "ingested": ingested
+        }))
+    }
+
+    #[instrument(skip_all)]
+    pub async fn image_clear(
+        &self,
+        project_root: &Path,
+        project_id: &str,
+    ) -> Result<serde_json::Value, CoreError> {
+        let config = AppConfig::load(project_root, RuntimeOverrides::default())?;
+
+        let qdrant = the_one_memory::qdrant::AsyncQdrantBackend::new(
+            &config.qdrant_url,
+            "images",
+            the_one_memory::qdrant::QdrantOptions {
+                api_key: config.qdrant_api_key.clone(),
+                ca_cert_path: config
+                    .qdrant_ca_cert_path
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().to_string()),
+                tls_insecure: config.qdrant_tls_insecure,
+            },
+        )
+        .map_err(CoreError::Embedding)?;
+
+        qdrant
+            .delete_image_collection(project_id)
+            .await
+            .map_err(CoreError::Embedding)?;
+
+        Ok(serde_json::json!({ "cleared": true }))
+    }
+
+    #[instrument(skip_all)]
+    pub async fn image_delete(
+        &self,
+        project_root: &Path,
+        project_id: &str,
+        source_path: &str,
+    ) -> Result<serde_json::Value, CoreError> {
+        let config = AppConfig::load(project_root, RuntimeOverrides::default())?;
+
+        let qdrant = the_one_memory::qdrant::AsyncQdrantBackend::new(
+            &config.qdrant_url,
+            "images",
+            the_one_memory::qdrant::QdrantOptions {
+                api_key: config.qdrant_api_key.clone(),
+                ca_cert_path: config
+                    .qdrant_ca_cert_path
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().to_string()),
+                tls_insecure: config.qdrant_tls_insecure,
+            },
+        )
+        .map_err(CoreError::Embedding)?;
+
+        qdrant
+            .delete_image_by_source_path(project_id, source_path)
+            .await
+            .map_err(CoreError::Embedding)?;
+
+        Ok(serde_json::json!({ "deleted": true, "path": source_path }))
+    }
+
     #[instrument(skip_all)]
     pub async fn config_update(
         &self,
