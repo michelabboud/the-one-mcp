@@ -43,6 +43,10 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Tests
+        env:
+          # Use the smallest cacheable model in CI to avoid parallel download
+          # contention on the larger default (BGE-large-en-v1.5 is 130MB).
+          THE_ONE_EMBEDDING_MODEL: all-MiniLM-L6-v2
         run: cargo test --workspace
 
   build:
