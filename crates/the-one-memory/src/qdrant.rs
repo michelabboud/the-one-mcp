@@ -41,6 +41,31 @@ pub struct QdrantSearchResult {
 }
 
 // ---------------------------------------------------------------------------
+// Hybrid (dense + sparse) types
+// ---------------------------------------------------------------------------
+
+/// A sparse vector in Qdrant's named sparse format (indices + values pairs).
+/// Mirrors `sparse_embeddings::SparseVector` — copied here to avoid a
+/// cross-module dep inside qdrant.rs (sparse_embeddings is local-embeddings gated).
+#[derive(Debug, Clone, Default)]
+pub struct QdrantSparseVector {
+    pub indices: Vec<u32>,
+    pub values: Vec<f32>,
+}
+
+/// A point that carries both a dense and a sparse vector for hybrid indexing.
+#[derive(Debug, Clone)]
+pub struct HybridPoint {
+    /// chunk_id — hashed to a u64 point ID.
+    pub id: String,
+    /// Dense embedding vector (e.g., from BGE/MiniLM).
+    pub dense: Vec<f32>,
+    /// Sparse embedding vector (e.g., from SPLADE++).
+    pub sparse: QdrantSparseVector,
+    pub payload: QdrantPayload,
+}
+
+// ---------------------------------------------------------------------------
 // Image types
 // ---------------------------------------------------------------------------
 
@@ -330,6 +355,210 @@ impl AsyncQdrantBackend {
                 ))
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Hybrid collection helpers (dense + sparse named vectors)
+    // -----------------------------------------------------------------------
+
+    /// Ensure a hybrid collection exists with both a named dense and sparse vector config.
+    ///
+    /// Qdrant collection config:
+    /// - Named dense vector `"dense"` — cosine distance, HNSW indexed.
+    /// - Named sparse vector `"sparse"` — IDF modifier for BM25-style weighting.
+    ///
+    /// Creates the collection if missing; ignores "already exists" errors.
+    pub async fn ensure_hybrid_collection(&self, dense_dims: usize) -> Result<(), String> {
+        let url = format!("{}/collections/{}", self.base_url, self.collection_name);
+        let body = json!({
+            "vectors": {
+                "dense": {
+                    "size": dense_dims,
+                    "distance": "Cosine"
+                }
+            },
+            "sparse_vectors": {
+                "sparse": {
+                    "index": {
+                        "on_disk": false
+                    },
+                    "modifier": "Idf"
+                }
+            },
+            "hnsw_config": {
+                "m": 16,
+                "ef_construct": 100
+            }
+        });
+
+        let resp = self
+            .client
+            .put(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("ensure_hybrid_collection request failed: {e}"))?;
+
+        let status = resp.status().as_u16();
+        if status == 409 || (200..300).contains(&status) {
+            return Ok(());
+        }
+
+        let text = resp.text().await.unwrap_or_default();
+        if text.contains("already exists") {
+            return Ok(());
+        }
+
+        Err(format!(
+            "ensure_hybrid_collection failed (HTTP {status}): {text}"
+        ))
+    }
+
+    /// Upsert hybrid points (dense + sparse vectors with payloads).
+    pub async fn upsert_hybrid_points(&self, points: Vec<HybridPoint>) -> Result<(), String> {
+        let url = format!(
+            "{}/collections/{}/points",
+            self.base_url, self.collection_name
+        );
+
+        let json_points: Vec<serde_json::Value> = points
+            .into_iter()
+            .map(|p| {
+                json!({
+                    "id": hash_to_point_id(&p.id),
+                    "vector": {
+                        "dense": p.dense,
+                        "sparse": {
+                            "indices": p.sparse.indices,
+                            "values": p.sparse.values
+                        }
+                    },
+                    "payload": {
+                        "chunk_id": p.payload.chunk_id,
+                        "source_path": p.payload.source_path,
+                        "heading": p.payload.heading,
+                        "chunk_index": p.payload.chunk_index,
+                    }
+                })
+            })
+            .collect();
+
+        let body = json!({ "points": json_points });
+
+        let resp = self
+            .client
+            .put(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("upsert_hybrid_points request failed: {e}"))?;
+
+        if resp.status().is_success() {
+            return Ok(());
+        }
+
+        let text = resp.text().await.unwrap_or_default();
+        Err(format!("upsert_hybrid_points failed: {text}"))
+    }
+
+    /// Issue two parallel Qdrant queries — one dense cosine, one sparse — and
+    /// return both result sets. The caller is responsible for score fusion.
+    ///
+    /// Named vector search uses the `"/points/search"` endpoint with `"using": "dense"`
+    /// or `"using": "sparse"` to select the target vector space.
+    pub async fn search_hybrid(
+        &self,
+        dense: Vec<f32>,
+        sparse: QdrantSparseVector,
+        top_k: usize,
+        threshold: f32,
+    ) -> Result<(Vec<QdrantSearchResult>, Vec<QdrantSearchResult>), String> {
+        let url = format!(
+            "{}/collections/{}/points/search",
+            self.base_url, self.collection_name
+        );
+
+        let dense_body = json!({
+            "vector": {
+                "name": "dense",
+                "vector": dense
+            },
+            "limit": top_k,
+            "score_threshold": threshold,
+            "with_payload": true,
+        });
+
+        let sparse_body = json!({
+            "vector": {
+                "name": "sparse",
+                "vector": {
+                    "indices": sparse.indices,
+                    "values": sparse.values
+                }
+            },
+            "limit": top_k,
+            "with_payload": true,
+        });
+
+        let (dense_resp, sparse_resp) = tokio::join!(
+            self.client.post(&url).json(&dense_body).send(),
+            self.client.post(&url).json(&sparse_body).send(),
+        );
+
+        let dense_results =
+            Self::parse_search_response(dense_resp.map_err(|e| format!("dense search failed: {e}"))?).await?;
+        let sparse_results =
+            Self::parse_search_response(sparse_resp.map_err(|e| format!("sparse search failed: {e}"))?).await?;
+
+        Ok((dense_results, sparse_results))
+    }
+
+    /// Parse a Qdrant `/points/search` HTTP response into `Vec<QdrantSearchResult>`.
+    async fn parse_search_response(
+        resp: reqwest::Response,
+    ) -> Result<Vec<QdrantSearchResult>, String> {
+        if !resp.status().is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(format!("search response error: {text}"));
+        }
+
+        let value: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("search response parse error: {e}"))?;
+
+        Ok(value
+            .get("result")
+            .and_then(|v| v.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| {
+                        let payload = item.get("payload")?;
+                        let chunk_id = payload.get("chunk_id")?.as_str()?.to_string();
+                        let source_path = payload.get("source_path")?.as_str()?.to_string();
+                        let heading = payload
+                            .get("heading")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let chunk_index = payload
+                            .get("chunk_index")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0) as usize;
+                        let score = item.get("score")?.as_f64()? as f32;
+
+                        Some(QdrantSearchResult {
+                            chunk_id,
+                            source_path,
+                            heading,
+                            chunk_index,
+                            score,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default())
     }
 
     // -----------------------------------------------------------------------
@@ -768,5 +997,130 @@ mod tests {
 
         mock.assert();
         assert!(exists);
+    }
+
+    #[tokio::test]
+    async fn test_ensure_hybrid_collection_sends_correct_request() {
+        let server = MockServer::start();
+
+        let mock = server.mock(|when, then| {
+            when.method(PUT)
+                .path("/collections/the_one_hybrid-proj")
+                .header("content-type", "application/json")
+                .json_body_partial(r#"{"vectors":{"dense":{"size":384,"distance":"Cosine"}}}"#);
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(r#"{"status":"ok","result":true}"#);
+        });
+
+        let backend =
+            AsyncQdrantBackend::new(&server.base_url(), "hybrid-proj", QdrantOptions::default())
+                .expect("backend should be created");
+
+        backend
+            .ensure_hybrid_collection(384)
+            .await
+            .expect("ensure_hybrid_collection should succeed");
+
+        mock.assert();
+    }
+
+    #[tokio::test]
+    async fn test_upsert_hybrid_points_sends_correct_request() {
+        let server = MockServer::start();
+
+        let mock = server.mock(|when, then| {
+            when.method(PUT)
+                .path("/collections/the_one_hybrid-upsert/points");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(r#"{"status":"ok","result":{"operation_id":0,"status":"completed"}}"#);
+        });
+
+        let backend = AsyncQdrantBackend::new(
+            &server.base_url(),
+            "hybrid-upsert",
+            QdrantOptions::default(),
+        )
+        .expect("backend should be created");
+
+        let point = HybridPoint {
+            id: "chunk:0".to_string(),
+            dense: vec![0.1, 0.2, 0.3],
+            sparse: QdrantSparseVector {
+                indices: vec![10, 42, 100],
+                values: vec![0.5, 0.8, 0.3],
+            },
+            payload: QdrantPayload {
+                chunk_id: "chunk:0".to_string(),
+                source_path: "docs/readme.md".to_string(),
+                heading: "Intro".to_string(),
+                chunk_index: 0,
+            },
+        };
+
+        backend
+            .upsert_hybrid_points(vec![point])
+            .await
+            .expect("upsert_hybrid_points should succeed");
+
+        mock.assert();
+    }
+
+    #[tokio::test]
+    async fn test_search_hybrid_issues_two_parallel_queries() {
+        let server = MockServer::start();
+
+        let search_response = serde_json::to_string(&json!({
+            "result": [
+                {
+                    "id": 12345,
+                    "score": 0.9,
+                    "payload": {
+                        "chunk_id": "doc.md:0",
+                        "source_path": "docs/doc.md",
+                        "heading": "Title",
+                        "chunk_index": 0
+                    }
+                }
+            ],
+            "status": "ok",
+            "time": 0.001
+        }))
+        .unwrap();
+
+        // Both dense and sparse queries hit the same endpoint — use a call count mock
+        let mock = server.mock(|when, then| {
+            when.method(POST)
+                .path("/collections/the_one_hybrid-search/points/search");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(search_response);
+        });
+
+        let backend = AsyncQdrantBackend::new(
+            &server.base_url(),
+            "hybrid-search",
+            QdrantOptions::default(),
+        )
+        .expect("backend should be created");
+
+        let sparse = QdrantSparseVector {
+            indices: vec![5, 10],
+            values: vec![0.7, 0.3],
+        };
+
+        let (dense_results, sparse_results) = backend
+            .search_hybrid(vec![0.1, 0.2, 0.3], sparse, 5, 0.0)
+            .await
+            .expect("search_hybrid should succeed");
+
+        // Two requests must have been issued (tokio::join!)
+        mock.assert_hits(2);
+
+        assert_eq!(dense_results.len(), 1);
+        assert_eq!(sparse_results.len(), 1);
+        assert_eq!(dense_results[0].chunk_id, "doc.md:0");
+        assert!((dense_results[0].score - 0.9).abs() < 0.001);
     }
 }
