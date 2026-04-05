@@ -1,6 +1,6 @@
 # Configuration Reference
 
-> v0.6.0 — authoritative source: `crates/the-one-core/src/config.rs` and `crates/the-one-core/src/limits.rs`
+> v0.7.0 — authoritative source: `crates/the-one-core/src/config.rs` and `crates/the-one-core/src/limits.rs`
 
 ## Overview
 
@@ -142,6 +142,49 @@ Image indexing, OCR, and thumbnail generation are all disabled by default. Enabl
   "image_embedding_model": "nomic-embed-vision-v1.5",
   "image_ocr_enabled": true,
   "image_ocr_language": "eng"
+}
+```
+
+---
+
+### Hybrid Search
+
+Hybrid search combines dense cosine similarity with sparse lexical matching (SPLADE++) for stronger exact-match retrieval. Disabled by default. See [Hybrid Search Guide](hybrid-search.md) for full details.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `hybrid_search_enabled` | bool | `false` | Enable hybrid dense+sparse search. Requires a full reindex after enabling. |
+| `hybrid_dense_weight` | float | `0.7` | Weight applied to the dense cosine score in the final fusion. Range [0.0, 1.0]. |
+| `hybrid_sparse_weight` | float | `0.3` | Weight applied to the normalized sparse score in the final fusion. Range [0.0, 1.0]. |
+| `sparse_model` | string | `"bm25"` | Sparse model alias. Currently `"bm25"` maps to SPLADE++Ensemble Distil in fastembed 5.13. |
+
+**Example:**
+```json
+{
+  "hybrid_search_enabled": true,
+  "hybrid_dense_weight": 0.7,
+  "hybrid_sparse_weight": 0.3
+}
+```
+
+**Note:** enabling hybrid search requires Qdrant 1.7+ for sparse vector support. Run `maintain (action: reindex)` after changing this setting.
+
+---
+
+### Auto-Indexing (File Watcher)
+
+An optional background file watcher that monitors `.the-one/docs/` and `.the-one/images/` for changes. In v0.7.0 events are logged only; automatic re-ingestion arrives in v0.7.1. See [Auto-Indexing Guide](auto-indexing.md).
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `auto_index_enabled` | bool | `false` | Start the background file watcher at server startup. |
+| `auto_index_debounce_ms` | integer | `2000` | Milliseconds to wait after the last file event before processing. Prevents redundant triggers from editor burst saves. |
+
+**Example:**
+```json
+{
+  "auto_index_enabled": true,
+  "auto_index_debounce_ms": 2000
 }
 ```
 

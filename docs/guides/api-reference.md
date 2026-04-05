@@ -1,6 +1,6 @@
 # The-One MCP API Reference
 
-> Complete reference for all 17 MCP tools exposed by the-one-mcp v0.6.0.
+> Complete reference for all 17 MCP tools exposed by the-one-mcp v0.7.0.
 >
 > Tools are invoked via JSON-RPC 2.0 over stdio/SSE/stream. Every tool call uses
 > `method: "tools/call"` with `params.name` and `params.arguments`. Results are
@@ -219,8 +219,13 @@ after `memory.search` to load the complete text of a matching chunk.
 ### memory.search_images
 
 Semantic search over indexed project images. Finds screenshots, diagrams, photos,
-and mockups matching a natural-language query. Requires `image_embedding_enabled`
-to be active in the project configuration.
+and mockups matching a natural-language query or a reference image. Requires
+`image_embedding_enabled` to be active in the project configuration.
+
+As of v0.7.0, exactly one of `query` or `image_base64` must be provided:
+
+- **Text query** — natural language description ("database schema diagram")
+- **Image query** — base64-encoded image for image→image similarity (screenshot search)
 
 **Parameters**
 
@@ -228,10 +233,13 @@ to be active in the project configuration.
 |-------|------|----------|---------|-------------|
 | `project_root` | string | yes | — | Absolute path to the project root |
 | `project_id` | string | yes | — | Unique project identifier |
-| `query` | string | yes | — | Natural-language search query |
+| `query` | string | no* | — | Natural-language search query |
+| `image_base64` | string | no* | — | Base64-encoded image bytes for image→image similarity search |
 | `top_k` | integer | no | `5` | Maximum number of results |
 
-**Example call**
+*Exactly one of `query` or `image_base64` must be provided. Providing both or neither returns an error.
+
+**Example call (text query)**
 
 ```json
 {
@@ -245,6 +253,25 @@ to be active in the project configuration.
       "project_id": "myproject",
       "query": "login screen wireframe",
       "top_k": 5
+    }
+  }
+}
+```
+
+**Example call (screenshot/image query)**
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 4,
+  "method": "tools/call",
+  "params": {
+    "name": "memory.search_images",
+    "arguments": {
+      "project_root": "/home/user/myproject",
+      "project_id": "myproject",
+      "image_base64": "<base64-encoded PNG bytes>",
+      "top_k": 3
     }
   }
 }
@@ -283,6 +310,7 @@ to be active in the project configuration.
 - Requires image indexing to be enabled in config (`image_embedding_enabled: true`).
 - Use `maintain` (action: `images.rescan`) to rebuild the image index.
 - OCR text extraction is optional and requires Tesseract or compatible backend.
+- Screenshot search (`image_base64`) uses the same image embedding model as indexed images — Nomic Vision by default. The base64 bytes are decoded to a temp file, embedded, and used as the query vector.
 
 ---
 

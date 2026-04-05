@@ -1,6 +1,6 @@
 # Troubleshooting
 
-Common problems and their fixes for the-one-mcp v0.6.0.
+Common problems and their fixes for the-one-mcp v0.7.0.
 
 ---
 
@@ -942,3 +942,89 @@ Or use the release gate script:
 ```bash
 bash scripts/release-gate.sh
 ```
+
+---
+
+## Hybrid Search Issues (v0.7.0)
+
+### "Hybrid search requires Qdrant 1.7+"
+
+Your Qdrant instance is too old to support sparse vectors. Options:
+- Upgrade Qdrant to 1.7 or later
+- Disable hybrid search: `"hybrid_search_enabled": false`
+
+### Search results unchanged after enabling hybrid search
+
+After enabling `hybrid_search_enabled`, you must recreate the Qdrant collection with sparse vector support. Run:
+
+```
+maintain (action: reindex)
+```
+
+Without reindex, the collection format is dense-only and sparse scoring is silently skipped.
+
+### Sparse scores always near 0.0
+
+This is correct behavior for queries that contain only high-frequency or stop words. SPLADE++ gives high weight to rare tokens. Queries like "what does this do?" have no distinctive tokens, so sparse weight is near zero — dense cosine similarity dominates, which is the right result.
+
+### Config shows hybrid_search_enabled: false but I set true
+
+Check the config layer resolution. A project config file can override the global config. Use `config (action: export)` from an AI session to see the fully resolved config with all layers merged.
+
+---
+
+## File Watcher Issues (v0.7.0)
+
+### Watcher log lines not appearing
+
+1. Verify `auto_index_enabled: true` in resolved config: `config (action: export)`
+2. Set `log_level: "info"` — watcher logs at INFO level
+3. Ensure the project was initialized: call `setup (action: init)` — the watcher is started per-project at init time
+
+### "Failed to start watcher"
+
+The most common cause is missing directories. Ensure `.the-one/docs/` and `.the-one/images/` exist. They are created on `setup (action: init)`.
+
+On Linux, also check inotify watch limits:
+
+```bash
+cat /proc/sys/fs/inotify/max_user_watches
+# If this is low (< 8192), raise it:
+sudo sysctl fs.inotify.max_user_watches=524288
+```
+
+### Files changed but index not updated
+
+This is expected in v0.7.0. The watcher detects and logs changes but does not automatically re-ingest files. Auto-reingestion is planned for v0.7.1. Run `maintain (action: reindex)` manually after editing docs.
+
+---
+
+## Admin UI Image Gallery Issues (v0.7.0)
+
+### `/images` page is blank
+
+The gallery fetches from `/api/images`. If no images are indexed for the active project, the grid will be empty. Ingest images first via `memory.ingest_image` or `maintain (action: images.rescan)`.
+
+### Thumbnail returns 404
+
+Thumbnails are stored in `.the-one/thumbnails/` under the project root. If the file is missing (e.g., project moved or thumbnails deleted), the thumbnail route returns 404. Re-run `maintain (action: images.rescan)` to regenerate thumbnails.
+
+### "Invalid thumbnail hash" error
+
+The `/images/thumbnail/<hash>` route validates the hash against the pattern `^[a-zA-Z0-9-]+$`. If your image IDs contain characters outside alphanumerics and hyphens, they will be rejected. This is a security guard against path traversal — image IDs are generated internally and should always pass this check. If you see this error, it indicates data corruption; run `maintain (action: images.clear)` and re-ingest.
+
+---
+
+## Screenshot Image Search Issues (v0.7.0)
+
+### "Provide either query or image_base64, not both" error
+
+`memory.search_images` requires exactly one of `query` or `image_base64`. Remove whichever you don't want.
+
+### "Provide either query or image_base64" when both are absent
+
+Both fields are optional in JSON but exactly one must be present. Ensure the LLM is passing the correct field name (`image_base64`, not `image_base_64` or `imageBase64`).
+
+### Image search via base64 returns wrong results
+
+The base64 image is embedded using the same image model as the indexed images. If you indexed with `nomic-vision` but pass a base64 image from a very different domain (e.g., a photo vs. a diagram), the embedding space match may be weak. This is expected — image→image similarity works best within the same visual domain.

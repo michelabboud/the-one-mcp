@@ -1,6 +1,6 @@
 # Embedding Models Guide
 
-> v0.6.0 — authoritative sources: `models/local-models.toml`, `models/api-models.toml`, `models/image-models.toml`, `models/rerank-models.toml`
+> v0.7.0 — authoritative sources: `models/local-models.toml`, `models/api-models.toml`, `models/image-models.toml`, `models/rerank-models.toml`
 
 ## Overview
 
@@ -287,6 +287,46 @@ Rough latency additions on a typical laptop (per query, over 10 candidates):
 | `jina-reranker-v2-base-multilingual` | ~50–150 ms |
 | `bge-reranker-base` | ~50–150 ms |
 | `bge-reranker-v2-m3` | ~150–400 ms |
+
+---
+
+## Sparse Models (Hybrid Search)
+
+Sparse models assign importance weights to individual tokens and produce sparse vectors for exact-term matching. They are used by the hybrid search feature (`hybrid_search_enabled: true`) to complement the dense embedding model.
+
+### Why Sparse Models?
+
+Dense models excel at semantic similarity ("meaning matches meaning"). Sparse models excel at lexical overlap — giving high weight to rare or distinctive tokens. In code-heavy projects this helps retrieve:
+
+- Function names (`parse_header`, `spawn_blocking`)
+- Error strings (`BorrowCheckError`, `ConnectionRefused`)
+- Crate and package names (`serde_json`, `tokio`, `anyhow`)
+- Short identifiers that are uncommon in the dense model's training corpus
+
+### Supported Sparse Models
+
+| Alias | Underlying model | Notes |
+|-------|-----------------|-------|
+| `bm25` | SPLADE++Ensemble Distil | Only option in fastembed 5.13. No additional model download — uses built-in tokenizer. |
+
+> **Note on naming:** fastembed 5.13 registers SPLADE++Ensemble Distil under the alias `"bm25"`. Classical BM25 (probabilistic term-frequency weighting) was removed in this version because it required a separate tokenizer pipeline. The SPLADE++ model is learned and generally outperforms classical BM25, but the alias is retained for compatibility.
+
+### No Download Required
+
+Unlike dense embedding models that download ONNX weight files (~23–220 MB), the `"bm25"` sparse model uses only a tokenizer that is bundled with the fastembed crate. Enabling hybrid search has **no model download overhead**.
+
+### Configuration
+
+Enable hybrid search to activate the sparse model:
+
+```json
+{
+  "hybrid_search_enabled": true,
+  "sparse_model": "bm25"
+}
+```
+
+See [Hybrid Search Guide](hybrid-search.md) for weight tuning, score normalization, and troubleshooting.
 
 ---
 

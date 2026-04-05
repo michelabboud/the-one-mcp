@@ -114,6 +114,10 @@ LLM calls: memory.ingest_image({
 
 ## Searching Images: `memory.search_images`
 
+As of v0.7.0, `memory.search_images` supports two search modes. Exactly one of `query` or `image_base64` must be provided.
+
+### Text query (natural language)
+
 ```
 User: "Find diagrams related to authentication"
 LLM calls: memory.search_images({
@@ -122,13 +126,30 @@ LLM calls: memory.search_images({
 })
 ```
 
+### Screenshot search (image → image)
+
+Pass a base64-encoded image instead of a text query to find visually similar images:
+
+```
+User: "Find images that look like this screenshot"
+LLM calls: memory.search_images({
+  image_base64: "<base64-encoded PNG/JPEG bytes>",
+  limit: 3
+})
+```
+
+The image is decoded, embedded using the same image model as the indexed images (Nomic Vision by default), and the resulting vector is used as the query. This enables finding indexed images that are visually or structurally similar to the provided screenshot — useful for "find more like this" and deduplication workflows.
+
 **Parameters:**
 
 | Parameter | Required | Description |
 |-----------|----------|-------------|
-| `query` | Yes | Natural language description of what to find |
+| `query` | no* | Natural language description of what to find |
+| `image_base64` | no* | Base64-encoded image bytes for image→image similarity search |
 | `limit` | No | Max results (default: 5, max: `max_image_search_hits`) |
 | `score_threshold` | No | Minimum similarity score (0.0–1.0, default: `image_search_score_threshold`) |
+
+*Exactly one of `query` or `image_base64` must be provided.
 
 **Returns:** Array of matches, each with:
 - `image_id` — unique identifier
@@ -351,9 +372,22 @@ LLM reads the ocr_text field from the search result and answers directly.
 | Slow first ingest | Image model downloading (~150-330MB), cached after first use |
 | Large memory usage during ingest | Each model loads into RAM; the nomic-vision model uses ~500MB during embedding |
 
+## Admin UI Image Gallery (v0.7.0)
+
+The embedded admin UI now includes an image gallery at `/images`. When running the admin UI server:
+
+```bash
+THE_ONE_PROJECT_ROOT="$(pwd)" THE_ONE_PROJECT_ID="demo" ~/.the-one/bin/embedded-ui
+```
+
+Navigate to `http://127.0.0.1:8787/images` to see a thumbnail grid of all indexed images for the active project. Clicking a thumbnail shows the full image. The gallery fetches metadata from the `/api/images` JSON endpoint.
+
+Individual thumbnails are served at `/images/thumbnail/<hash>` with security validation on the hash pattern (alphanumeric + hyphens only) to prevent path traversal.
+
 ## Related
 
 - [`memory.search`](the-one-mcp-complete-guide.md#10-rag-pipeline) — Text document search
 - [`maintain`](the-one-mcp-complete-guide.md#9-managed-documents) — Admin operations
 - [Reranking Guide](reranking.md) — Improve search result quality with cross-encoder reranking
+- [Hybrid Search Guide](hybrid-search.md) — Dense + sparse search for code-heavy repos
 - [Complete Guide](the-one-mcp-complete-guide.md) — Full reference
