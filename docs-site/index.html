@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>the-one-mcp — semantic memory for AI coding assistants</title>
+  <meta name="description" content="A Rust MCP broker that gives Claude Code, Gemini CLI, OpenCode, and Codex unlimited, searchable memory of your project. Hybrid search, 13-language code chunker, multimodal.">
+  <meta property="og:title" content="the-one-mcp">
+  <meta property="og:description" content="Semantic memory for AI coding assistants — hybrid search, 13-language code chunker, multimodal.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://michelabboud.github.io/the-one-mcp/">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="hero">
+    <div class="container">
+      <nav class="nav">
+        <span class="brand">the-one-mcp</span>
+        <div class="nav-links">
+          <a href="#features">Features</a>
+          <a href="#install">Install</a>
+          <a href="#benchmarks">Benchmarks</a>
+          <a href="https://github.com/michelabboud/the-one-mcp" target="_blank" rel="noopener">GitHub</a>
+        </div>
+      </nav>
+
+      <h1 class="title">Semantic memory for your AI coding assistant.</h1>
+      <p class="tagline">
+        A Rust-native MCP broker that gives Claude Code, Gemini CLI, OpenCode, and Codex
+        unlimited, searchable memory of your entire project — docs, code, even screenshots.
+      </p>
+
+      <div class="hero-actions">
+        <a class="btn primary" href="#install">Install</a>
+        <a class="btn" href="https://github.com/michelabboud/the-one-mcp" target="_blank" rel="noopener">Star on GitHub</a>
+      </div>
+
+      <div class="install-line">
+        <code id="install-cmd">curl -fsSL https://raw.githubusercontent.com/michelabboud/the-one-mcp/main/scripts/install.sh | bash</code>
+        <button class="copy" aria-label="Copy install command" data-target="install-cmd">Copy</button>
+      </div>
+    </div>
+  </header>
+
+  <section class="features container" id="features">
+    <h2>Why the-one-mcp?</h2>
+    <div class="feature-grid">
+      <article class="feature">
+        <h3>Unlimited memory</h3>
+        <p>
+          Your AI assistant no longer forgets what it learned in the last turn. Every
+          doc, every screenshot, every code chunk stays searchable across sessions.
+        </p>
+      </article>
+      <article class="feature">
+        <h3>Hybrid search</h3>
+        <p>
+          Dense embeddings catch semantic intent; BM25 / SPLADE sparse vectors catch
+          exact identifiers. Both run in parallel, fused with configurable weights.
+        </p>
+      </article>
+      <article class="feature">
+        <h3>13-language code chunker</h3>
+        <p>
+          Tree-sitter-backed AST chunking for Rust, Python, TS/JS, Go, Swift, Ruby, C,
+          C++, Java, Kotlin, PHP, and Zig. Symbol names, signatures, and line ranges
+          ride along with every chunk.
+        </p>
+      </article>
+      <article class="feature">
+        <h3>Multimodal</h3>
+        <p>
+          Embed and search screenshots and diagrams alongside text. Optional OCR
+          extracts text so you can find that whiteboard photo months later.
+        </p>
+      </article>
+      <article class="feature">
+        <h3>Tool catalog</h3>
+        <p>
+          184+ curated CLI tools across 10 languages — pytest, eslint, clippy,
+          ruff, clang-tidy, and many more. Ask <em>"what test runner should I
+          use here?"</em> and get a grounded answer.
+        </p>
+      </article>
+      <article class="feature">
+        <h3>Auto-reindex</h3>
+        <p>
+          A built-in file watcher keeps your index fresh as you edit. Change a
+          markdown file or drop in a new screenshot — it is searchable within seconds.
+        </p>
+      </article>
+    </div>
+  </section>
+
+  <section class="install container" id="install">
+    <h2>Install in one command</h2>
+    <pre class="install-block"><code>curl -fsSL https://raw.githubusercontent.com/michelabboud/the-one-mcp/main/scripts/install.sh | bash</code></pre>
+    <p>
+      The installer downloads the right binary for your platform, sets up the
+      default config, and registers the-one-mcp with Claude Code, Gemini CLI,
+      OpenCode, and Codex automatically.
+    </p>
+    <p class="platforms">
+      <strong>Supported:</strong>
+      Linux x86_64 &middot; Linux aarch64 &middot; macOS Intel (lean)
+      &middot; macOS Apple Silicon &middot; Windows x86_64 &middot; Windows aarch64
+    </p>
+  </section>
+
+  <section class="benchmarks container" id="benchmarks">
+    <h2>Benchmarks</h2>
+    <p>
+      We ship a retrieval benchmark suite that compares four configurations
+      (dense, dense + rerank, hybrid, full pipeline) against three query sets
+      (exact, semantic, mixed) on the-one-mcp's own source tree. See the raw
+      numbers in
+      <a href="https://github.com/michelabboud/the-one-mcp/blob/main/benchmarks/results.md">benchmarks/results.md</a>.
+    </p>
+    <p>
+      The benchmark is not in CI (it requires a running Qdrant), so we publish
+      numbers from reproducible local runs. Run it yourself with
+      <code>cargo run --release --example retrieval_bench -p the-one-memory --features tree-sitter-chunker</code>.
+    </p>
+  </section>
+
+  <footer>
+    <div class="container">
+      <p>
+        the-one-mcp &middot; Apache-2.0 &middot;
+        <a href="https://github.com/michelabboud/the-one-mcp">github.com/michelabboud/the-one-mcp</a>
+      </p>
+    </div>
+  </footer>
+
+  <script>
+    // Tiny zero-dep clipboard handler. Uses the native API with graceful fallback.
+    document.querySelectorAll('button.copy').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var target = document.getElementById(btn.getAttribute('data-target'));
+        if (!target) return;
+        var text = target.textContent || '';
+        if (navigator.clipboard) {
+          navigator.clipboard.writeText(text).then(function () {
+            btn.textContent = 'Copied';
+            setTimeout(function () { btn.textContent = 'Copy'; }, 1500);
+          });
+        }
+      });
+    });
+  </script>
+</body>
+</html>

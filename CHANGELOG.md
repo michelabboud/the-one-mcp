@@ -2,6 +2,37 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.10.0] - 2026-04-06
+
+### Added
+
+- **MCP Resources API** — first-class implementation of the MCP `resources/list` and `resources/read` primitives alongside the existing `tools/*`. The `initialize` handshake now advertises the `resources` capability (subscribe=false, listChanged=false), so compliant MCP clients like Claude Code can browse and reference indexed project content as native resources.
+- **`the-one://` URI scheme** for resource addressing. Current resource types: `docs/<relative-path>` (managed markdown under `.the-one/docs/`), `project/profile` (project metadata JSON), and `catalog/enabled` (enabled tools per client). Path traversal is explicitly rejected — `the-one://docs/../../etc/passwd` returns an InvalidRequest error.
+- **`crates/the-one-mcp/src/resources.rs`** — new module with `parse_uri`, `is_safe_doc_identifier`, `list_resources`, and `read_resource` helpers. Thirteen unit + dispatch tests cover URI parsing, directory walking, path traversal rejection, and empty-project defaults.
+- **Catalog expansion (117 → 184 tools, +67)**. New per-language files: `kotlin.json` (7 tools), `ruby.json` (8), `php.json` (7), `swift.json` (5). Existing files grown: `python.json` (23 → 40), `javascript.json` (24 → 38), `cpp.json` (0 → 9). All entries schema-valid against `tools/catalog/_schema.json`.
+- **Landing page** at `docs-site/` — single-page static HTML + CSS (zero frameworks, zero build step) ready to ship via GitHub Pages. See `docs-site/README.md` for one-time Pages enablement instructions.
+
+### Changed
+
+- **`initialize` response** now includes `"resources": { "subscribe": false, "listChanged": false }` in the capabilities object alongside `"tools": {}`.
+- **`McpBroker`** gains two new methods: `resources_list(project_root, project_id)` and `resources_read(project_root, project_id, uri)` — both delegate to the new `crate::resources` module.
+
+### Tests
+
+- +13 tests: 10 for `resources` module (URI parsing, path traversal, dispatcher defaults, doc reading, catalog/profile reads), 3 for JSON-RPC dispatch (`resources/list`, missing params, path traversal rejection through the transport layer).
+- Workspace total: 283 → 296 tests. Default and lean matrices both green.
+
+### Not in this release (deferred follow-ups for Phase 3 or later)
+
+- `resources/subscribe` and `notifications/resources/list_changed` — subscribe capability is advertised as `false` in v0.10.0.
+- `catalog/enabled` currently returns an empty array; wiring it to the SQLite `enabled_tools` table is planned for a follow-up patch.
+- Full catalog target was ~200 new tools; this release ships 67 curated, schema-valid entries. The remaining Go/Java/Kotlin/Ruby/PHP/Swift depth will land in follow-up patches as the ecosystem research continues.
+- Landing page demo GIF and catalog browser widget are documented as future enhancements in `docs-site/README.md`.
+
+### Dependencies
+
+- No new crate dependencies in this release.
+
 ## [0.9.0] - 2026-04-05
 
 ### Added

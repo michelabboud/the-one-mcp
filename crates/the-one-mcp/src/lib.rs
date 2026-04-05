@@ -1,6 +1,7 @@
 pub mod adapter_core;
 pub mod api;
 pub mod broker;
+pub mod resources;
 pub mod swagger;
 pub mod transport;
 

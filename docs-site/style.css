@@ -1,0 +1,257 @@
+/*
+ * the-one-mcp landing page stylesheet.
+ *
+ * Zero JavaScript frameworks, zero build step. Hand-rolled CSS with
+ * variables, CSS grid for the feature tiles, and prefers-color-scheme for
+ * automatic dark mode.
+ */
+
+:root {
+  --bg: #0b0d11;
+  --bg-elev: #131720;
+  --text: #e6e9ef;
+  --muted: #9aa4b5;
+  --accent: #7aa2ff;
+  --accent-strong: #9bb8ff;
+  --border: #1f2530;
+  --code-bg: #0f131a;
+  --max-width: 960px;
+  --radius: 10px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #fbfcfd;
+    --bg-elev: #ffffff;
+    --text: #0b1120;
+    --muted: #4a5565;
+    --accent: #2650c7;
+    --accent-strong: #1b3ea1;
+    --border: #e2e6ec;
+    --code-bg: #f2f4f8;
+  }
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+  line-height: 1.55;
+}
+
+.container {
+  max-width: var(--max-width);
+  margin: 0 auto;
+  padding: 0 24px;
+}
+
+/* ----- Hero --------------------------------------------------------------- */
+.hero {
+  padding: 32px 0 80px;
+  border-bottom: 1px solid var(--border);
+  background:
+    radial-gradient(1100px 500px at 50% -20%, rgba(122, 162, 255, 0.14), transparent 60%),
+    var(--bg);
+}
+
+.nav {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 0 48px;
+}
+
+.brand {
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.nav-links a {
+  color: var(--muted);
+  text-decoration: none;
+  margin-left: 22px;
+}
+.nav-links a:hover { color: var(--text); }
+
+.title {
+  font-size: clamp(2rem, 5vw, 3.2rem);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  margin: 0 0 18px;
+  max-width: 720px;
+}
+
+.tagline {
+  font-size: 1.15rem;
+  color: var(--muted);
+  max-width: 640px;
+  margin: 0 0 28px;
+}
+
+.hero-actions {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 28px;
+}
+
+.btn {
+  display: inline-block;
+  padding: 10px 18px;
+  border-radius: var(--radius);
+  text-decoration: none;
+  color: var(--text);
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  font-weight: 500;
+  transition: border-color 0.15s, transform 0.1s;
+}
+.btn:hover { border-color: var(--accent); }
+.btn.primary {
+  background: var(--accent);
+  color: #ffffff;
+  border-color: var(--accent);
+}
+.btn.primary:hover { background: var(--accent-strong); border-color: var(--accent-strong); }
+.btn:active { transform: translateY(1px); }
+
+.install-line {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 18px;
+  max-width: 720px;
+  overflow-x: auto;
+}
+
+.install-line code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.92rem;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+button.copy {
+  margin-left: auto;
+  padding: 6px 12px;
+  background: var(--bg-elev);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.85rem;
+}
+button.copy:hover { border-color: var(--accent); }
+
+/* ----- Features ----------------------------------------------------------- */
+.features {
+  padding: 72px 24px;
+}
+
+.features h2 {
+  font-size: 1.9rem;
+  font-weight: 700;
+  margin: 0 0 32px;
+  letter-spacing: -0.01em;
+}
+
+.feature-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 20px;
+}
+
+.feature {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 22px 22px;
+  transition: border-color 0.15s;
+}
+.feature:hover { border-color: var(--accent); }
+
+.feature h3 {
+  margin: 0 0 10px;
+  font-size: 1.05rem;
+  color: var(--accent-strong);
+}
+.feature p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.95rem;
+}
+
+/* ----- Install section ---------------------------------------------------- */
+.install {
+  padding: 72px 24px;
+  border-top: 1px solid var(--border);
+}
+
+.install h2 {
+  font-size: 1.9rem;
+  margin: 0 0 20px;
+}
+
+pre.install-block {
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 18px 22px;
+  overflow-x: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.95rem;
+  margin: 0 0 24px;
+}
+
+.platforms {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+/* ----- Benchmarks section ------------------------------------------------- */
+.benchmarks {
+  padding: 72px 24px;
+  border-top: 1px solid var(--border);
+}
+
+.benchmarks h2 { font-size: 1.9rem; margin: 0 0 20px; }
+.benchmarks code {
+  background: var(--code-bg);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.9em;
+}
+
+/* ----- Footer ------------------------------------------------------------- */
+footer {
+  padding: 36px 0;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  text-align: center;
+  font-size: 0.9rem;
+}
+footer a {
+  color: var(--accent);
+  text-decoration: none;
+}
+footer a:hover { text-decoration: underline; }
+
+/* ----- Mobile tweaks ------------------------------------------------------ */
+@media (max-width: 640px) {
+  .nav { flex-direction: column; align-items: flex-start; gap: 14px; }
+  .nav-links a { margin-left: 0; margin-right: 18px; }
+  .features, .install, .benchmarks { padding: 56px 24px; }
+  .install-line { flex-direction: column; align-items: stretch; }
+  button.copy { margin-left: 0; }
+}

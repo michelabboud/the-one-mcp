@@ -71,6 +71,8 @@ pub async fn dispatch(broker: &McpBroker, request: JsonRpcRequest) -> JsonRpcRes
         "notifications/initialized" => JsonRpcResponse::success(id, Value::Null),
         "tools/list" => handle_tools_list(id),
         "tools/call" => handle_tools_call(broker, id, request.params).await,
+        "resources/list" => handle_resources_list(broker, id, request.params).await,
+        "resources/read" => handle_resources_read(broker, id, request.params).await,
         _ => JsonRpcResponse::error(
             id,
             METHOD_NOT_FOUND,
@@ -85,7 +87,11 @@ fn handle_initialize(id: Option<Value>) -> JsonRpcResponse {
         serde_json::json!({
             "protocolVersion": "2024-11-05",
             "capabilities": {
-                "tools": {}
+                "tools": {},
+                "resources": {
+                    "subscribe": false,
+                    "listChanged": false
+                }
             },
             "serverInfo": {
                 "name": "the-one-mcp",
@@ -93,6 +99,74 @@ fn handle_initialize(id: Option<Value>) -> JsonRpcResponse {
             }
         }),
     )
+}
+
+async fn handle_resources_list(
+    broker: &McpBroker,
+    id: Option<Value>,
+    params: Option<Value>,
+) -> JsonRpcResponse {
+    let params = params.unwrap_or(Value::Object(Default::default()));
+    let project_root = params
+        .get("project_root")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let project_id = params
+        .get("project_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if project_root.is_empty() || project_id.is_empty() {
+        return JsonRpcResponse::error(
+            id,
+            INVALID_PARAMS,
+            "resources/list requires project_root and project_id".to_string(),
+        );
+    }
+
+    match broker
+        .resources_list(std::path::Path::new(project_root), project_id)
+        .await
+    {
+        Ok(resp) => JsonRpcResponse::success(id, serde_json::to_value(resp).unwrap_or(Value::Null)),
+        Err(e) => JsonRpcResponse::error(id, INTERNAL_ERROR, e.to_string()),
+    }
+}
+
+async fn handle_resources_read(
+    broker: &McpBroker,
+    id: Option<Value>,
+    params: Option<Value>,
+) -> JsonRpcResponse {
+    let params = match params {
+        Some(p) => p,
+        None => {
+            return JsonRpcResponse::error(id, INVALID_PARAMS, "missing params".to_string());
+        }
+    };
+    let project_root = params
+        .get("project_root")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let project_id = params
+        .get("project_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let uri = params.get("uri").and_then(|v| v.as_str()).unwrap_or("");
+    if project_root.is_empty() || project_id.is_empty() || uri.is_empty() {
+        return JsonRpcResponse::error(
+            id,
+            INVALID_PARAMS,
+            "resources/read requires project_root, project_id, and uri".to_string(),
+        );
+    }
+
+    match broker
+        .resources_read(std::path::Path::new(project_root), project_id, uri)
+        .await
+    {
+        Ok(resp) => JsonRpcResponse::success(id, serde_json::to_value(resp).unwrap_or(Value::Null)),
+        Err(e) => JsonRpcResponse::error(id, INTERNAL_ERROR, e.to_string()),
+    }
 }
 
 fn handle_tools_list(id: Option<Value>) -> JsonRpcResponse {
@@ -736,6 +810,76 @@ mod tests {
         assert!(response.error.is_none());
         let result = response.result.unwrap();
         assert_eq!(result["serverInfo"]["name"], "the-one-mcp");
+        // v0.10.0 — initialize must advertise the resources capability
+        assert!(
+            result["capabilities"]["resources"].is_object(),
+            "initialize should advertise resources capability"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_resources_list() {
+        let broker = McpBroker::new();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().to_path_buf();
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(Value::Number(10.into())),
+            method: "resources/list".to_string(),
+            params: Some(serde_json::json!({
+                "project_root": root.display().to_string(),
+                "project_id": "resources-test",
+            })),
+        };
+        let response = dispatch(&broker, request).await;
+        assert!(
+            response.error.is_none(),
+            "resources/list dispatch errored: {:?}",
+            response.error
+        );
+        let result = response.result.expect("result");
+        let arr = result["resources"]
+            .as_array()
+            .expect("resources should be array");
+        // Empty project still yields at least the project/profile and
+        // catalog/enabled defaults.
+        assert!(arr.len() >= 2);
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_resources_list_missing_params() {
+        let broker = McpBroker::new();
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(Value::Number(11.into())),
+            method: "resources/list".to_string(),
+            params: None,
+        };
+        let response = dispatch(&broker, request).await;
+        assert!(response.error.is_some());
+        assert_eq!(response.error.unwrap().code, INVALID_PARAMS);
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_resources_read_rejects_path_traversal() {
+        let broker = McpBroker::new();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().to_path_buf();
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(Value::Number(12.into())),
+            method: "resources/read".to_string(),
+            params: Some(serde_json::json!({
+                "project_root": root.display().to_string(),
+                "project_id": "t",
+                "uri": "the-one://docs/../../etc/passwd",
+            })),
+        };
+        let response = dispatch(&broker, request).await;
+        assert!(
+            response.error.is_some(),
+            "path traversal should be rejected"
+        );
     }
 
     #[tokio::test]

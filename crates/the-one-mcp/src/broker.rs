@@ -2054,6 +2054,33 @@ impl McpBroker {
         Ok(serde_json::json!({ "deleted": true, "path": source_path }))
     }
 
+    // -----------------------------------------------------------------------
+    // MCP Resources API (v0.10.0)
+    // -----------------------------------------------------------------------
+
+    /// List all resources available for a project. See `crate::resources`
+    /// for the `the-one://` URI scheme and what is exposed.
+    #[instrument(skip_all)]
+    pub async fn resources_list(
+        &self,
+        project_root: &Path,
+        _project_id: &str,
+    ) -> Result<crate::resources::ResourcesListResponse, CoreError> {
+        let resources = crate::resources::list_resources(project_root)?;
+        Ok(crate::resources::ResourcesListResponse { resources })
+    }
+
+    /// Read a single resource by URI. Rejects path-traversal on `docs` URIs.
+    #[instrument(skip_all)]
+    pub async fn resources_read(
+        &self,
+        project_root: &Path,
+        _project_id: &str,
+        uri: &str,
+    ) -> Result<crate::resources::ResourcesReadResponse, CoreError> {
+        crate::resources::read_resource(project_root, uri)
+    }
+
     #[instrument(skip_all)]
     pub async fn config_update(
         &self,
