@@ -791,6 +791,100 @@ impl MemoryEngine {
         )
     }
 
+    /// Ingest or re-ingest a single markdown file.
+    ///
+    /// Removes existing chunks for that path first (by `source_path`), re-chunks,
+    /// re-embeds, and upserts. Returns the number of chunks indexed for this file.
+    pub async fn ingest_single_markdown(&mut self, path: &Path) -> Result<usize, String> {
+        if !path.exists() {
+            return Err(format!("file does not exist: {}", path.display()));
+        }
+        let ext = path.extension().and_then(|e| e.to_str());
+        if ext != Some("md") && ext != Some("markdown") {
+            return Err(format!("not a markdown file: {}", path.display()));
+        }
+
+        let content =
+            std::fs::read_to_string(path).map_err(|e| format!("read failed: {e}"))?;
+        let path_str = path.display().to_string();
+
+        // Remove existing chunks for this path (in-memory index + Qdrant)
+        self.remove_by_path(path).await?;
+
+        // Chunk and add
+        let new_chunks = crate::chunker::chunk_markdown(&path_str, &content, self.max_chunk_tokens);
+        let count = new_chunks.len();
+
+        for chunk in &new_chunks {
+            self.by_id.insert(chunk.id.clone(), self.chunks.len());
+            self.chunks.push(chunk.clone());
+        }
+
+        // Upsert to Qdrant if available
+        if let Some(qdrant) = &self.qdrant {
+            let dims = self.embedding_provider.dimensions();
+            qdrant.ensure_collection(dims).await.map_err(|e| e.to_string())?;
+
+            let texts: Vec<String> = new_chunks.iter().map(|c| c.content.clone()).collect();
+            let vectors = self.embedding_provider.embed_batch(&texts).await?;
+
+            let points: Vec<QdrantPoint> = new_chunks
+                .iter()
+                .zip(vectors.into_iter())
+                .map(|(chunk, vector)| QdrantPoint {
+                    id: chunk.id.clone(),
+                    vector,
+                    payload: QdrantPayload {
+                        chunk_id: chunk.id.clone(),
+                        source_path: chunk.source_path.clone(),
+                        heading: chunk.heading_hierarchy.last().cloned().unwrap_or_default(),
+                        chunk_index: chunk.chunk_index,
+                    },
+                })
+                .collect();
+
+            qdrant.upsert_points(points).await.map_err(|e| e.to_string())?;
+        }
+
+        Ok(count)
+    }
+
+    /// Remove all chunks for a given file path from the in-memory index and Qdrant.
+    ///
+    /// Used by the watcher when a file is deleted, or internally by
+    /// [`ingest_single_markdown`] before re-ingesting. Returns the number of
+    /// chunks removed.
+    pub async fn remove_by_path(&mut self, path: &Path) -> Result<usize, String> {
+        let path_str = path.display().to_string();
+
+        let count = self
+            .chunks
+            .iter()
+            .filter(|c| c.source_path == path_str)
+            .count();
+
+        if count == 0 {
+            return Ok(0);
+        }
+
+        // Remove from in-memory vectors
+        self.chunks.retain(|c| c.source_path != path_str);
+        self.by_id.clear();
+        for (idx, chunk) in self.chunks.iter().enumerate() {
+            self.by_id.insert(chunk.id.clone(), idx);
+        }
+
+        // Remove from Qdrant if available
+        if let Some(qdrant) = &self.qdrant {
+            qdrant
+                .delete_by_source_path(&path_str)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+
+        Ok(count)
+    }
+
     /// Get a section of a document by heading.
     pub fn docs_get_section(&self, path: &str, heading: &str, max_bytes: usize) -> Option<String> {
         let matching: Vec<&ChunkMeta> = self
@@ -957,6 +1051,83 @@ mod tests {
         let chunk = engine.fetch_chunk(&chunk_id).expect("chunk should exist");
         assert!(chunk.content.contains("Intro"));
         assert!(chunk.content.contains("Some content"));
+    }
+
+    #[tokio::test]
+    async fn test_ingest_single_markdown_adds_chunks() {
+        let _ = &*PROVIDER;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let md_path = temp.path().join("doc.md");
+        std::fs::write(
+            &md_path,
+            "# Title\nContent here.\n## Section\nMore content.",
+        )
+        .expect("write");
+
+        let mut engine = make_local_engine();
+        let count = engine
+            .ingest_single_markdown(&md_path)
+            .await
+            .expect("ingest");
+        assert!(count >= 1);
+        assert!(!engine.docs_list().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_ingest_single_markdown_replaces_existing() {
+        let _ = &*PROVIDER;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let md_path = temp.path().join("doc.md");
+
+        std::fs::write(&md_path, "# First version\nOld content").expect("write");
+        let mut engine = make_local_engine();
+        engine
+            .ingest_single_markdown(&md_path)
+            .await
+            .expect("first ingest");
+        let initial_count = engine.chunks.len();
+
+        // Modify the file
+        std::fs::write(&md_path, "# Second version\nCompletely new content").expect("write");
+        engine
+            .ingest_single_markdown(&md_path)
+            .await
+            .expect("second ingest");
+
+        // Old content should be gone, new content present
+        let all_content: String = engine.chunks.iter().map(|c| c.content.as_str()).collect();
+        assert!(
+            !all_content.contains("Old content"),
+            "old content should be replaced"
+        );
+        assert!(
+            all_content.contains("Completely new content")
+                || all_content.contains("Second version")
+        );
+        let _ = initial_count;
+    }
+
+    #[tokio::test]
+    async fn test_remove_by_path_removes_all_chunks() {
+        let _ = &*PROVIDER;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let md_path = temp.path().join("doc.md");
+        std::fs::write(&md_path, "# Title\nSome content").expect("write");
+
+        let mut engine = make_local_engine();
+        engine
+            .ingest_single_markdown(&md_path)
+            .await
+            .expect("ingest");
+        assert!(!engine.chunks.is_empty());
+
+        let removed = engine.remove_by_path(&md_path).await.expect("remove");
+        assert!(removed >= 1);
+        let path_str = md_path.display().to_string();
+        assert!(
+            engine.chunks.iter().all(|c| c.source_path != path_str),
+            "all chunks for path should be removed"
+        );
     }
 
     #[tokio::test]
