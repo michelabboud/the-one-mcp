@@ -286,7 +286,9 @@ mod local {
             let texts = texts.to_vec();
             let model = Arc::clone(&self.model);
             tokio::task::spawn_blocking(move || {
-                let mut model = model.lock().map_err(|e| format!("model lock poisoned: {e}"))?;
+                let mut model = model
+                    .lock()
+                    .map_err(|e| format!("model lock poisoned: {e}"))?;
                 model
                     .embed(texts, None)
                     .map_err(|e| format!("fastembed embed failed: {e}"))
