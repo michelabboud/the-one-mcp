@@ -21,6 +21,11 @@ const DEFAULT_EMBEDDING_DIMENSIONS: usize = 1024;
 const DEFAULT_IMAGE_EMBEDDING_MODEL: &str = "nomic-embed-vision-v1.5";
 const DEFAULT_IMAGE_OCR_LANGUAGE: &str = "eng";
 const DEFAULT_IMAGE_THUMBNAIL_MAX_PX: u32 = 256;
+// Hybrid search defaults
+const DEFAULT_HYBRID_SEARCH_ENABLED: bool = false;
+const DEFAULT_HYBRID_DENSE_WEIGHT: f32 = 0.7;
+const DEFAULT_HYBRID_SPARSE_WEIGHT: f32 = 0.3;
+const DEFAULT_SPARSE_MODEL: &str = "bm25";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NanoProviderKind {
@@ -105,6 +110,10 @@ pub struct RuntimeOverrides {
     pub image_ocr_language: Option<String>,
     pub image_thumbnail_enabled: Option<bool>,
     pub image_thumbnail_max_px: Option<u32>,
+    pub hybrid_search_enabled: Option<bool>,
+    pub hybrid_dense_weight: Option<f32>,
+    pub hybrid_sparse_weight: Option<f32>,
+    pub sparse_model: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -135,6 +144,10 @@ pub struct ProjectConfigUpdate {
     pub image_ocr_language: Option<String>,
     pub image_thumbnail_enabled: Option<bool>,
     pub image_thumbnail_max_px: Option<u32>,
+    pub hybrid_search_enabled: Option<bool>,
+    pub hybrid_dense_weight: Option<f32>,
+    pub hybrid_sparse_weight: Option<f32>,
+    pub sparse_model: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -176,6 +189,14 @@ pub struct AppConfig {
     pub image_thumbnail_enabled: bool,
     /// Maximum thumbnail dimension in pixels (width or height).
     pub image_thumbnail_max_px: u32,
+    /// Enable hybrid (dense + sparse) vector search.
+    pub hybrid_search_enabled: bool,
+    /// Dense cosine score weight in hybrid fusion (0.0-1.0).
+    pub hybrid_dense_weight: f32,
+    /// Normalized sparse score weight in hybrid fusion (0.0-1.0).
+    pub hybrid_sparse_weight: f32,
+    /// Sparse embedding model name (e.g. "bm25" maps to SPLADE++).
+    pub sparse_model: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -206,6 +227,10 @@ struct FileConfig {
     image_ocr_language: Option<String>,
     image_thumbnail_enabled: Option<bool>,
     image_thumbnail_max_px: Option<u32>,
+    hybrid_search_enabled: Option<bool>,
+    hybrid_dense_weight: Option<f32>,
+    hybrid_sparse_weight: Option<f32>,
+    sparse_model: Option<String>,
 }
 
 impl AppConfig {
@@ -241,6 +266,10 @@ impl AppConfig {
             image_ocr_language: Some(DEFAULT_IMAGE_OCR_LANGUAGE.to_string()),
             image_thumbnail_enabled: Some(true),
             image_thumbnail_max_px: Some(DEFAULT_IMAGE_THUMBNAIL_MAX_PX),
+            hybrid_search_enabled: Some(DEFAULT_HYBRID_SEARCH_ENABLED),
+            hybrid_dense_weight: Some(DEFAULT_HYBRID_DENSE_WEIGHT),
+            hybrid_sparse_weight: Some(DEFAULT_HYBRID_SPARSE_WEIGHT),
+            sparse_model: Some(DEFAULT_SPARSE_MODEL.to_string()),
         };
 
         apply_file_layer(&global_state_dir.join("config.json"), &mut merged)?;
@@ -309,6 +338,18 @@ impl AppConfig {
             image_thumbnail_max_px: merged
                 .image_thumbnail_max_px
                 .unwrap_or(DEFAULT_IMAGE_THUMBNAIL_MAX_PX),
+            hybrid_search_enabled: merged
+                .hybrid_search_enabled
+                .unwrap_or(DEFAULT_HYBRID_SEARCH_ENABLED),
+            hybrid_dense_weight: merged
+                .hybrid_dense_weight
+                .unwrap_or(DEFAULT_HYBRID_DENSE_WEIGHT),
+            hybrid_sparse_weight: merged
+                .hybrid_sparse_weight
+                .unwrap_or(DEFAULT_HYBRID_SPARSE_WEIGHT),
+            sparse_model: merged
+                .sparse_model
+                .unwrap_or_else(|| DEFAULT_SPARSE_MODEL.to_string()),
         })
     }
 }
@@ -406,6 +447,18 @@ pub fn update_project_config(
     }
     if update.image_thumbnail_max_px.is_some() {
         merged.image_thumbnail_max_px = update.image_thumbnail_max_px;
+    }
+    if update.hybrid_search_enabled.is_some() {
+        merged.hybrid_search_enabled = update.hybrid_search_enabled;
+    }
+    if update.hybrid_dense_weight.is_some() {
+        merged.hybrid_dense_weight = update.hybrid_dense_weight;
+    }
+    if update.hybrid_sparse_weight.is_some() {
+        merged.hybrid_sparse_weight = update.hybrid_sparse_weight;
+    }
+    if update.sparse_model.is_some() {
+        merged.sparse_model = update.sparse_model;
     }
 
     let tmp_path = project_state_dir.join("config.json.tmp");
@@ -552,6 +605,22 @@ fn apply_env_layer(merged: &mut FileConfig) {
         if let Ok(n) = v.parse::<u32>() {
             merged.image_thumbnail_max_px = Some(n);
         }
+    }
+    if let Ok(v) = env::var("THE_ONE_HYBRID_SEARCH_ENABLED") {
+        merged.hybrid_search_enabled = parse_bool_env(&v);
+    }
+    if let Ok(v) = env::var("THE_ONE_HYBRID_DENSE_WEIGHT") {
+        if let Ok(n) = v.parse::<f32>() {
+            merged.hybrid_dense_weight = Some(n);
+        }
+    }
+    if let Ok(v) = env::var("THE_ONE_HYBRID_SPARSE_WEIGHT") {
+        if let Ok(n) = v.parse::<f32>() {
+            merged.hybrid_sparse_weight = Some(n);
+        }
+    }
+    if let Ok(v) = env::var("THE_ONE_SPARSE_MODEL") {
+        merged.sparse_model = Some(v);
     }
     // Limit env vars
     apply_limit_env_vars(merged);
@@ -742,6 +811,18 @@ fn apply_runtime_layer(runtime: RuntimeOverrides, merged: &mut FileConfig) {
     if runtime.image_thumbnail_max_px.is_some() {
         merged.image_thumbnail_max_px = runtime.image_thumbnail_max_px;
     }
+    if runtime.hybrid_search_enabled.is_some() {
+        merged.hybrid_search_enabled = runtime.hybrid_search_enabled;
+    }
+    if runtime.hybrid_dense_weight.is_some() {
+        merged.hybrid_dense_weight = runtime.hybrid_dense_weight;
+    }
+    if runtime.hybrid_sparse_weight.is_some() {
+        merged.hybrid_sparse_weight = runtime.hybrid_sparse_weight;
+    }
+    if runtime.sparse_model.is_some() {
+        merged.sparse_model = runtime.sparse_model;
+    }
 }
 
 fn merge(base: &mut FileConfig, overlay: FileConfig) {
@@ -822,6 +903,18 @@ fn merge(base: &mut FileConfig, overlay: FileConfig) {
     }
     if overlay.image_thumbnail_max_px.is_some() {
         base.image_thumbnail_max_px = overlay.image_thumbnail_max_px;
+    }
+    if overlay.hybrid_search_enabled.is_some() {
+        base.hybrid_search_enabled = overlay.hybrid_search_enabled;
+    }
+    if overlay.hybrid_dense_weight.is_some() {
+        base.hybrid_dense_weight = overlay.hybrid_dense_weight;
+    }
+    if overlay.hybrid_sparse_weight.is_some() {
+        base.hybrid_sparse_weight = overlay.hybrid_sparse_weight;
+    }
+    if overlay.sparse_model.is_some() {
+        base.sparse_model = overlay.sparse_model;
     }
 }
 
@@ -1069,6 +1162,56 @@ mod tests {
                     config.limits.max_tool_suggestions,
                     defaults.max_tool_suggestions
                 );
+            },
+        );
+    }
+
+    #[test]
+    fn test_hybrid_search_config_defaults_and_env_override() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let project_root = temp.path().join("repo");
+        let global_state_dir = temp.path().join("global");
+
+        fs::create_dir_all(&project_root).expect("project root should exist");
+        fs::create_dir_all(&global_state_dir).expect("global state dir should exist");
+
+        let global_home = global_state_dir.display().to_string();
+
+        // Verify defaults
+        temp_env::with_vars(
+            [
+                ("THE_ONE_HOME", Some(global_home.as_str())),
+                ("THE_ONE_HYBRID_SEARCH_ENABLED", None),
+                ("THE_ONE_HYBRID_DENSE_WEIGHT", None),
+                ("THE_ONE_HYBRID_SPARSE_WEIGHT", None),
+                ("THE_ONE_SPARSE_MODEL", None),
+            ],
+            || {
+                let config = AppConfig::load(&project_root, RuntimeOverrides::default())
+                    .expect("config should load");
+                assert!(!config.hybrid_search_enabled, "default should be false");
+                assert!((config.hybrid_dense_weight - 0.7).abs() < 1e-6);
+                assert!((config.hybrid_sparse_weight - 0.3).abs() < 1e-6);
+                assert_eq!(config.sparse_model, "bm25");
+            },
+        );
+
+        // Verify env var override
+        temp_env::with_vars(
+            [
+                ("THE_ONE_HOME", Some(global_home.as_str())),
+                ("THE_ONE_HYBRID_SEARCH_ENABLED", Some("true")),
+                ("THE_ONE_HYBRID_DENSE_WEIGHT", Some("0.6")),
+                ("THE_ONE_HYBRID_SPARSE_WEIGHT", Some("0.4")),
+                ("THE_ONE_SPARSE_MODEL", Some("splade")),
+            ],
+            || {
+                let config = AppConfig::load(&project_root, RuntimeOverrides::default())
+                    .expect("config should load");
+                assert!(config.hybrid_search_enabled, "env var should enable hybrid");
+                assert!((config.hybrid_dense_weight - 0.6).abs() < 1e-5);
+                assert!((config.hybrid_sparse_weight - 0.4).abs() < 1e-5);
+                assert_eq!(config.sparse_model, "splade");
             },
         );
     }
