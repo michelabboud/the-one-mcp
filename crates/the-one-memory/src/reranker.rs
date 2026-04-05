@@ -30,7 +30,7 @@ pub trait Reranker: Send + Sync {
 #[cfg(feature = "local-embeddings")]
 mod local {
     use super::*;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     /// Resolve a reranker model name to a fastembed enum variant.
     pub fn resolve_reranker_model(name: &str) -> Result<fastembed::RerankerModel, String> {
@@ -49,7 +49,7 @@ mod local {
 
     /// Local cross-encoder reranker using fastembed-rs (ONNX Runtime).
     pub struct FastEmbedReranker {
-        model: Arc<fastembed::TextRerank>,
+        model: Arc<Mutex<fastembed::TextRerank>>,
         model_name: String,
     }
 
@@ -61,7 +61,7 @@ mod local {
             )
             .map_err(|e| format!("fastembed reranker init failed: {e}"))?;
             Ok(Self {
-                model: Arc::new(model),
+                model: Arc::new(Mutex::new(model)),
                 model_name: model_name.to_string(),
             })
         }
@@ -91,6 +91,8 @@ mod local {
 
             tokio::task::spawn_blocking(move || {
                 let doc_refs: Vec<&String> = docs.iter().collect();
+                let mut model =
+                    model.lock().map_err(|e| format!("model lock poisoned: {e}"))?;
                 let results = model
                     .rerank(&query, doc_refs, false, None)
                     .map_err(|e| format!("fastembed rerank failed: {e}"))?;

@@ -22,7 +22,7 @@ pub trait EmbeddingProvider: Send + Sync {
 #[cfg(feature = "local-embeddings")]
 mod local {
     use super::*;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     fn enum_from_name(fastembed_enum: &str, dims: usize) -> (fastembed::EmbeddingModel, usize) {
         let model = match fastembed_enum {
@@ -57,6 +57,13 @@ mod local {
             "MxbaiEmbedLargeV1Q" => fastembed::EmbeddingModel::MxbaiEmbedLargeV1Q,
             "GTEBaseENV15Q" => fastembed::EmbeddingModel::GTEBaseENV15Q,
             "GTELargeENV15Q" => fastembed::EmbeddingModel::GTELargeENV15Q,
+            // New models added in fastembed 5.x
+            "BGEM3" => fastembed::EmbeddingModel::BGEM3,
+            "JinaEmbeddingsV2BaseEN" => fastembed::EmbeddingModel::JinaEmbeddingsV2BaseEN,
+            "SnowflakeArcticEmbedM" => fastembed::EmbeddingModel::SnowflakeArcticEmbedM,
+            "AllMpnetBaseV2" => fastembed::EmbeddingModel::AllMpnetBaseV2,
+            "EmbeddingGemma300M" => fastembed::EmbeddingModel::EmbeddingGemma300M,
+            "SnowflakeArcticEmbedMQ" => fastembed::EmbeddingModel::SnowflakeArcticEmbedMQ,
             _ => {
                 tracing::warn!(
                     "Unknown fastembed enum '{}', falling back to BGELargeENV15",
@@ -240,7 +247,7 @@ mod local {
     /// Local embedding provider using fastembed-rs (ONNX Runtime).
     /// Runs offline, no API calls, no cost.
     pub struct FastEmbedProvider {
-        model: Arc<fastembed::TextEmbedding>,
+        model: Arc<Mutex<fastembed::TextEmbedding>>,
         dims: usize,
         model_name: String,
     }
@@ -255,7 +262,7 @@ mod local {
             .map_err(|e| format!("fastembed init failed: {e}"))?;
 
             Ok(Self {
-                model: Arc::new(model),
+                model: Arc::new(Mutex::new(model)),
                 dims,
                 model_name: model_name.to_string(),
             })
@@ -279,6 +286,7 @@ mod local {
             let texts = texts.to_vec();
             let model = Arc::clone(&self.model);
             tokio::task::spawn_blocking(move || {
+                let mut model = model.lock().map_err(|e| format!("model lock poisoned: {e}"))?;
                 model
                     .embed(texts, None)
                     .map_err(|e| format!("fastembed embed failed: {e}"))
