@@ -43,6 +43,20 @@ mod local {
             "AllMiniLML6V2Q" => fastembed::EmbeddingModel::AllMiniLML6V2Q,
             "BGEBaseENV15Q" => fastembed::EmbeddingModel::BGEBaseENV15Q,
             "BGELargeENV15Q" => fastembed::EmbeddingModel::BGELargeENV15Q,
+            // New models added in fastembed 4.x
+            "ModernBertEmbedLarge" => fastembed::EmbeddingModel::ModernBertEmbedLarge,
+            "JinaEmbeddingsV2BaseCode" => fastembed::EmbeddingModel::JinaEmbeddingsV2BaseCode,
+            "BGESmallZHV15" => fastembed::EmbeddingModel::BGESmallZHV15,
+            "BGELargeZHV15" => fastembed::EmbeddingModel::BGELargeZHV15,
+            "ParaphraseMLMpnetBaseV2" => fastembed::EmbeddingModel::ParaphraseMLMpnetBaseV2,
+            // Quantized variants
+            "BGESmallENV15Q" => fastembed::EmbeddingModel::BGESmallENV15Q,
+            "AllMiniLML12V2Q" => fastembed::EmbeddingModel::AllMiniLML12V2Q,
+            "NomicEmbedTextV15Q" => fastembed::EmbeddingModel::NomicEmbedTextV15Q,
+            "ParaphraseMLMiniLML12V2Q" => fastembed::EmbeddingModel::ParaphraseMLMiniLML12V2Q,
+            "MxbaiEmbedLargeV1Q" => fastembed::EmbeddingModel::MxbaiEmbedLargeV1Q,
+            "GTEBaseENV15Q" => fastembed::EmbeddingModel::GTEBaseENV15Q,
+            "GTELargeENV15Q" => fastembed::EmbeddingModel::GTELargeENV15Q,
             _ => {
                 tracing::warn!(
                     "Unknown fastembed enum '{}', falling back to BGELargeENV15",

@@ -178,6 +178,128 @@ fastembed_enum = "GTELargeENV15"
 default = false
 installer_visible = false
 
+# ── New models (fastembed-supported, newly added) ─────────────────────
+
+[models.bge-m3]
+name = "BGE-M3"
+tier = "multilingual"
+dims = 1024
+size_mb = 220
+latency_vs_fast = "~5x slower"
+multilingual = true
+description = "Top multilingual model. Supports 100+ languages."
+fastembed_enum = "BGEM3"
+default = false
+installer_visible = false
+
+[models.modernbert-embed-large]
+name = "ModernBERT-embed-large"
+tier = "quality"
+dims = 1024
+size_mb = 150
+latency_vs_fast = "~4x slower"
+multilingual = false
+description = "ModernBERT architecture. Strong English quality."
+fastembed_enum = "ModernBertEmbedLarge"
+default = false
+installer_visible = false
+
+[models.jina-embeddings-v2-base-code]
+name = "jina-embeddings-v2-base-code"
+tier = "balanced"
+dims = 768
+size_mb = 55
+latency_vs_fast = "~2x slower"
+multilingual = false
+description = "Code-specific embeddings. Great for programming projects."
+fastembed_enum = "JinaEmbeddingsV2BaseCode"
+default = false
+installer_visible = false
+
+[models.jina-embeddings-v2-base-en]
+name = "jina-embeddings-v2-base-en"
+tier = "balanced"
+dims = 768
+size_mb = 55
+latency_vs_fast = "~2x slower"
+multilingual = false
+description = "Jina AI English embeddings. 8192 token context."
+fastembed_enum = "JinaEmbeddingsV2BaseEN"
+default = false
+installer_visible = false
+
+[models.snowflake-arctic-embed-m]
+name = "snowflake-arctic-embed-m"
+tier = "balanced"
+dims = 768
+size_mb = 60
+latency_vs_fast = "~2.5x slower"
+multilingual = false
+description = "Snowflake Arctic medium. Strong mid-range retrieval."
+fastembed_enum = "SnowflakeArcticEmbedM"
+default = false
+installer_visible = false
+
+[models.all-mpnet-base-v2]
+name = "all-mpnet-base-v2"
+tier = "balanced"
+dims = 768
+size_mb = 60
+latency_vs_fast = "~2x slower"
+multilingual = false
+description = "MPNet-based. Widely used 768d baseline."
+fastembed_enum = "AllMpnetBaseV2"
+default = false
+installer_visible = false
+
+[models.bge-small-zh-v1_5]
+name = "BGE-small-zh-v1.5"
+tier = "multilingual"
+dims = 512
+size_mb = 24
+latency_vs_fast = "~1x"
+multilingual = true
+description = "Chinese-optimized small model."
+fastembed_enum = "BGESmallZHV15"
+default = false
+installer_visible = false
+
+[models.bge-large-zh-v1_5]
+name = "BGE-large-zh-v1.5"
+tier = "multilingual"
+dims = 1024
+size_mb = 130
+latency_vs_fast = "~4x slower"
+multilingual = true
+description = "Chinese-optimized large model."
+fastembed_enum = "BGELargeZHV15"
+default = false
+installer_visible = false
+
+[models.embedding-gemma-300m]
+name = "embeddinggemma-300m"
+tier = "quality"
+dims = 1536
+size_mb = 600
+latency_vs_fast = "~8x slower"
+multilingual = true
+description = "Google Gemma. Highest dimensionality, large download."
+fastembed_enum = "EmbeddingGemma300M"
+default = false
+installer_visible = false
+
+[models.paraphrase-ml-mpnet-base-v2]
+name = "paraphrase-ml-mpnet-base-v2"
+tier = "multilingual"
+dims = 768
+size_mb = 60
+latency_vs_fast = "~2x slower"
+multilingual = true
+description = "Paraphrase-tuned multilingual MPNet."
+fastembed_enum = "ParaphraseMLMpnetBaseV2"
+default = false
+installer_visible = false
+
 # ── Quantized variants ──────────────────────────────────────────────────
 
 [models.all-minilm-l6-v2-q]
@@ -213,5 +335,101 @@ latency_vs_fast = "~2.5x slower"
 multilingual = false
 description = "Quantized quality model. Smaller download."
 fastembed_enum = "BGELargeENV15Q"
+default = false
+installer_visible = false
+
+[models.bge-small-en-v1_5-q]
+name = "BGE-small-en-v1.5-Q"
+tier = "fast"
+dims = 384
+size_mb = 8
+latency_vs_fast = "fastest"
+multilingual = false
+description = "Quantized BGE small."
+fastembed_enum = "BGESmallENV15Q"
+default = false
+installer_visible = false
+
+[models.all-minilm-l12-v2-q]
+name = "all-MiniLM-L12-v2-Q"
+tier = "fast"
+dims = 384
+size_mb = 10
+latency_vs_fast = "~1x"
+multilingual = false
+description = "Quantized MiniLM L12."
+fastembed_enum = "AllMiniLML12V2Q"
+default = false
+installer_visible = false
+
+[models.nomic-embed-text-v1_5-q]
+name = "nomic-embed-text-v1.5-Q"
+tier = "balanced"
+dims = 768
+size_mb = 18
+latency_vs_fast = "~1.5x slower"
+multilingual = false
+description = "Quantized Nomic v1.5."
+fastembed_enum = "NomicEmbedTextV15Q"
+default = false
+installer_visible = false
+
+[models.paraphrase-ml-minilm-l12-v2-q]
+name = "paraphrase-ml-minilm-l12-v2-Q"
+tier = "multilingual"
+dims = 384
+size_mb = 12
+latency_vs_fast = "~1x"
+multilingual = true
+description = "Quantized paraphrase multilingual."
+fastembed_enum = "ParaphraseMLMiniLML12V2Q"
+default = false
+installer_visible = false
+
+[models.mxbai-embed-large-v1-q]
+name = "mxbai-embed-large-v1-Q"
+tier = "quality"
+dims = 1024
+size_mb = 40
+latency_vs_fast = "~2.5x slower"
+multilingual = false
+description = "Quantized Mixedbread large."
+fastembed_enum = "MxbaiEmbedLargeV1Q"
+default = false
+installer_visible = false
+
+[models.gte-base-en-v1_5-q]
+name = "gte-base-en-v1.5-Q"
+tier = "balanced"
+dims = 768
+size_mb = 15
+latency_vs_fast = "~1.5x slower"
+multilingual = false
+description = "Quantized GTE base."
+fastembed_enum = "GTEBaseENV15Q"
+default = false
+installer_visible = false
+
+[models.gte-large-en-v1_5-q]
+name = "gte-large-en-v1.5-Q"
+tier = "quality"
+dims = 1024
+size_mb = 40
+latency_vs_fast = "~2.5x slower"
+multilingual = false
+description = "Quantized GTE large."
+fastembed_enum = "GTELargeENV15Q"
+default = false
+installer_visible = false
+
+[models.snowflake-arctic-embed-m-q]
+name = "snowflake-arctic-embed-m-Q"
+tier = "balanced"
+dims = 768
+size_mb = 18
+latency_vs_fast = "~1.5x slower"
+multilingual = false
+description = "Quantized Snowflake Arctic medium."
+fastembed_enum = "SnowflakeArcticEmbedMQ"
 default = false
 installer_visible = false
