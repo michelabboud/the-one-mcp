@@ -17,8 +17,13 @@ use std::path::Path;
 use crate::chunker::{chunk_markdown, ChunkMeta};
 use crate::embeddings::EmbeddingProvider;
 use crate::graph::KnowledgeGraph;
-use crate::qdrant::{AsyncQdrantBackend, QdrantOptions, QdrantPayload, QdrantPoint};
+use crate::qdrant::{
+    AsyncQdrantBackend, HybridPoint, QdrantOptions, QdrantPayload, QdrantPoint,
+    QdrantSparseVector,
+};
 use crate::reranker::Reranker;
+#[cfg(feature = "local-embeddings")]
+use crate::sparse_embeddings::SparseEmbeddingProvider;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -93,6 +98,15 @@ pub struct MemoryEngine {
     reranker: Option<Box<dyn Reranker>>,
     /// Knowledge graph for entity-relation enhanced retrieval.
     graph: KnowledgeGraph,
+    /// Optional sparse embedding provider for BM25-style hybrid search.
+    #[cfg(feature = "local-embeddings")]
+    sparse_provider: Option<Box<dyn SparseEmbeddingProvider>>,
+    /// Whether to use hybrid (dense + sparse) vector search.
+    hybrid_search_enabled: bool,
+    /// Weight for the dense cosine score in hybrid fusion (0.0-1.0).
+    hybrid_dense_weight: f32,
+    /// Weight for the normalized sparse score in hybrid fusion (0.0-1.0).
+    hybrid_sparse_weight: f32,
 }
 
 impl MemoryEngine {
@@ -109,6 +123,11 @@ impl MemoryEngine {
             max_chunk_tokens,
             reranker: None,
             graph: KnowledgeGraph::new(),
+            #[cfg(feature = "local-embeddings")]
+            sparse_provider: None,
+            hybrid_search_enabled: false,
+            hybrid_dense_weight: 0.7,
+            hybrid_sparse_weight: 0.3,
         })
     }
 
@@ -132,11 +151,16 @@ impl MemoryEngine {
             max_chunk_tokens,
             reranker: None,
             graph: KnowledgeGraph::new(),
+            #[cfg(feature = "local-embeddings")]
+            sparse_provider: None,
+            hybrid_search_enabled: false,
+            hybrid_dense_weight: 0.7,
+            hybrid_sparse_weight: 0.3,
         })
     }
 
     /// Create with API embeddings + Qdrant HTTP backend.
-    /// Always available — does not require local ONNX runtime.
+    /// Always available -- does not require local ONNX runtime.
     pub fn new_api(config: ApiEngineConfig<'_>) -> Result<Self, String> {
         let provider = crate::embeddings::ApiEmbeddingProvider::new(
             config.embedding_base_url,
@@ -155,6 +179,11 @@ impl MemoryEngine {
             max_chunk_tokens,
             reranker: None,
             graph: KnowledgeGraph::new(),
+            #[cfg(feature = "local-embeddings")]
+            sparse_provider: None,
+            hybrid_search_enabled: false,
+            hybrid_dense_weight: 0.7,
+            hybrid_sparse_weight: 0.3,
         })
     }
 
@@ -162,6 +191,26 @@ impl MemoryEngine {
     /// are re-scored using the cross-encoder before being returned.
     pub fn set_reranker(&mut self, reranker: Box<dyn Reranker>) {
         self.reranker = Some(reranker);
+    }
+
+    /// Attach a sparse embedding provider and enable hybrid (dense + sparse) search.
+    ///
+    /// When set, `search_vector` will issue parallel dense and sparse Qdrant queries
+    /// and fuse results using linear combination:
+    /// `final = dense_weight * dense_score + sparse_weight * bm25_normalize(sparse_score)`
+    ///
+    /// Ingest also switches to `upsert_hybrid_points` so both vector types are stored.
+    #[cfg(feature = "local-embeddings")]
+    pub fn set_sparse_provider(
+        &mut self,
+        provider: Box<dyn SparseEmbeddingProvider>,
+        dense_weight: f32,
+        sparse_weight: f32,
+    ) {
+        self.sparse_provider = Some(provider);
+        self.hybrid_search_enabled = true;
+        self.hybrid_dense_weight = dense_weight;
+        self.hybrid_sparse_weight = sparse_weight;
     }
 
     /// Get a mutable reference to the knowledge graph.
@@ -176,6 +225,9 @@ impl MemoryEngine {
 
     /// Ingest all `.md` files from a directory tree.
     /// Returns the number of chunks indexed.
+    ///
+    /// When a sparse provider is set, switches to hybrid collection setup and
+    /// upserts both dense and sparse vectors for each chunk.
     pub async fn ingest_markdown_tree(
         &mut self,
         docs_root: &Path,
@@ -224,10 +276,24 @@ impl MemoryEngine {
         // If qdrant is available, ensure collection + embed + upsert
         if let Some(qdrant) = &self.qdrant {
             let dims = self.embedding_provider.dimensions();
-            qdrant
-                .ensure_collection(dims)
-                .await
-                .map_err(std::io::Error::other)?;
+
+            // Choose dense-only or hybrid collection setup
+            #[cfg(feature = "local-embeddings")]
+            let use_hybrid = self.hybrid_search_enabled && self.sparse_provider.is_some();
+            #[cfg(not(feature = "local-embeddings"))]
+            let use_hybrid = false;
+
+            if use_hybrid {
+                qdrant
+                    .ensure_hybrid_collection(dims)
+                    .await
+                    .map_err(std::io::Error::other)?;
+            } else {
+                qdrant
+                    .ensure_collection(dims)
+                    .await
+                    .map_err(std::io::Error::other)?;
+            }
 
             // Embed in batches of 64
             let batch_size = 64;
@@ -244,6 +310,47 @@ impl MemoryEngine {
                     .await
                     .map_err(std::io::Error::other)?;
 
+                // Hybrid upsert when sparse provider is active
+                #[cfg(feature = "local-embeddings")]
+                if use_hybrid {
+                    if let Some(sparse_prov) = &self.sparse_provider {
+                        let sparse_vecs = sparse_prov
+                            .embed_batch(&texts)
+                            .map_err(std::io::Error::other)?;
+
+                        let hybrid_points: Vec<HybridPoint> = self.chunks[batch_start..batch_end]
+                            .iter()
+                            .zip(vectors.into_iter())
+                            .zip(sparse_vecs.into_iter())
+                            .map(|((chunk, dense_vec), sv)| HybridPoint {
+                                id: chunk.id.clone(),
+                                dense: dense_vec,
+                                sparse: QdrantSparseVector {
+                                    indices: sv.indices,
+                                    values: sv.values,
+                                },
+                                payload: QdrantPayload {
+                                    chunk_id: chunk.id.clone(),
+                                    source_path: chunk.source_path.clone(),
+                                    heading: chunk
+                                        .heading_hierarchy
+                                        .last()
+                                        .cloned()
+                                        .unwrap_or_default(),
+                                    chunk_index: chunk.chunk_index,
+                                },
+                            })
+                            .collect();
+
+                        qdrant
+                            .upsert_hybrid_points(hybrid_points)
+                            .await
+                            .map_err(std::io::Error::other)?;
+                        continue;
+                    }
+                }
+
+                // Dense-only upsert (default path)
                 let points: Vec<QdrantPoint> = self.chunks[batch_start..batch_end]
                     .iter()
                     .zip(vectors.into_iter())
@@ -273,7 +380,7 @@ impl MemoryEngine {
     ///
     /// Retrieval modes (inspired by LightRAG):
     /// - **Naive**: Pure vector similarity search (original behavior).
-    /// - **Local**: Entity-focused graph search → fetch associated chunks.
+    /// - **Local**: Entity-focused graph search -> fetch associated chunks.
     /// - **Global**: Relationship-focused graph traversal.
     /// - **Hybrid**: Combines vector search + graph search, deduplicates,
     ///   and optionally reranks using a cross-encoder.
@@ -281,11 +388,15 @@ impl MemoryEngine {
         match request.mode {
             RetrievalMode::Naive => self.search_vector(request).await,
             RetrievalMode::Local | RetrievalMode::Global => self.search_graph(request),
-            RetrievalMode::Hybrid => self.search_hybrid(request).await,
+            RetrievalMode::Hybrid => self.search_hybrid_mode(request).await,
         }
     }
 
     /// Pure vector similarity search via Qdrant (or keyword fallback).
+    ///
+    /// When `hybrid_search_enabled` is true and a sparse provider is set, this method
+    /// issues two parallel Qdrant queries (dense + sparse) and fuses results:
+    /// `final = dense_weight * dense_score + sparse_weight * bm25_normalize(sparse_score)`
     async fn search_vector(&self, request: &MemorySearchRequest) -> Vec<MemorySearchResult> {
         // Over-fetch when reranker is available so reranking has more candidates
         let fetch_k = if self.reranker.is_some() {
@@ -294,6 +405,90 @@ impl MemoryEngine {
             request.top_k
         };
 
+        // Hybrid path (dense + sparse, linear fusion)
+        #[cfg(feature = "local-embeddings")]
+        if self.hybrid_search_enabled {
+            if let (Some(qdrant), Some(sparse_prov)) = (&self.qdrant, &self.sparse_provider) {
+                let dense_vec = match self.embedding_provider.embed_single(&request.query).await {
+                    Ok(v) => v,
+                    Err(_) => return Vec::new(),
+                };
+
+                let sparse_vec = match sparse_prov.embed_single(&request.query) {
+                    Ok(sv) => sv,
+                    Err(e) => {
+                        tracing::warn!("sparse embed failed, falling back to dense-only: {e}");
+                        return self.search_vector_dense_only(request, fetch_k).await;
+                    }
+                };
+
+                let qdrant_sparse = QdrantSparseVector {
+                    indices: sparse_vec.indices,
+                    values: sparse_vec.values,
+                };
+
+                let (dense_results, sparse_results) = match qdrant
+                    .search_hybrid(dense_vec, qdrant_sparse, fetch_k, request.score_threshold)
+                    .await
+                {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        tracing::warn!("hybrid search failed, falling back to dense-only: {e}");
+                        return self.search_vector_dense_only(request, fetch_k).await;
+                    }
+                };
+
+                // Fuse: linear combination with BM25 normalization on sparse score
+                let mut fused: HashMap<String, f32> = HashMap::new();
+                for r in &dense_results {
+                    let entry = fused.entry(r.chunk_id.clone()).or_insert(0.0);
+                    *entry += self.hybrid_dense_weight * r.score;
+                }
+                for r in &sparse_results {
+                    let entry = fused.entry(r.chunk_id.clone()).or_insert(0.0);
+                    *entry += self.hybrid_sparse_weight * bm25_normalize(r.score);
+                }
+
+                let mut results: Vec<MemorySearchResult> = fused
+                    .into_iter()
+                    .filter_map(|(chunk_id, score)| {
+                        self.by_id
+                            .get(&chunk_id)
+                            .and_then(|&idx| self.chunks.get(idx))
+                            .map(|chunk| MemorySearchResult {
+                                chunk: chunk.clone(),
+                                score,
+                            })
+                    })
+                    .collect();
+
+                results.sort_by(|a, b| {
+                    b.score
+                        .partial_cmp(&a.score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+
+                if let Some(reranker) = &self.reranker {
+                    results = self
+                        .apply_reranking(reranker.as_ref(), &request.query, results)
+                        .await;
+                }
+
+                results.truncate(request.top_k);
+                return results;
+            }
+        }
+
+        // Dense-only path
+        self.search_vector_dense_only(request, fetch_k).await
+    }
+
+    /// Dense-only vector search (original behavior, used as fallback from hybrid path).
+    async fn search_vector_dense_only(
+        &self,
+        request: &MemorySearchRequest,
+        fetch_k: usize,
+    ) -> Vec<MemorySearchResult> {
         let mut results = if let Some(qdrant) = &self.qdrant {
             let query_vector = match self.embedding_provider.embed_single(&request.query).await {
                 Ok(v) => v,
@@ -433,18 +628,25 @@ impl MemoryEngine {
         results
     }
 
-    /// Hybrid search: combine vector search + graph search, deduplicate,
+    /// Hybrid mode search: combine vector search + graph search, deduplicate,
     /// and optionally rerank.
-    async fn search_hybrid(&self, request: &MemorySearchRequest) -> Vec<MemorySearchResult> {
-        // Get vector search results (without reranking — we'll rerank the merged set)
+    ///
+    /// Note: this is the LightRAG-style hybrid (vector + graph). The
+    /// BM25-sparse hybrid (dense cosine + sparse SPLADE) runs inside
+    /// `search_vector` when `hybrid_search_enabled` is true.
+    async fn search_hybrid_mode(
+        &self,
+        request: &MemorySearchRequest,
+    ) -> Vec<MemorySearchResult> {
+        // Get vector search results (without reranking -- we'll rerank the merged set)
         let vector_results = {
             let fetch_k = (request.top_k * 2).max(10);
             if let Some(qdrant) = &self.qdrant {
-                let query_vector = match self.embedding_provider.embed_single(&request.query).await
-                {
-                    Ok(v) => v,
-                    Err(_) => return self.search_graph(request),
-                };
+                let query_vector =
+                    match self.embedding_provider.embed_single(&request.query).await {
+                        Ok(v) => v,
+                        Err(_) => return self.search_graph(request),
+                    };
 
                 match qdrant
                     .search(query_vector, fetch_k, request.score_threshold)
@@ -613,6 +815,21 @@ impl MemoryEngine {
 }
 
 // ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Saturating BM25-style normalization: maps any positive score to [0, 1).
+///
+/// Formula: `score / (score + k)` where k=5.0.
+/// - At score=0: returns 0.0
+/// - At score=5: returns 0.5
+/// - As score goes to infinity: approaches 1.0
+fn bm25_normalize(score: f32) -> f32 {
+    const K: f32 = 5.0;
+    score / (score + K)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -632,6 +849,22 @@ mod tests {
     /// with `new_local` which will init fastembed (the model is already cached).
     fn make_local_engine() -> MemoryEngine {
         MemoryEngine::new_local("all-MiniLM-L6-v2", 500).expect("engine should init")
+    }
+
+    #[test]
+    fn test_bm25_normalize_properties() {
+        // At zero should be zero
+        assert!((bm25_normalize(0.0) - 0.0).abs() < 1e-6);
+        // At k=5.0 should be exactly 0.5
+        assert!((bm25_normalize(5.0) - 0.5).abs() < 1e-6);
+        // Should always be in [0, 1)
+        for score in [0.1_f32, 1.0, 10.0, 100.0, 1000.0] {
+            let n = bm25_normalize(score);
+            assert!((0.0..1.0).contains(&n), "normalized score {n} out of [0,1)");
+        }
+        // Monotonically increasing
+        assert!(bm25_normalize(1.0) < bm25_normalize(2.0));
+        assert!(bm25_normalize(2.0) < bm25_normalize(10.0));
     }
 
     #[tokio::test]
@@ -723,5 +956,45 @@ mod tests {
         let chunk = engine.fetch_chunk(&chunk_id).expect("chunk should exist");
         assert!(chunk.content.contains("Intro"));
         assert!(chunk.content.contains("Some content"));
+    }
+
+    #[tokio::test]
+    async fn test_hybrid_search_flag_fallback_to_keyword() {
+        // Without Qdrant or sparse provider, hybrid flag should silently fall
+        // through to keyword search and still return results.
+        let _ = &*PROVIDER;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let docs = temp.path().join("docs");
+        fs::create_dir_all(&docs).expect("mkdir");
+        fs::write(
+            docs.join("api.md"),
+            "# API Reference\nThe embed function produces sparse vectors for BM25 retrieval.",
+        )
+        .expect("write");
+
+        let mut engine = make_local_engine();
+        // Manually enable hybrid without attaching sparse provider (graceful no-op path)
+        engine.hybrid_search_enabled = true;
+
+        engine
+            .ingest_markdown_tree(&docs)
+            .await
+            .expect("ingest should succeed");
+
+        let results = engine
+            .search(&MemorySearchRequest {
+                query: "sparse vectors".to_string(),
+                top_k: 3,
+                mode: RetrievalMode::Naive,
+                ..Default::default()
+            })
+            .await;
+
+        // Keyword fallback should still find results
+        assert!(
+            !results.is_empty(),
+            "should find results even in hybrid mode without qdrant/sparse provider"
+        );
     }
 }
