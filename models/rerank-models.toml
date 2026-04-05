@@ -1,0 +1,38 @@
+# Local reranker models — backed by fastembed (ONNX Runtime).
+# This file is embedded in the binary via include_str!
+
+[meta]
+fastembed_crate_version = "5"
+updated = "2026-04-05"
+
+[models.jina-reranker-v2-base-multilingual]
+name = "jina-reranker-v2-base-multilingual"
+size_mb = 280
+multilingual = true
+description = "Multilingual cross-encoder. Recommended default."
+fastembed_enum = "JINARerankerV2BaseMultiligual"
+default = true
+
+[models.jina-reranker-v1-turbo-en]
+name = "jina-reranker-v1-turbo-en"
+size_mb = 60
+multilingual = false
+description = "Fastest English reranker."
+fastembed_enum = "JINARerankerV1TurboEn"
+default = false
+
+[models.bge-reranker-base]
+name = "bge-reranker-base"
+size_mb = 280
+multilingual = false
+description = "BAAI BGE reranker baseline."
+fastembed_enum = "BGERerankerBase"
+default = false
+
+[models.bge-reranker-v2-m3]
+name = "bge-reranker-v2-m3"
+size_mb = 560
+multilingual = true
+description = "Highest quality, multilingual."
+fastembed_enum = "BGERerankerV2M3"
+default = false

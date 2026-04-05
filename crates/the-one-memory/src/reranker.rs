@@ -32,19 +32,88 @@ mod local {
     use super::*;
     use std::sync::{Arc, Mutex};
 
-    /// Resolve a reranker model name to a fastembed enum variant.
+    /// Map a `fastembed_enum` string from the registry to the actual fastembed enum variant.
+    fn reranker_enum_from_name(fastembed_enum: &str) -> Option<fastembed::RerankerModel> {
+        let model = match fastembed_enum {
+            "BGERerankerBase" => fastembed::RerankerModel::BGERerankerBase,
+            "BGERerankerV2M3" => fastembed::RerankerModel::BGERerankerV2M3,
+            "JINARerankerV1TurboEn" => fastembed::RerankerModel::JINARerankerV1TurboEn,
+            // NOTE: fastembed upstream spells this with a typo (missing "n" in "Multilingual")
+            "JINARerankerV2BaseMultiligual" => {
+                fastembed::RerankerModel::JINARerankerV2BaseMultiligual
+            }
+            _ => return None,
+        };
+        Some(model)
+    }
+
+    /// Resolve a reranker model name (or alias) to a fastembed enum variant.
+    ///
+    /// Resolution order:
+    /// 1. `"default"` → registry default model.
+    /// 2. Convenience aliases (backward-compat shortcuts).
+    /// 3. Registry name lookup (case-insensitive).
+    /// 4. Falls back to registry default with a warning on unknown names.
     pub fn resolve_reranker_model(name: &str) -> Result<fastembed::RerankerModel, String> {
-        match name.to_ascii_lowercase().trim() {
-            "bge-reranker-base" | "default" => Ok(fastembed::RerankerModel::BGERerankerBase),
-            "bge-reranker-v2-m3" | "multilingual" => Ok(fastembed::RerankerModel::BGERerankerV2M3),
-            "jina-reranker-v1-turbo-en" | "jina-turbo" => {
-                Ok(fastembed::RerankerModel::JINARerankerV1TurboEn)
-            }
-            "jina-reranker-v2-base-multilingual" | "jina-multilingual" => {
-                Ok(fastembed::RerankerModel::JINARerankerV2BaseMultiligual)
-            }
-            other => Err(format!("unknown reranker model: {other}")),
+        let name_lower = name.to_ascii_lowercase();
+        let name_trimmed = name_lower.trim();
+
+        // 1. "default" → registry default
+        if name_trimmed == "default" {
+            let default = crate::models_registry::default_rerank_model();
+            return reranker_enum_from_name(&default.fastembed_enum).ok_or_else(|| {
+                format!(
+                    "default reranker enum '{}' not found in fastembed",
+                    default.fastembed_enum
+                )
+            });
         }
+
+        // 2. Convenience aliases for backward compatibility
+        let alias_resolved = match name_trimmed {
+            "multilingual" | "jina-multilingual" => Some("jina-reranker-v2-base-multilingual"),
+            "jina-turbo" => Some("jina-reranker-v1-turbo-en"),
+            _ => None,
+        };
+        if let Some(canonical) = alias_resolved {
+            // Resolve the canonical name through the registry
+            let models = crate::models_registry::list_rerank_models();
+            if let Some(m) = models.iter().find(|m| m.name == canonical) {
+                return reranker_enum_from_name(&m.fastembed_enum).ok_or_else(|| {
+                    format!(
+                        "reranker enum '{}' not found in fastembed",
+                        m.fastembed_enum
+                    )
+                });
+            }
+        }
+
+        // 3. Registry name lookup (case-insensitive)
+        let models = crate::models_registry::list_rerank_models();
+        if let Some(m) = models
+            .iter()
+            .find(|m| m.name.to_ascii_lowercase() == name_trimmed)
+        {
+            return reranker_enum_from_name(&m.fastembed_enum).ok_or_else(|| {
+                format!(
+                    "reranker enum '{}' not found in fastembed",
+                    m.fastembed_enum
+                )
+            });
+        }
+
+        // 4. Unknown — fall back to registry default with a warning
+        tracing::warn!(
+            "Unknown reranker model '{}', falling back to registry default",
+            name
+        );
+        let default = crate::models_registry::default_rerank_model();
+        reranker_enum_from_name(&default.fastembed_enum).ok_or_else(|| {
+            format!(
+                "default reranker enum '{}' not found in fastembed",
+                default.fastembed_enum
+            )
+        })
     }
 
     /// Local cross-encoder reranker using fastembed-rs (ONNX Runtime).
@@ -91,8 +160,9 @@ mod local {
 
             tokio::task::spawn_blocking(move || {
                 let doc_refs: Vec<&String> = docs.iter().collect();
-                let mut model =
-                    model.lock().map_err(|e| format!("model lock poisoned: {e}"))?;
+                let mut model = model
+                    .lock()
+                    .map_err(|e| format!("model lock poisoned: {e}"))?;
                 let results = model
                     .rerank(&query, doc_refs, false, None)
                     .map_err(|e| format!("fastembed rerank failed: {e}"))?;
@@ -132,7 +202,8 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_reranker_model_unknown() {
-        assert!(resolve_reranker_model("nonexistent").is_err());
+    fn test_resolve_reranker_model_unknown_falls_back_to_default() {
+        // Unknown names fall back to the registry default rather than erroring
+        assert!(resolve_reranker_model("nonexistent").is_ok());
     }
 }

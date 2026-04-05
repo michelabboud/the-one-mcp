@@ -1,8 +1,9 @@
 //! Embedding model registry — parsed from TOML files embedded in the binary.
 //!
-//! Two registries are bundled:
-//! - **local-models.toml**: fastembed-backed ONNX models (offline).
+//! Three registries are bundled:
+//! - **local-models.toml**: fastembed-backed ONNX embedding models (offline).
 //! - **api-models.toml**: OpenAI-compatible API providers.
+//! - **rerank-models.toml**: fastembed-backed ONNX reranker models (offline).
 //!
 //! API models can be extended at runtime by merging a user-supplied TOML file
 //! (typically `~/.the-one/api-models.toml`).
@@ -15,6 +16,7 @@ use std::collections::HashMap;
 
 const LOCAL_MODELS_TOML: &str = include_str!("../../../models/local-models.toml");
 const API_MODELS_TOML: &str = include_str!("../../../models/api-models.toml");
+const RERANK_MODELS_TOML: &str = include_str!("../../../models/rerank-models.toml");
 
 // ── Local model types ────────────────────────────────────────────────────────
 
@@ -98,6 +100,33 @@ pub struct ApiProvider {
     pub models: BTreeMap<String, ApiModel>,
 }
 
+// ── Reranker model types ─────────────────────────────────────────────────────
+
+/// A single reranker model entry from `rerank-models.toml`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RerankModel {
+    /// Human-readable display name.
+    pub name: String,
+    /// Approximate model download size in MB.
+    pub size_mb: u32,
+    /// Whether the model handles non-English text well.
+    pub multilingual: bool,
+    /// One-line description shown to users.
+    pub description: String,
+    /// Rust enum variant name in the `fastembed` crate.
+    pub fastembed_enum: String,
+    /// Whether this is the recommended default reranker.
+    pub default: bool,
+}
+
+/// Raw deserialization wrapper for rerank-models.toml.
+#[derive(Debug, Deserialize)]
+struct RerankRegistryFile {
+    #[allow(dead_code)]
+    meta: LocalRegistryMeta,
+    models: HashMap<String, RerankModel>,
+}
+
 // ── Tier ordering ────────────────────────────────────────────────────────────
 
 fn tier_order(tier: &str) -> u8 {
@@ -115,6 +144,12 @@ fn tier_order(tier: &str) -> u8 {
 fn parse_local_registry(src: &str) -> Result<HashMap<String, LocalModel>, String> {
     let file: LocalRegistryFile =
         toml::from_str(src).map_err(|e| format!("failed to parse local-models.toml: {e}"))?;
+    Ok(file.models)
+}
+
+fn parse_rerank_registry(src: &str) -> Result<HashMap<String, RerankModel>, String> {
+    let file: RerankRegistryFile =
+        toml::from_str(src).map_err(|e| format!("failed to parse rerank-models.toml: {e}"))?;
     Ok(file.models)
 }
 
@@ -264,6 +299,32 @@ pub fn fastembed_crate_version() -> String {
     let parsed: JustMeta =
         toml::from_str(LOCAL_MODELS_TOML).expect("embedded local-models.toml is valid");
     parsed.meta.fastembed_crate_version
+}
+
+/// Return all rerank models from the embedded registry.
+///
+/// # Panics
+///
+/// Panics at startup if the embedded TOML is malformed. This indicates a
+/// build-time error that must be fixed before shipping.
+pub fn list_rerank_models() -> Vec<RerankModel> {
+    parse_rerank_registry(RERANK_MODELS_TOML)
+        .expect("embedded rerank-models.toml is valid")
+        .into_values()
+        .collect()
+}
+
+/// Return the default rerank model (the one with `default = true`).
+///
+/// # Panics
+///
+/// Panics if the registry contains no default — this is a compile-time
+/// configuration error that must be fixed before shipping.
+pub fn default_rerank_model() -> RerankModel {
+    list_rerank_models()
+        .into_iter()
+        .find(|m| m.default)
+        .expect("rerank registry must have exactly one default model")
 }
 
 /// Return all API providers from the embedded registry.
@@ -541,6 +602,39 @@ mod tests {
             defaults.len(),
             defaults
         );
+    }
+
+    // ── Reranker model registry tests ───────────────────────────────────────
+
+    #[test]
+    fn test_rerank_models_parses_without_error() {
+        let models = list_rerank_models();
+        assert_eq!(models.len(), 4, "expected 4 rerank models");
+    }
+
+    #[test]
+    fn test_default_rerank_model_is_jina_v2() {
+        let model = default_rerank_model();
+        assert_eq!(model.fastembed_enum, "JINARerankerV2BaseMultiligual");
+        assert!(model.default);
+        assert!(model.multilingual);
+    }
+
+    #[test]
+    fn test_exactly_one_default_rerank_model() {
+        let models = list_rerank_models();
+        let defaults: Vec<_> = models.iter().filter(|m| m.default).collect();
+        assert_eq!(defaults.len(), 1);
+    }
+
+    #[test]
+    fn test_rerank_model_fields_populated() {
+        for model in list_rerank_models() {
+            assert!(!model.name.is_empty());
+            assert!(model.size_mb > 0);
+            assert!(!model.description.is_empty());
+            assert!(!model.fastembed_enum.is_empty());
+        }
     }
 
     // ── API model registry tests ─────────────────────────────────────────────
