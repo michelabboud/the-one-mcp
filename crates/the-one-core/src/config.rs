@@ -26,6 +26,9 @@ const DEFAULT_HYBRID_SEARCH_ENABLED: bool = false;
 const DEFAULT_HYBRID_DENSE_WEIGHT: f32 = 0.7;
 const DEFAULT_HYBRID_SPARSE_WEIGHT: f32 = 0.3;
 const DEFAULT_SPARSE_MODEL: &str = "bm25";
+// Auto-index (file watcher) defaults
+const DEFAULT_AUTO_INDEX_ENABLED: bool = false;
+const DEFAULT_AUTO_INDEX_DEBOUNCE_MS: u64 = 2000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NanoProviderKind {
@@ -114,6 +117,8 @@ pub struct RuntimeOverrides {
     pub hybrid_dense_weight: Option<f32>,
     pub hybrid_sparse_weight: Option<f32>,
     pub sparse_model: Option<String>,
+    pub auto_index_enabled: Option<bool>,
+    pub auto_index_debounce_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -148,6 +153,8 @@ pub struct ProjectConfigUpdate {
     pub hybrid_dense_weight: Option<f32>,
     pub hybrid_sparse_weight: Option<f32>,
     pub sparse_model: Option<String>,
+    pub auto_index_enabled: Option<bool>,
+    pub auto_index_debounce_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -197,6 +204,10 @@ pub struct AppConfig {
     pub hybrid_sparse_weight: f32,
     /// Sparse embedding model name (e.g. "bm25" maps to SPLADE++).
     pub sparse_model: String,
+    /// Enable automatic reindexing when watched files change.
+    pub auto_index_enabled: bool,
+    /// Debounce window in milliseconds for the file watcher.
+    pub auto_index_debounce_ms: u64,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -231,6 +242,8 @@ struct FileConfig {
     hybrid_dense_weight: Option<f32>,
     hybrid_sparse_weight: Option<f32>,
     sparse_model: Option<String>,
+    auto_index_enabled: Option<bool>,
+    auto_index_debounce_ms: Option<u64>,
 }
 
 impl AppConfig {
@@ -270,6 +283,8 @@ impl AppConfig {
             hybrid_dense_weight: Some(DEFAULT_HYBRID_DENSE_WEIGHT),
             hybrid_sparse_weight: Some(DEFAULT_HYBRID_SPARSE_WEIGHT),
             sparse_model: Some(DEFAULT_SPARSE_MODEL.to_string()),
+            auto_index_enabled: Some(DEFAULT_AUTO_INDEX_ENABLED),
+            auto_index_debounce_ms: Some(DEFAULT_AUTO_INDEX_DEBOUNCE_MS),
         };
 
         apply_file_layer(&global_state_dir.join("config.json"), &mut merged)?;
@@ -350,6 +365,12 @@ impl AppConfig {
             sparse_model: merged
                 .sparse_model
                 .unwrap_or_else(|| DEFAULT_SPARSE_MODEL.to_string()),
+            auto_index_enabled: merged
+                .auto_index_enabled
+                .unwrap_or(DEFAULT_AUTO_INDEX_ENABLED),
+            auto_index_debounce_ms: merged
+                .auto_index_debounce_ms
+                .unwrap_or(DEFAULT_AUTO_INDEX_DEBOUNCE_MS),
         })
     }
 }
@@ -459,6 +480,12 @@ pub fn update_project_config(
     }
     if update.sparse_model.is_some() {
         merged.sparse_model = update.sparse_model;
+    }
+    if update.auto_index_enabled.is_some() {
+        merged.auto_index_enabled = update.auto_index_enabled;
+    }
+    if update.auto_index_debounce_ms.is_some() {
+        merged.auto_index_debounce_ms = update.auto_index_debounce_ms;
     }
 
     let tmp_path = project_state_dir.join("config.json.tmp");
@@ -621,6 +648,14 @@ fn apply_env_layer(merged: &mut FileConfig) {
     }
     if let Ok(v) = env::var("THE_ONE_SPARSE_MODEL") {
         merged.sparse_model = Some(v);
+    }
+    if let Ok(v) = env::var("THE_ONE_AUTO_INDEX_ENABLED") {
+        merged.auto_index_enabled = parse_bool_env(&v);
+    }
+    if let Ok(v) = env::var("THE_ONE_AUTO_INDEX_DEBOUNCE_MS") {
+        if let Ok(n) = v.parse::<u64>() {
+            merged.auto_index_debounce_ms = Some(n);
+        }
     }
     // Limit env vars
     apply_limit_env_vars(merged);
@@ -823,6 +858,12 @@ fn apply_runtime_layer(runtime: RuntimeOverrides, merged: &mut FileConfig) {
     if runtime.sparse_model.is_some() {
         merged.sparse_model = runtime.sparse_model;
     }
+    if runtime.auto_index_enabled.is_some() {
+        merged.auto_index_enabled = runtime.auto_index_enabled;
+    }
+    if runtime.auto_index_debounce_ms.is_some() {
+        merged.auto_index_debounce_ms = runtime.auto_index_debounce_ms;
+    }
 }
 
 fn merge(base: &mut FileConfig, overlay: FileConfig) {
@@ -915,6 +956,12 @@ fn merge(base: &mut FileConfig, overlay: FileConfig) {
     }
     if overlay.sparse_model.is_some() {
         base.sparse_model = overlay.sparse_model;
+    }
+    if overlay.auto_index_enabled.is_some() {
+        base.auto_index_enabled = overlay.auto_index_enabled;
+    }
+    if overlay.auto_index_debounce_ms.is_some() {
+        base.auto_index_debounce_ms = overlay.auto_index_debounce_ms;
     }
 }
 
