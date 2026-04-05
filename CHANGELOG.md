@@ -2,6 +2,24 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.9.0] - 2026-04-05
+
+### Added
+- **Tree-sitter AST chunker** — language-aware code chunking upgraded from regex to tree-sitter for the original 5 languages (Rust, Python, TypeScript/TSX, JavaScript, Go) and extended to 8 new languages: **C, C++, Java, Kotlin, PHP, Ruby, Swift, Zig**. Each language gets its own tree-sitter grammar crate and a shared walker (`chunker_ts_impl::chunk_with_tree_sitter`) that emits one `ChunkMeta` per top-level AST node.
+- **Regex fallback on parse failure** — the dispatcher in `chunker::chunk_file` tries tree-sitter first for the original 5 languages and transparently falls back to the v0.8.0 regex chunkers if tree-sitter cannot parse the input. Lean builds (`--no-default-features`) get the regex chunkers directly with no tree-sitter dependency.
+- **New feature flag `tree-sitter-chunker`** — default on. Users who want the leanest possible binary can disable it to strip ~3-5 MB of grammar code (each grammar ships as a compiled C library via its tree-sitter-language binding).
+- **Retrieval benchmark suite** — new `crates/the-one-memory/examples/retrieval_bench.rs` runs 4 retrieval configurations (dense only, dense + rerank, hybrid, full pipeline) against 3 query sets (exact match, semantic, mixed) and reports Recall@1, Recall@5, MRR, and p50/p95 latency. Query corpora are hand-curated against the-one-mcp's own source tree. Benchmarks are NOT in CI (they require a running Qdrant) — run manually with `cargo run --release --example retrieval_bench -p the-one-memory --features tree-sitter-chunker`. See `benchmarks/README.md` for prerequisites and `benchmarks/results.md` for published numbers.
+
+### Changed
+- `chunker::chunk_file` dispatcher now routes to tree-sitter backed chunkers when `tree-sitter-chunker` feature is enabled, with language-specific cfg gates so lean builds compile cleanly.
+- `the-one-memory` now depends on the `tree-sitter` crate (0.26) plus 14 grammar crates (Rust 0.24, Python 0.25, JS 0.25, TS 0.23, Go 0.25, Swift 0.7, Ruby 0.23, C 0.24, C++ 0.23, Java 0.23, Kotlin-ng 1.1, Zig 1.1, PHP 0.24). All pinned via workspace dependencies.
+
+### Tests
+- +11 chunker tests covering the 8 new languages (C, C++, Java, Kotlin, PHP, Ruby, Swift, Zig) plus tree-sitter/regex parity checks for Rust and line_range metadata validation. Total workspace tests: **283** (272 → 283), 0 failures.
+
+### Dependencies
+- Added: `tree-sitter`, `tree-sitter-{rust,python,javascript,typescript,go,swift,ruby,c,cpp,java,kotlin-ng,zig,php}`
+
 ## [0.8.2] - 2026-04-05
 
 ### Added

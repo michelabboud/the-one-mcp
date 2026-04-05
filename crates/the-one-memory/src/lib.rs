@@ -3,6 +3,36 @@ pub mod chunker_go;
 pub mod chunker_python;
 pub mod chunker_rust;
 pub mod chunker_typescript;
+// Tree-sitter chunker infrastructure + language modules (feature-gated).
+#[cfg(feature = "tree-sitter-chunker")]
+pub mod chunker_c;
+#[cfg(feature = "tree-sitter-chunker")]
+pub mod chunker_cpp;
+#[cfg(feature = "tree-sitter-chunker")]
+pub mod chunker_java;
+#[cfg(feature = "tree-sitter-chunker")]
+pub mod chunker_kotlin;
+#[cfg(feature = "tree-sitter-chunker")]
+pub mod chunker_php;
+#[cfg(feature = "tree-sitter-chunker")]
+pub mod chunker_ruby;
+#[cfg(feature = "tree-sitter-chunker")]
+pub mod chunker_swift;
+#[cfg(feature = "tree-sitter-chunker")]
+pub mod chunker_ts_impl;
+#[cfg(feature = "tree-sitter-chunker")]
+pub mod chunker_zig;
+// Tree-sitter replacements for the 5 existing regex chunkers. The
+// dispatcher in `chunker::chunk_file` tries these first and falls back to
+// the regex implementations on parse failure.
+#[cfg(feature = "tree-sitter-chunker")]
+pub mod chunker_go_ts;
+#[cfg(feature = "tree-sitter-chunker")]
+pub mod chunker_python_ts;
+#[cfg(feature = "tree-sitter-chunker")]
+pub mod chunker_rust_ts;
+#[cfg(feature = "tree-sitter-chunker")]
+pub mod chunker_typescript_ts;
 pub mod embeddings;
 pub mod graph;
 pub mod image_embeddings;

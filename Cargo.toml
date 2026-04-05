@@ -34,3 +34,20 @@ tesseract = "0.15"
 notify = "6.1"
 notify-debouncer-mini = "0.4"
 tokio-util = { version = "0.7", features = ["rt"] }
+# Tree-sitter parsing infrastructure for code-aware chunking (Task 1.2 / v0.9.0).
+# Each language grammar is a separate crate pulled in via features on the
+# `the-one-memory` crate so lean builds can opt out.
+tree-sitter = "0.26"
+tree-sitter-rust = "0.24"
+tree-sitter-python = "0.25"
+tree-sitter-javascript = "0.25"
+tree-sitter-typescript = "0.23"
+tree-sitter-go = "0.25"
+tree-sitter-swift = "0.7"
+tree-sitter-ruby = "0.23"
+tree-sitter-c = "0.24"
+tree-sitter-cpp = "0.23"
+tree-sitter-java = "0.23"
+tree-sitter-kotlin-ng = "1.1"
+tree-sitter-zig = "1.1"
+tree-sitter-php = "0.24"

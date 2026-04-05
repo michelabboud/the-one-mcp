@@ -1,6 +1,6 @@
 # Code-Aware Chunking Guide
 
-> v0.8.0 — language-aware chunking for 5 programming languages.
+> v0.9.0 — tree-sitter AST chunking for 13 programming languages, with regex fallback for the original 5.
 
 ## Why Language-Aware Chunking Matters
 
@@ -18,15 +18,54 @@ Language-aware chunking solves this by respecting the syntactic boundaries that 
 
 ## Supported Languages
 
-| Language | File Extensions | Items Detected |
-|----------|----------------|----------------|
-| Rust | `.rs` | `fn`, `async fn`, `struct`, `enum`, `impl`, `impl … for …`, `trait`, `mod`, `type`, `const`, `static`, `macro_rules!` |
-| Python | `.py` | `def`, `async def`, `class` (with decorator handling) |
-| TypeScript | `.ts`, `.tsx` | `function`, `async function`, `class`, `interface`, `type`, `enum`, `const`/`let`/`var` arrow functions and assignments |
-| JavaScript | `.js`, `.jsx`, `.mjs`, `.cjs` | Same engine as TypeScript |
-| Go | `.go` | `func` (including method receivers `func (r *Receiver) Method`), `type`, `var`, `const` with paren-block handling |
+As of v0.9.0, the chunker uses the [tree-sitter](https://tree-sitter.github.io/tree-sitter/)
+incremental parser with community-maintained grammars. Tree-sitter walks the real AST so
+edge cases that regex would miss (generics, nested templates, complex where-clauses) are
+handled correctly.
 
-For any other extension (`.c`, `.java`, `.toml`, `.yaml`, etc.), the chunker falls back to the original blank-line paragraph chunking — completely safe, just without symbol metadata.
+### Tier 1 — tree-sitter with regex fallback (original 5)
+
+| Language | File Extensions | AST Node Kinds |
+|----------|----------------|----------------|
+| Rust | `.rs` | `function_item`, `impl_item`, `trait_item`, `struct_item`, `enum_item`, `union_item`, `mod_item`, `type_item`, `const_item`, `static_item`, `macro_definition`, `foreign_mod_item` |
+| Python | `.py` | `function_definition`, `async_function_definition`, `class_definition`, `decorated_definition` |
+| TypeScript | `.ts`, `.tsx` | `function_declaration`, `class_declaration`, `interface_declaration`, `type_alias_declaration`, `enum_declaration`, `lexical_declaration`, `export_statement`, `namespace_declaration` |
+| JavaScript | `.js`, `.jsx`, `.mjs`, `.cjs` | `function_declaration`, `class_declaration`, `lexical_declaration`, `variable_declaration`, `export_statement` |
+| Go | `.go` | `function_declaration`, `method_declaration`, `type_declaration`, `var_declaration`, `const_declaration`, `import_declaration` |
+
+If tree-sitter fails to parse the file (malformed source, partial file, etc.), the dispatcher
+transparently falls back to the v0.8.0 regex-based chunker for these five languages — users
+get no regression, even on pathological input.
+
+### Tier 2 — tree-sitter only (8 new languages in v0.9.0)
+
+| Language | File Extensions | Key Node Kinds |
+|----------|----------------|----------------|
+| C | `.c`, `.h` | `function_definition`, `struct_specifier`, `enum_specifier`, `union_specifier`, `type_definition`, `preproc_*` |
+| C++ | `.cc`, `.cpp`, `.cxx`, `.hpp`, `.hxx`, `.hh` | `function_definition`, `class_specifier`, `namespace_definition`, `template_declaration`, `alias_declaration` |
+| Java | `.java` | `class_declaration`, `interface_declaration`, `enum_declaration`, `record_declaration`, `method_declaration`, `constructor_declaration` |
+| Kotlin | `.kt`, `.kts` | `function_declaration`, `class_declaration`, `object_declaration`, `property_declaration`, `type_alias` |
+| PHP | `.php`, `.phtml` | `function_definition`, `class_declaration`, `interface_declaration`, `trait_declaration`, `enum_declaration`, `namespace_definition` |
+| Ruby | `.rb`, `.rake` | `method`, `singleton_method`, `class`, `module`, `singleton_class` |
+| Swift | `.swift` | `function_declaration`, `class_declaration`, `protocol_declaration`, `enum_declaration`, `extension_declaration` |
+| Zig | `.zig` | `FnProto`, `VarDecl`, `ContainerDecl`, `TopLevelDecl` |
+
+For any other extension, the chunker falls back to blank-line paragraph chunking — completely
+safe, just without symbol metadata.
+
+### Feature flag
+
+All tree-sitter chunkers live behind the `tree-sitter-chunker` Cargo feature (default on).
+Lean builds that disable default features (e.g. Intel Mac lean) retain the original regex
+chunkers for the 5 Tier 1 languages but do not get any of the 8 new languages.
+
+```bash
+# Default build — all 13 languages
+cargo build --release
+
+# Lean build — original 5 languages (regex) only
+cargo build --release --no-default-features --features the-one-ui/embed-swagger
+```
 
 ---
 
