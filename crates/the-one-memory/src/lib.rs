@@ -7,6 +7,7 @@ pub mod models_registry;
 pub mod ocr;
 pub mod qdrant;
 pub mod reranker;
+pub mod sparse_embeddings;
 pub mod thumbnail;
 
 use std::collections::HashMap;
