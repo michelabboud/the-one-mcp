@@ -1,9 +1,10 @@
 //! Embedding model registry — parsed from TOML files embedded in the binary.
 //!
-//! Three registries are bundled:
+//! Four registries are bundled:
 //! - **local-models.toml**: fastembed-backed ONNX embedding models (offline).
 //! - **api-models.toml**: OpenAI-compatible API providers.
 //! - **rerank-models.toml**: fastembed-backed ONNX reranker models (offline).
+//! - **image-models.toml**: fastembed-backed ONNX image embedding models (offline).
 //!
 //! API models can be extended at runtime by merging a user-supplied TOML file
 //! (typically `~/.the-one/api-models.toml`).
@@ -17,6 +18,7 @@ use std::collections::HashMap;
 const LOCAL_MODELS_TOML: &str = include_str!("../../../models/local-models.toml");
 const API_MODELS_TOML: &str = include_str!("../../../models/api-models.toml");
 const RERANK_MODELS_TOML: &str = include_str!("../../../models/rerank-models.toml");
+const IMAGE_MODELS_TOML: &str = include_str!("../../../models/image-models.toml");
 
 // ── Local model types ────────────────────────────────────────────────────────
 
@@ -125,6 +127,36 @@ struct RerankRegistryFile {
     #[allow(dead_code)]
     meta: LocalRegistryMeta,
     models: HashMap<String, RerankModel>,
+}
+
+// ── Image model types ────────────────────────────────────────────────────────
+
+/// A single image embedding model entry from `image-models.toml`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ImageModel {
+    /// Human-readable display name.
+    pub name: String,
+    /// Output embedding dimensionality.
+    pub dims: usize,
+    /// Approximate model download size in MB.
+    pub size_mb: u32,
+    /// One-line description shown to users.
+    pub description: String,
+    /// Rust enum variant name in the `fastembed` crate.
+    pub fastembed_enum: String,
+    /// Whether this is the recommended default image model.
+    pub default: bool,
+    /// Optional paired text model enum variant (for joint text+image search).
+    #[serde(default)]
+    pub paired_text_model: String,
+}
+
+/// Raw deserialization wrapper for image-models.toml.
+#[derive(Debug, Deserialize)]
+struct ImageRegistryFile {
+    #[allow(dead_code)]
+    meta: LocalRegistryMeta,
+    models: HashMap<String, ImageModel>,
 }
 
 // ── Tier ordering ────────────────────────────────────────────────────────────
@@ -242,6 +274,12 @@ fn parse_api_registry(src: &str) -> Result<Vec<(String, ApiProvider)>, String> {
     }
 
     Ok(providers)
+}
+
+fn parse_image_registry(src: &str) -> Result<HashMap<String, ImageModel>, String> {
+    let file: ImageRegistryFile =
+        toml::from_str(src).map_err(|e| format!("failed to parse image-models.toml: {e}"))?;
+    Ok(file.models)
 }
 
 // ── Public API ───────────────────────────────────────────────────────────────
@@ -379,6 +417,32 @@ pub fn merge_user_api_models(user_toml: &str) -> Result<Vec<ApiProvider>, String
     }
 
     Ok(map.into_values().collect())
+}
+
+/// Return all image embedding models from the embedded registry.
+///
+/// # Panics
+///
+/// Panics at startup if the embedded TOML is malformed. This indicates a
+/// build-time error that must be fixed before shipping.
+pub fn list_image_models() -> Vec<ImageModel> {
+    parse_image_registry(IMAGE_MODELS_TOML)
+        .expect("embedded image-models.toml is valid")
+        .into_values()
+        .collect()
+}
+
+/// Return the default image embedding model (the one with `default = true`).
+///
+/// # Panics
+///
+/// Panics if the registry contains no default — this is a compile-time
+/// configuration error that must be fixed before shipping.
+pub fn default_image_model() -> ImageModel {
+    list_image_models()
+        .into_iter()
+        .find(|m| m.default)
+        .expect("image registry must have exactly one default model")
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -634,6 +698,58 @@ mod tests {
             assert!(model.size_mb > 0);
             assert!(!model.description.is_empty());
             assert!(!model.fastembed_enum.is_empty());
+        }
+    }
+
+    // ── Image model registry tests ───────────────────────────────────────────
+
+    #[test]
+    fn test_image_models_parses_without_error() {
+        let models = list_image_models();
+        assert!(
+            !models.is_empty(),
+            "image registry must contain at least one model"
+        );
+    }
+
+    #[test]
+    fn test_default_image_model_exists() {
+        let model = default_image_model();
+        assert!(
+            model.default,
+            "default image model's `default` field must be true"
+        );
+        assert!(
+            !model.name.is_empty(),
+            "default image model name must not be empty"
+        );
+    }
+
+    #[test]
+    fn test_exactly_one_default_image_model() {
+        let models = list_image_models();
+        let defaults: Vec<&str> = models
+            .iter()
+            .filter(|m| m.default)
+            .map(|m| m.fastembed_enum.as_str())
+            .collect();
+        assert_eq!(
+            defaults.len(),
+            1,
+            "expected exactly 1 default image model, got {}: {:?}",
+            defaults.len(),
+            defaults
+        );
+    }
+
+    #[test]
+    fn test_image_model_fields_populated() {
+        for model in list_image_models() {
+            assert!(!model.name.is_empty(), "image model has empty name");
+            assert!(model.size_mb > 0, "image model `{}` has zero size_mb", model.name);
+            assert!(!model.description.is_empty(), "image model `{}` has empty description", model.name);
+            assert!(!model.fastembed_enum.is_empty(), "image model `{}` has empty fastembed_enum", model.name);
+            assert!(model.dims > 0, "image model `{}` has zero dims", model.name);
         }
     }
 

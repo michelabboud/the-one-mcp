@@ -1,0 +1,54 @@
+# Image embedding models — backed by fastembed (ONNX Runtime).
+# This file is embedded in the binary via include_str!
+#
+# Verified against fastembed 5.13.0 ImageEmbeddingModel enum.
+# All 5 variants confirmed: ClipVitB32, Resnet50, UnicomVitB16, UnicomVitB32, NomicEmbedVisionV15
+
+[meta]
+fastembed_crate_version = "5"
+updated = "2026-04-05"
+
+[models.nomic-embed-vision-v1_5]
+name = "nomic-embed-vision-v1.5"
+dims = 768
+size_mb = 700
+description = "Pairs with nomic-embed-text-v1.5 for unified text+image search."
+fastembed_enum = "NomicEmbedVisionV15"
+default = true
+paired_text_model = "NomicEmbedTextV15"
+
+[models.clip-vit-b-32]
+name = "clip-ViT-B-32-vision"
+dims = 512
+size_mb = 350
+description = "CLIP — industry standard image encoder."
+fastembed_enum = "ClipVitB32"
+default = false
+paired_text_model = ""
+
+[models.resnet50]
+name = "resnet50-onnx"
+dims = 2048
+size_mb = 95
+description = "Pure image features, no text pairing."
+fastembed_enum = "Resnet50"
+default = false
+paired_text_model = ""
+
+[models.unicom-vit-b-16]
+name = "Unicom-ViT-B-16"
+dims = 768
+size_mb = 350
+description = "Fine-grained classification."
+fastembed_enum = "UnicomVitB16"
+default = false
+paired_text_model = ""
+
+[models.unicom-vit-b-32]
+name = "Unicom-ViT-B-32"
+dims = 512
+size_mb = 175
+description = "Lighter Unicom variant."
+fastembed_enum = "UnicomVitB32"
+default = false
+paired_text_model = ""
