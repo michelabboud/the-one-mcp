@@ -360,29 +360,15 @@ impl McpBroker {
                         if let Some(engine) = memories.get_mut(&project_key) {
                             let result = match (&event, is_md, is_image) {
                                 (the_one_memory::watcher::WatchEvent::Upserted(p), true, _) => {
-                                    engine
-                                        .ingest_single_markdown(p)
-                                        .await
-                                        .map(|n| {
-                                            format!(
-                                                "reindexed {n} chunks from {}",
-                                                p.display()
-                                            )
-                                        })
+                                    engine.ingest_single_markdown(p).await.map(|n| {
+                                        format!("reindexed {n} chunks from {}", p.display())
+                                    })
                                 }
-                                (the_one_memory::watcher::WatchEvent::Removed(p), _, _) => {
-                                    engine
-                                        .remove_by_path(p)
-                                        .await
-                                        .map(|n| {
-                                            format!("removed {n} chunks for {}", p.display())
-                                        })
-                                }
-                                (
-                                    the_one_memory::watcher::WatchEvent::Upserted(p),
-                                    _,
-                                    true,
-                                ) => {
+                                (the_one_memory::watcher::WatchEvent::Removed(p), _, _) => engine
+                                    .remove_by_path(p)
+                                    .await
+                                    .map(|n| format!("removed {n} chunks for {}", p.display())),
+                                (the_one_memory::watcher::WatchEvent::Upserted(p), _, true) => {
                                     // Image auto-reindex deferred to v0.8.1
                                     Ok(format!(
                                         "image change detected (manual reindex needed): {}",
@@ -3178,8 +3164,11 @@ mod tests {
             let memories = broker.memory_by_project.read().await;
             let key = McpBroker::project_memory_key(&root, "watcher-test");
             if let Some(engine) = memories.get(&key) {
-                let all_content: String =
-                    engine.docs_list().iter().flat_map(|p| engine.docs_get(p)).collect();
+                let all_content: String = engine
+                    .docs_list()
+                    .iter()
+                    .flat_map(|p| engine.docs_get(p))
+                    .collect();
                 if all_content.contains("Completely new content") {
                     // Success — also verify old content is gone
                     assert!(

@@ -804,8 +804,7 @@ impl MemoryEngine {
             return Err(format!("not a markdown file: {}", path.display()));
         }
 
-        let content =
-            std::fs::read_to_string(path).map_err(|e| format!("read failed: {e}"))?;
+        let content = std::fs::read_to_string(path).map_err(|e| format!("read failed: {e}"))?;
         let path_str = path.display().to_string();
 
         // Remove existing chunks for this path (in-memory index + Qdrant)
@@ -823,7 +822,10 @@ impl MemoryEngine {
         // Upsert to Qdrant if available
         if let Some(qdrant) = &self.qdrant {
             let dims = self.embedding_provider.dimensions();
-            qdrant.ensure_collection(dims).await.map_err(|e| e.to_string())?;
+            qdrant
+                .ensure_collection(dims)
+                .await
+                .map_err(|e| e.to_string())?;
 
             let texts: Vec<String> = new_chunks.iter().map(|c| c.content.clone()).collect();
             let vectors = self.embedding_provider.embed_batch(&texts).await?;
@@ -843,7 +845,10 @@ impl MemoryEngine {
                 })
                 .collect();
 
-            qdrant.upsert_points(points).await.map_err(|e| e.to_string())?;
+            qdrant
+                .upsert_points(points)
+                .await
+                .map_err(|e| e.to_string())?;
         }
 
         Ok(count)
