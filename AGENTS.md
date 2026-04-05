@@ -1,6 +1,6 @@
 # AGENTS.md - The-One MCP Development Guide
 
-Rust MCP broker system (v0.6.0). All agents should follow these guidelines.
+Rust MCP broker system (v0.8.0). All agents should follow these guidelines.
 
 ## Build Commands
 
@@ -28,7 +28,7 @@ cargo test -p the-one-mcp
 bash scripts/release-gate.sh
 
 # Trigger cross-platform release (manual only — does NOT auto-trigger on tags)
-bash scripts/build.sh release v0.6.0
+bash scripts/build.sh release v0.8.0
 bash scripts/build.sh release --status
 ```
 
@@ -67,17 +67,21 @@ the-one-mcp/
 │   │           └── the-one-mcp.rs  # CLI binary (clap)
 │   ├── the-one-memory/        # RAG: chunker + embeddings + Qdrant + images
 │   │   └── src/
-│   │       ├── lib.rs         # Async MemoryEngine
-│   │       ├── chunker.rs     # Heading-aware markdown chunker
-│   │       ├── embeddings.rs  # fastembed 5.x (ONNX) + API provider
+│   │       ├── lib.rs             # Async MemoryEngine (Arc<RwLock<HashMap>> for watcher sharing)
+│   │       ├── chunker.rs         # Markdown + code chunker dispatcher (chunk_file)
+│   │       ├── chunker_rust.rs    # Rust language chunker (fn/struct/enum/impl/trait/mod/…)
+│   │       ├── chunker_python.rs  # Python chunker (def/async def/class + decorators)
+│   │       ├── chunker_typescript.rs # TypeScript/JavaScript chunker (shared engine)
+│   │       ├── chunker_go.rs      # Go chunker (func/type/var/const + paren blocks)
+│   │       ├── embeddings.rs      # fastembed 5.x (ONNX) + API provider
 │   │       ├── models_registry.rs # TOML model registry parser
-│   │       ├── reranker.rs    # Cross-encoder reranker
+│   │       ├── reranker.rs        # Cross-encoder reranker
 │   │       ├── image_embeddings.rs # CLIP-based image embedding (feature: image-embeddings)
 │   │       ├── image_ingest.rs    # Image indexing pipeline
 │   │       ├── thumbnail.rs       # Thumbnail generation
 │   │       ├── ocr.rs             # Tesseract OCR extraction (feature: image-ocr)
-│   │       ├── graph.rs       # LightRAG knowledge graph
-│   │       └── qdrant.rs      # Async Qdrant HTTP backend
+│   │       ├── graph.rs           # LightRAG knowledge graph
+│   │       └── qdrant.rs          # Async Qdrant HTTP backend
 │   ├── the-one-router/        # Routing + provider pool
 │   │   └── src/
 │   │       ├── lib.rs         # Router (sync + async)
@@ -143,6 +147,7 @@ the-one-mcp/
 4. **Rules-first routing** — nano LLM is optional enhancement
 5. **RAG for discovery, raw markdown for precision**
 6. **Single shared backend** with thin CLI adapters
+7. **Arc<RwLock<HashMap>> for shared state** — `memory_by_project` is wrapped in `Arc<RwLock<...>>` so the watcher's spawned tokio task can hold its own reference for auto-reindex without going through the broker
 
 ## Multi-CLI Support
 

@@ -131,7 +131,7 @@ All complete: Claude Code + Gemini CLI + OpenCode + Codex auto-detection, tiered
 
 - `cargo fmt --check` — passing
 - `cargo clippy --workspace --all-targets -- -D warnings` — passing
-- `cargo test --workspace` — **208 tests passing**
+- `cargo test --workspace` — **272 tests passing**
 - `cargo build --release -p the-one-mcp --bin the-one-mcp` — passing
 - `bash scripts/release-gate.sh` — passing
 - `bash scripts/build.sh check` — full CI pipeline passing

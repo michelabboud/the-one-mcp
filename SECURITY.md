@@ -65,9 +65,9 @@ We will respond within 48 hours and work with you on a fix.
 
 | Version | Supported |
 |---------|-----------|
-| v0.6.x | Current — active development |
-| v0.5.x | Security fixes only |
-| < v0.5.0 | Not supported |
+| v0.8.x | Current — active development |
+| v0.7.x | Security fixes only |
+| < v0.7.0 | Not supported |
 
 ## Dependencies
 

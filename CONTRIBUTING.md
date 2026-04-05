@@ -106,8 +106,9 @@ cargo test --workspace
 
 - [ ] `cargo fmt --check` passes
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings` passes
-- [ ] `cargo test --workspace` passes (208+ tests)
+- [ ] `cargo test --workspace` passes (272+ tests)
 - [ ] If touching `the-one-memory`: confirm `image-embeddings` feature still compiles (`cargo check -p the-one-memory --features image-embeddings`)
+- [ ] If touching language chunkers (`chunker_rust.rs`, `chunker_python.rs`, `chunker_typescript.rs`, `chunker_go.rs`): add/update chunker unit tests covering edge cases for that language
 - [ ] If touching image ingest or OCR: add tests covering path traversal rejection and file size limits
 - [ ] If touching reranker: add unit tests for score ordering and empty-input edge case
 - [ ] Schema changes: update corresponding file in `schemas/mcp/v1beta/` (35 schemas total)

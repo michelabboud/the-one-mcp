@@ -53,7 +53,7 @@ the-one-codex  ──> the-one-mcp
 
 **Async broker with sync SQLite**: `McpBroker` methods are all `async fn`. SQLite operations (from `the-one-core`) are synchronous and should be wrapped in `tokio::task::spawn_blocking` when called from async contexts. The broker currently calls them directly (they're fast file-based operations).
 
-**Per-project isolation**: Every project gets its own SQLite DB, manifests, memory engine, and docs manager, keyed by `{project_root}::{project_id}`. The `memory_by_project` and `docs_by_project` HashMaps use `tokio::sync::RwLock`.
+**Per-project isolation**: Every project gets its own SQLite DB, manifests, memory engine, and docs manager, keyed by `{project_root}::{project_id}`. `memory_by_project` is `Arc<RwLock<HashMap<String, MemoryEngine>>>` (Arc-wrapped so the watcher task can hold its own reference for auto-reindex). `docs_by_project` uses a plain `tokio::sync::RwLock`-wrapped HashMap.
 
 **Layered config**: Config resolves through 5 layers (defaults → global file → project file → env vars → runtime overrides). All fields are `Option` in the file/overlay structs, with defaults applied at the end in `AppConfig::load()`.
 

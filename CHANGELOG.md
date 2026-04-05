@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.8.1] - 2026-04-05
+
+### Changed
+- Documentation refresh: audited all guides and root docs for v0.8.0 accuracy. Added v0.7→v0.8 migration section to upgrade-guide. Updated stale test counts, version references, and feature mentions across guides. Added code-aware chunker mentions to complete-guide and architecture docs.
+
+### Dependencies
+- No changes (docs-only release)
+
 ## [0.8.0] - 2026-04-05
 
 ### Added
