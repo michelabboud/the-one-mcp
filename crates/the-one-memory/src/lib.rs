@@ -9,6 +9,7 @@ pub mod qdrant;
 pub mod reranker;
 pub mod sparse_embeddings;
 pub mod thumbnail;
+pub mod watcher;
 
 use std::collections::HashMap;
 use std::fs;
