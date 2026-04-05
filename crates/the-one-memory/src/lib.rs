@@ -35,6 +35,7 @@ pub mod chunker_rust_ts;
 pub mod chunker_typescript_ts;
 pub mod embeddings;
 pub mod graph;
+pub mod graph_extractor;
 pub mod image_embeddings;
 pub mod image_ingest;
 pub mod models_registry;
@@ -258,6 +259,12 @@ impl MemoryEngine {
     /// Get a reference to the knowledge graph.
     pub fn graph(&self) -> &KnowledgeGraph {
         &self.graph
+    }
+
+    /// Expose the indexed chunks for read-only access by the graph extraction
+    /// pipeline (v0.13.0). Returns a slice; callers should not mutate.
+    pub fn chunks(&self) -> &[ChunkMeta] {
+        &self.chunks
     }
 
     /// Ingest all `.md` files from a directory tree.

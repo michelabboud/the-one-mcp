@@ -7,7 +7,7 @@ use axum::response::{Html, IntoResponse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use rusqlite::Connection;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use the_one_core::backup::{backup_project_state, restore_project_state, BackupResult};
 use the_one_core::config::{update_project_config, ProjectConfigUpdate};
 use the_one_mcp::api::{
@@ -174,6 +174,145 @@ pub struct AdminHealthReport {
     pub recent_audit_events: usize,
 }
 
+/// Render the admin UI landing page served at `/`.
+///
+/// This is a static marketing / orientation page that explains what
+/// the-one-mcp is, exposes quick links to the other admin routes via a
+/// top nav, and points users at GitHub, docs, and issues. It does NOT
+/// hit the broker (no metrics, no project state) so it works even when
+/// the project directory is in a weird state.
+pub fn render_home_html(project_root: &str, project_id: &str) -> String {
+    let pkg_version = env!("CARGO_PKG_VERSION");
+    let project_root = html_escape(project_root);
+    let project_id = html_escape(project_id);
+    format!(
+        r##"<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>the-one-mcp — Admin UI</title>
+<style>{styles}{home_styles}</style>
+</head><body>
+<header>
+  <h1>the-one-mcp</h1>
+  <nav>
+    <a href="/">Home</a>
+    <a href="/dashboard">Dashboard</a>
+    <a href="/config">Config</a>
+    <a href="/audit">Audit</a>
+    <a href="/images">Images</a>
+    <a href="/swagger">API Docs</a>
+  </nav>
+</header>
+<main>
+  <section class="hero">
+    <h2>Semantic memory for your AI coding assistant</h2>
+    <p class="lead">
+      A Rust-native MCP broker that gives Claude Code, Gemini CLI, OpenCode, and Codex
+      unlimited, searchable memory of your entire project — docs, code, even screenshots.
+    </p>
+    <p class="version-line">
+      Running version <code>v{version}</code> · Project <code>{project_id}</code> · Root <code>{project_root}</code>
+    </p>
+  </section>
+
+  <section class="grid">
+    <article class="card">
+      <h3>Features</h3>
+      <ul class="feature-list">
+        <li><strong>17 MCP tools</strong> + 3 resource types (<code>docs</code>, <code>project</code>, <code>catalog</code>)</li>
+        <li><strong>Hybrid search</strong> — dense embeddings + SPLADE sparse vectors</li>
+        <li><strong>Tree-sitter code chunker</strong> for 13 languages</li>
+        <li><strong>184 curated CLI tools</strong> across 10 languages</li>
+        <li><strong>Auto-reindex</strong> watcher for markdown + images</li>
+        <li><strong>Backup / restore</strong> via <code>maintain: backup</code></li>
+        <li><strong>Observability</strong> — 15 metrics counters via <code>observe</code></li>
+      </ul>
+    </article>
+
+    <article class="card">
+      <h3>Admin sections</h3>
+      <ul class="link-list">
+        <li><a href="/dashboard">Dashboard</a> — health, metrics, provider pool</li>
+        <li><a href="/config">Config</a> — 5-layer config viewer + editor</li>
+        <li><a href="/audit">Audit</a> — append-only event log</li>
+        <li><a href="/images">Images</a> — indexed image gallery</li>
+        <li><a href="/swagger">API Docs</a> — OpenAPI / Swagger for the broker</li>
+        <li><a href="/api/health">/api/health</a> — JSON health probe</li>
+      </ul>
+    </article>
+
+    <article class="card">
+      <h3>Project & community</h3>
+      <ul class="link-list">
+        <li><a href="https://github.com/michelabboud/the-one-mcp" target="_blank" rel="noopener">GitHub repository</a></li>
+        <li><a href="https://github.com/michelabboud/the-one-mcp/issues" target="_blank" rel="noopener">Report an issue</a></li>
+        <li><a href="https://github.com/michelabboud/the-one-mcp/pulls" target="_blank" rel="noopener">Pull requests</a></li>
+        <li><a href="https://github.com/michelabboud/the-one-mcp/releases" target="_blank" rel="noopener">Releases</a></li>
+        <li><a href="https://github.com/michelabboud/the-one-mcp/blob/main/CHANGELOG.md" target="_blank" rel="noopener">Changelog</a></li>
+        <li><a href="https://github.com/michelabboud/the-one-mcp/blob/main/CONTRIBUTING.md" target="_blank" rel="noopener">Contributing</a></li>
+      </ul>
+    </article>
+
+    <article class="card">
+      <h3>Documentation</h3>
+      <ul class="link-list">
+        <li><a href="https://github.com/michelabboud/the-one-mcp/blob/main/INSTALL.md" target="_blank" rel="noopener">Install guide</a></li>
+        <li><a href="https://github.com/michelabboud/the-one-mcp/blob/main/docs/guides/quickstart.md" target="_blank" rel="noopener">Quickstart</a></li>
+        <li><a href="https://github.com/michelabboud/the-one-mcp/blob/main/docs/guides/api-reference.md" target="_blank" rel="noopener">API reference</a></li>
+        <li><a href="https://github.com/michelabboud/the-one-mcp/blob/main/docs/guides/mcp-resources.md" target="_blank" rel="noopener">MCP Resources guide</a></li>
+        <li><a href="https://github.com/michelabboud/the-one-mcp/blob/main/docs/guides/code-chunking.md" target="_blank" rel="noopener">Code chunking (tree-sitter)</a></li>
+        <li><a href="https://github.com/michelabboud/the-one-mcp/blob/main/docs/guides/hybrid-search.md" target="_blank" rel="noopener">Hybrid search</a></li>
+        <li><a href="https://github.com/michelabboud/the-one-mcp/blob/main/docs/guides/backup-restore.md" target="_blank" rel="noopener">Backup &amp; restore</a></li>
+        <li><a href="https://github.com/michelabboud/the-one-mcp/blob/main/docs/guides/observability.md" target="_blank" rel="noopener">Observability</a></li>
+        <li><a href="https://github.com/michelabboud/the-one-mcp/blob/main/docs/guides/troubleshooting.md" target="_blank" rel="noopener">Troubleshooting</a></li>
+      </ul>
+    </article>
+  </section>
+
+  <section class="card cta">
+    <h3>Quick start</h3>
+    <p>Install on a new machine:</p>
+    <pre><code>curl -fsSL https://raw.githubusercontent.com/michelabboud/the-one-mcp/main/scripts/install.sh | bash</code></pre>
+    <p class="muted">Auto-detects your OS, downloads the right binary, registers with Claude Code / Gemini CLI / OpenCode / Codex.</p>
+  </section>
+</main>
+<footer class="home-footer">
+  <p>
+    the-one-mcp · Apache-2.0 ·
+    <a href="https://github.com/michelabboud/the-one-mcp" target="_blank" rel="noopener">github.com/michelabboud/the-one-mcp</a>
+  </p>
+</footer>
+</body></html>"##,
+        styles = base_styles(),
+        home_styles = home_styles(),
+        version = pkg_version,
+        project_root = project_root,
+        project_id = project_id,
+    )
+}
+
+/// Extra styles for the landing page only. Kept separate from
+/// `base_styles()` so dashboard/config/audit/images pages stay visually
+/// consistent and the home page gets a bit of hero polish.
+fn home_styles() -> &'static str {
+    ".hero{background:#fff;border:1px solid #dbe3ef;border-radius:12px;padding:28px 28px 24px;margin-bottom:20px;box-shadow:0 4px 10px rgba(2,6,23,.06)}\
+     .hero h2{margin:0 0 10px 0;font-size:1.6rem;color:#0b3d91}\
+     .hero .lead{margin:0 0 14px 0;font-size:1.08rem;color:#1e293b;max-width:780px;line-height:1.55}\
+     .hero .version-line{margin:0;color:#475569;font-size:.9rem}\
+     .hero .version-line code{background:#eef2f8;padding:2px 6px;border-radius:4px;font-size:.88rem}\
+     .feature-list,.link-list{margin:0;padding-left:20px;line-height:1.65}\
+     .feature-list li,.link-list li{margin-bottom:4px}\
+     .link-list a{color:#0b3d91;text-decoration:none}\
+     .link-list a:hover{text-decoration:underline}\
+     .cta{margin-top:20px}\
+     .cta pre{background:#0f172a;color:#e2e8f0;padding:14px 16px;border-radius:8px;overflow-x:auto;margin:8px 0}\
+     .cta pre code{background:transparent;color:inherit;padding:0}\
+     .home-footer{padding:28px 20px;text-align:center;color:#475569;border-top:1px solid #dbe3ef;margin-top:24px}\
+     .home-footer a{color:#0b3d91;text-decoration:none}\
+     .home-footer a:hover{text-decoration:underline}"
+}
+
 pub fn render_dashboard_html(report: &AdminHealthReport) -> String {
     let provider = html_escape(&report.config.provider);
     let nano_provider = html_escape(&report.config.nano_provider);
@@ -211,6 +350,498 @@ fn html_escape(value: &str) -> String {
         .replace('\'', "&#39;")
 }
 
+// ---------------------------------------------------------------------------
+// Project registry — tracks "known projects" on this machine for multi-project
+// UI support (v0.13.0). Backed by ~/.the-one/projects.json, updated whenever a
+// project is initialized through the broker or visited through the admin UI.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ProjectRegistryEntry {
+    pub project_root: String,
+    pub project_id: String,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub last_seen_epoch: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ProjectRegistry {
+    #[serde(default)]
+    pub projects: Vec<ProjectRegistryEntry>,
+}
+
+impl ProjectRegistry {
+    /// Load the registry from `~/.the-one/projects.json`. Returns an empty
+    /// registry if the file does not exist yet.
+    pub fn load() -> Self {
+        let Some(path) = Self::registry_path() else {
+            return Self::default();
+        };
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return Self::default();
+        };
+        serde_json::from_str(&text).unwrap_or_default()
+    }
+
+    /// Save the registry back to disk (best-effort; errors are logged and
+    /// swallowed so UI pages never fail because of a missing home dir).
+    pub fn save(&self) {
+        let Some(path) = Self::registry_path() else {
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(json) = serde_json::to_vec_pretty(self) {
+            let _ = std::fs::write(&path, json);
+        }
+    }
+
+    /// Upsert an entry keyed on `{project_root, project_id}` and bump its
+    /// `last_seen_epoch` to now. Called from every admin UI handler so the
+    /// list naturally self-populates as the user browses.
+    pub fn touch(&mut self, project_root: &str, project_id: &str) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        if let Some(entry) = self
+            .projects
+            .iter_mut()
+            .find(|e| e.project_root == project_root && e.project_id == project_id)
+        {
+            entry.last_seen_epoch = now;
+            return;
+        }
+        self.projects.push(ProjectRegistryEntry {
+            project_root: project_root.to_string(),
+            project_id: project_id.to_string(),
+            label: None,
+            last_seen_epoch: now,
+        });
+    }
+
+    fn registry_path() -> Option<PathBuf> {
+        let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
+        Some(PathBuf::from(home).join(".the-one").join("projects.json"))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shared layout helpers
+// ---------------------------------------------------------------------------
+
+/// The list of nav items. Exposed as a const so adding a new page only needs
+/// one edit here plus the handler itself.
+const NAV_ITEMS: &[(&str, &str)] = &[
+    ("/", "Home"),
+    ("/dashboard", "Dashboard"),
+    ("/ingest", "Ingest"),
+    ("/graph", "Graph"),
+    ("/images", "Images"),
+    ("/config", "Config"),
+    ("/audit", "Audit"),
+    ("/swagger", "API"),
+];
+
+/// Render the shared top navigation bar with the active link highlighted and
+/// a project switcher dropdown. Used by every admin UI page.
+pub fn render_nav(
+    active_path: &str,
+    current_project_id: &str,
+    registry: &ProjectRegistry,
+) -> String {
+    let mut html = String::from("<nav class=\"topnav\"><div class=\"brand\"><a href=\"/\">the-one-mcp</a></div><div class=\"nav-links\">");
+    for (path, label) in NAV_ITEMS {
+        let cls = if *path == active_path {
+            " class=\"active\""
+        } else {
+            ""
+        };
+        html.push_str(&format!("<a href=\"{}\"{}>{}</a>", path, cls, label));
+    }
+    html.push_str("</div><div class=\"project-switcher\"><label>Project</label><select onchange=\"window.__switchProject(this.value)\" id=\"project-select\">");
+
+    // Sort projects by most recent first for a sensible default order.
+    let mut sorted: Vec<&ProjectRegistryEntry> = registry.projects.iter().collect();
+    sorted.sort_by_key(|e| -e.last_seen_epoch);
+    let current_escaped = html_escape(current_project_id);
+    let mut found_current = false;
+    for entry in &sorted {
+        let label = entry
+            .label
+            .clone()
+            .unwrap_or_else(|| entry.project_id.clone());
+        let escaped_id = html_escape(&entry.project_id);
+        let escaped_label = html_escape(&label);
+        let selected = if entry.project_id == current_project_id {
+            found_current = true;
+            " selected"
+        } else {
+            ""
+        };
+        html.push_str(&format!(
+            "<option value=\"{}\"{}>{}</option>",
+            escaped_id, selected, escaped_label
+        ));
+    }
+    if !found_current && !current_project_id.is_empty() {
+        html.push_str(&format!(
+            "<option value=\"{}\" selected>{} (current)</option>",
+            current_escaped, current_escaped
+        ));
+    }
+    html.push_str("</select></div></nav>");
+
+    // Tiny JS stub that just confirms and logs — actual cross-project navigation
+    // requires the broker to be restarted with a new THE_ONE_PROJECT_ID env var,
+    // since the embedded UI is currently scoped to a single project at startup.
+    // Future work: surface the selected project via a cookie + a per-request
+    // project override so this becomes live.
+    html.push_str("<script>window.__switchProject=function(pid){alert('Project switching requires restarting the-one-mcp server with THE_ONE_PROJECT_ID='+pid+'.\\n\\nThe current embedded UI is scoped to one project per server instance. Live switching is a v0.13.1 roadmap item.');document.getElementById('project-select').value='");
+    html.push_str(&current_escaped);
+    html.push_str("';};</script>");
+    html
+}
+
+/// Wrap a body HTML fragment in the full admin UI page shell with shared
+/// styles, head, and nav bar. Callers only have to build their `main` content.
+pub fn render_page_shell(
+    title: &str,
+    active_path: &str,
+    current_project_id: &str,
+    registry: &ProjectRegistry,
+    body: &str,
+) -> String {
+    format!(
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>{title} — the-one-mcp</title><style>{styles}{shell_styles}</style></head><body>{nav}<main>{body}</main><footer class=\"page-footer\">the-one-mcp · v{version} · <a href=\"https://github.com/michelabboud/the-one-mcp\" target=\"_blank\" rel=\"noopener\">GitHub</a></footer></body></html>",
+        title = html_escape(title),
+        styles = base_styles(),
+        shell_styles = shell_styles(),
+        nav = render_nav(active_path, current_project_id, registry),
+        body = body,
+        version = env!("CARGO_PKG_VERSION"),
+    )
+}
+
+/// Additional styles for the shared page shell (top nav, project switcher,
+/// page footer, dark-mode tokens). Stacked on top of `base_styles()`.
+fn shell_styles() -> &'static str {
+    ":root{--accent:#0b3d91;--accent2:#14532d;--bg-soft:#f4f7fb;--card:#fff;--border:#dbe3ef;--text:#0f172a;--muted:#475569}\
+     @media (prefers-color-scheme:dark){:root{--bg-soft:#0b0d11;--card:#131720;--border:#1f2530;--text:#e6e9ef;--muted:#9aa4b5;--accent:#7aa2ff;--accent2:#9bb8ff}}\
+     body{background:var(--bg-soft);color:var(--text)}\
+     .card{background:var(--card);border-color:var(--border);color:var(--text)}\
+     table{background:var(--card);color:var(--text)}th{background:var(--border)}th,td{border-color:var(--border)}\
+     nav.topnav{background:linear-gradient(120deg,var(--accent),var(--accent2));color:#fff;padding:10px 20px;display:flex;align-items:center;gap:20px;flex-wrap:wrap;position:sticky;top:0;z-index:10;box-shadow:0 2px 8px rgba(0,0,0,.12)}\
+     nav.topnav .brand a{color:#fff;text-decoration:none;font-weight:800;font-size:1.08rem;letter-spacing:-.01em}\
+     nav.topnav .nav-links{display:flex;gap:6px;flex:1;flex-wrap:wrap}\
+     nav.topnav .nav-links a{color:rgba(255,255,255,.86);text-decoration:none;padding:7px 12px;border-radius:6px;font-weight:500;font-size:.94rem;transition:background .12s}\
+     nav.topnav .nav-links a:hover{background:rgba(255,255,255,.12);color:#fff}\
+     nav.topnav .nav-links a.active{background:rgba(255,255,255,.2);color:#fff;font-weight:700}\
+     nav.topnav .project-switcher{display:flex;align-items:center;gap:8px}\
+     nav.topnav .project-switcher label{font-size:.82rem;color:rgba(255,255,255,.78);text-transform:uppercase;letter-spacing:.04em}\
+     nav.topnav .project-switcher select{padding:6px 10px;border-radius:6px;border:1px solid rgba(255,255,255,.2);background:rgba(255,255,255,.1);color:#fff;font:inherit;max-width:220px}\
+     nav.topnav .project-switcher select option{background:var(--card);color:var(--text)}\
+     .page-footer{padding:24px 20px;text-align:center;color:var(--muted);font-size:.88rem;border-top:1px solid var(--border);margin-top:40px}\
+     .page-footer a{color:var(--accent);text-decoration:none}\
+     .page-footer a:hover{text-decoration:underline}\
+     h1{font-size:1.6rem;margin:0 0 6px;letter-spacing:-.01em}\
+     h2{font-size:1.25rem;margin:0 0 10px;letter-spacing:-.005em}\
+     h3{font-size:1.02rem;margin:0 0 8px}\
+     .page-header{margin-bottom:20px}\
+     .page-header h1{margin-bottom:4px}\
+     .page-header .subtitle{color:var(--muted);font-size:.95rem}\
+     .stat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px;margin-bottom:24px}\
+     .stat{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:16px}\
+     .stat .label{font-size:.78rem;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin-bottom:4px}\
+     .stat .value{font-size:1.7rem;font-weight:700;line-height:1;letter-spacing:-.02em;color:var(--accent)}\
+     .stat .hint{font-size:.82rem;color:var(--muted);margin-top:4px}\
+     .empty-state{background:var(--card);border:2px dashed var(--border);border-radius:12px;padding:40px 30px;text-align:center;color:var(--muted)}\
+     .empty-state h3{color:var(--text);margin-bottom:8px}\
+     .empty-state .cta{margin-top:14px}\
+     .bar-chart{display:flex;flex-direction:column;gap:8px;margin:8px 0}\
+     .bar-row{display:grid;grid-template-columns:160px 1fr auto;gap:10px;align-items:center;font-size:.88rem}\
+     .bar-row .name{color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}\
+     .bar-row .track{background:var(--bg-soft);height:14px;border-radius:7px;overflow:hidden;border:1px solid var(--border)}\
+     .bar-row .fill{background:linear-gradient(90deg,var(--accent),var(--accent2));height:100%;border-radius:7px}\
+     .bar-row .num{font-variant-numeric:tabular-nums;font-weight:600;color:var(--text)}\
+     .badge{display:inline-block;padding:2px 8px;border-radius:12px;font-size:.78rem;font-weight:600;background:var(--bg-soft);color:var(--muted);border:1px solid var(--border)}\
+     .badge.ok{background:#dcfce7;color:#166534;border-color:#86efac}\
+     .badge.warn{background:#fef3c7;color:#92400e;border-color:#fcd34d}\
+     .badge.err{background:#fee2e2;color:#991b1b;border-color:#fca5a5}\
+     @media (max-width:720px){nav.topnav{flex-direction:column;align-items:flex-start}nav.topnav .nav-links{overflow-x:auto;white-space:nowrap}}"
+}
+
+// ---------------------------------------------------------------------------
+// Home / landing page (replaces inline render in v0.12.x)
+// ---------------------------------------------------------------------------
+
+pub fn render_home_page_v2(
+    project_root: &str,
+    project_id: &str,
+    registry: &ProjectRegistry,
+) -> String {
+    let project_root_esc = html_escape(project_root);
+    let project_id_esc = html_escape(project_id);
+    let body = format!(
+        r##"<section class="hero card">
+  <h1>Semantic memory for your AI coding assistant</h1>
+  <p class="lead">A Rust-native MCP broker that gives Claude Code, Gemini CLI, OpenCode, and Codex unlimited, searchable memory of your entire project — docs, code, even screenshots.</p>
+  <p class="version-line">Running <code>v{version}</code> · Project <code>{pid}</code> · Root <code>{root}</code></p>
+</section>
+
+<section class="grid">
+  <article class="card">
+    <h3>What this server does</h3>
+    <ul class="feature-list">
+      <li><strong>17 MCP tools</strong> + 3 resource types (<code>docs</code>, <code>project</code>, <code>catalog</code>)</li>
+      <li><strong>Hybrid retrieval</strong> — dense + sparse (SPLADE) + optional cross-encoder rerank</li>
+      <li><strong>Graph RAG</strong> (latent) — entity/relation extraction with naive/local/global/hybrid modes</li>
+      <li><strong>Tree-sitter code chunker</strong> for 13 languages</li>
+      <li><strong>184 curated CLI tools</strong> across 10 languages</li>
+      <li><strong>Auto-reindex</strong> watcher for markdown + images</li>
+      <li><strong>Backup / restore</strong> via <code>maintain: backup</code></li>
+      <li><strong>Observability</strong> — 15 metrics counters via <code>observe</code></li>
+    </ul>
+  </article>
+
+  <article class="card">
+    <h3>Admin sections</h3>
+    <ul class="link-list">
+      <li><a href="/dashboard">Dashboard</a> — health, metrics, provider pool</li>
+      <li><a href="/ingest">Ingest</a> — upload docs, images, code</li>
+      <li><a href="/graph">Graph</a> — entity / relation explorer</li>
+      <li><a href="/images">Images</a> — indexed image gallery</li>
+      <li><a href="/config">Config</a> — 5-layer config viewer + editor</li>
+      <li><a href="/audit">Audit</a> — append-only event log</li>
+      <li><a href="/swagger">API Docs</a> — OpenAPI / Swagger</li>
+      <li><a href="/api/health">/api/health</a> — JSON health probe</li>
+    </ul>
+  </article>
+
+  <article class="card">
+    <h3>Project &amp; community</h3>
+    <ul class="link-list">
+      <li><a href="https://github.com/michelabboud/the-one-mcp" target="_blank" rel="noopener">GitHub repository</a></li>
+      <li><a href="https://github.com/michelabboud/the-one-mcp/issues" target="_blank" rel="noopener">Report an issue</a></li>
+      <li><a href="https://github.com/michelabboud/the-one-mcp/pulls" target="_blank" rel="noopener">Pull requests</a></li>
+      <li><a href="https://github.com/michelabboud/the-one-mcp/releases" target="_blank" rel="noopener">Releases</a></li>
+      <li><a href="https://github.com/michelabboud/the-one-mcp/blob/main/CHANGELOG.md" target="_blank" rel="noopener">Changelog</a></li>
+      <li><a href="https://github.com/michelabboud/the-one-mcp/blob/main/CONTRIBUTING.md" target="_blank" rel="noopener">Contributing</a></li>
+    </ul>
+  </article>
+
+  <article class="card">
+    <h3>Documentation</h3>
+    <ul class="link-list">
+      <li><a href="https://github.com/michelabboud/the-one-mcp/blob/main/INSTALL.md" target="_blank" rel="noopener">Install guide</a></li>
+      <li><a href="https://github.com/michelabboud/the-one-mcp/blob/main/docs/guides/quickstart.md" target="_blank" rel="noopener">Quickstart</a></li>
+      <li><a href="https://github.com/michelabboud/the-one-mcp/blob/main/docs/guides/api-reference.md" target="_blank" rel="noopener">API reference</a></li>
+      <li><a href="https://github.com/michelabboud/the-one-mcp/blob/main/docs/guides/mcp-resources.md" target="_blank" rel="noopener">MCP Resources</a></li>
+      <li><a href="https://github.com/michelabboud/the-one-mcp/blob/main/docs/guides/code-chunking.md" target="_blank" rel="noopener">Code chunking</a></li>
+      <li><a href="https://github.com/michelabboud/the-one-mcp/blob/main/docs/guides/hybrid-search.md" target="_blank" rel="noopener">Hybrid search</a></li>
+      <li><a href="https://github.com/michelabboud/the-one-mcp/blob/main/docs/guides/graph-rag.md" target="_blank" rel="noopener">Graph RAG</a></li>
+      <li><a href="https://github.com/michelabboud/the-one-mcp/blob/main/docs/guides/backup-restore.md" target="_blank" rel="noopener">Backup &amp; restore</a></li>
+      <li><a href="https://github.com/michelabboud/the-one-mcp/blob/main/docs/guides/observability.md" target="_blank" rel="noopener">Observability</a></li>
+    </ul>
+  </article>
+</section>
+
+<section class="card cta">
+  <h3>Quick start</h3>
+  <p>Install on a new machine:</p>
+  <pre><code>curl -fsSL https://raw.githubusercontent.com/michelabboud/the-one-mcp/main/scripts/install.sh | bash</code></pre>
+  <p class="muted">Auto-detects your OS, downloads the right binary, registers with Claude Code / Gemini CLI / OpenCode / Codex.</p>
+</section>"##,
+        version = env!("CARGO_PKG_VERSION"),
+        pid = project_id_esc,
+        root = project_root_esc,
+    );
+    let home_only_styles = "\
+        <style>\
+        .hero{padding:28px 28px 24px;margin-bottom:20px}\
+        .hero h1{font-size:1.9rem;color:var(--accent);margin-bottom:10px}\
+        .hero .lead{margin:0 0 14px 0;font-size:1.08rem;color:var(--text);max-width:780px;line-height:1.55}\
+        .hero .version-line{margin:0;color:var(--muted);font-size:.9rem}\
+        .hero .version-line code{background:var(--bg-soft);padding:2px 6px;border-radius:4px;font-size:.88rem;border:1px solid var(--border)}\
+        .feature-list,.link-list{margin:0;padding-left:20px;line-height:1.65}\
+        .feature-list li,.link-list li{margin-bottom:4px}\
+        .link-list a{color:var(--accent);text-decoration:none}\
+        .link-list a:hover{text-decoration:underline}\
+        .cta{margin-top:20px}\
+        .cta pre{background:#0f172a;color:#e2e8f0;padding:14px 16px;border-radius:8px;overflow-x:auto;margin:8px 0}\
+        .cta pre code{background:transparent;color:inherit;padding:0}\
+        </style>\
+    ";
+    let body_with_styles = format!("{home_only_styles}{body}");
+    render_page_shell("Home", "/", project_id, registry, &body_with_styles)
+}
+
+// ---------------------------------------------------------------------------
+// /graph page — entity / relation explorer with Sigma.js viz
+// ---------------------------------------------------------------------------
+
+pub fn render_graph_page(
+    current_project_id: &str,
+    entity_count: usize,
+    relation_count: usize,
+    top_types: &[(String, usize)],
+    registry: &ProjectRegistry,
+) -> String {
+    let body = if entity_count == 0 {
+        String::from(
+            r#"<div class="page-header"><h1>Graph RAG Explorer</h1><p class="subtitle">Entity-relation knowledge graph extracted from your project docs.</p></div>
+<div class="empty-state">
+  <h3>No graph data yet</h3>
+  <p>The knowledge graph is empty. Graph RAG extraction runs on top of your existing memory index and identifies entities (people, technologies, concepts) and the relationships between them.</p>
+  <p>To populate the graph:</p>
+  <ol style="text-align:left;display:inline-block;margin:10px auto">
+    <li>Enable extraction in config: <code>graph_enabled: true</code></li>
+    <li>Point it at an LLM: set <code>graph_extraction_model</code> and <code>graph_extraction_base_url</code></li>
+    <li>Trigger extraction via <code>maintain: action: graph.extract</code></li>
+  </ol>
+  <p class="cta"><a class="btn primary" href="https://github.com/michelabboud/the-one-mcp/blob/main/docs/guides/graph-rag.md" target="_blank" rel="noopener">Read the Graph RAG guide</a></p>
+</div>"#,
+        )
+    } else {
+        let mut top_types_html = String::new();
+        let max = top_types.iter().map(|(_, n)| *n).max().unwrap_or(1);
+        for (ty, count) in top_types {
+            let pct = (*count as f64 / max as f64 * 100.0) as u32;
+            top_types_html.push_str(&format!(
+                "<div class=\"bar-row\"><span class=\"name\">{}</span><div class=\"track\"><div class=\"fill\" style=\"width:{}%\"></div></div><span class=\"num\">{}</span></div>",
+                html_escape(ty), pct, count
+            ));
+        }
+        format!(
+            r##"<div class="page-header"><h1>Graph RAG Explorer</h1><p class="subtitle">Entity-relation knowledge graph extracted from your project docs.</p></div>
+<div class="stat-grid">
+  <div class="stat"><div class="label">Entities</div><div class="value">{entities}</div><div class="hint">Unique entities in the knowledge graph</div></div>
+  <div class="stat"><div class="label">Relations</div><div class="value">{relations}</div><div class="hint">Directed edges between entities</div></div>
+  <div class="stat"><div class="label">Density</div><div class="value">{density}</div><div class="hint">Avg relations per entity</div></div>
+</div>
+
+<div class="grid">
+  <article class="card">
+    <h3>Top entity types</h3>
+    <div class="bar-chart">{types_html}</div>
+  </article>
+  <article class="card">
+    <h3>Graph visualization</h3>
+    <p class="muted">Renders via Sigma.js from <code>/api/graph</code>. Full interactive viz (force layout, search, filter by depth) is a v0.13.1 roadmap item.</p>
+    <div id="graph-viz" style="width:100%;height:360px;background:var(--bg-soft);border:1px solid var(--border);border-radius:8px;display:flex;align-items:center;justify-content:center;color:var(--muted)">Graph viz placeholder</div>
+    <p class="muted" style="margin-top:10px"><a href="/api/graph">Download raw JSON: /api/graph</a></p>
+  </article>
+</div>
+
+<section class="card" style="margin-top:20px">
+  <h3>Query modes</h3>
+  <table>
+    <thead><tr><th>Mode</th><th>What it searches</th><th>Best for</th></tr></thead>
+    <tbody>
+      <tr><td><code>naive</code></td><td>Pure vector search over chunks</td><td>Free-text semantic queries</td></tr>
+      <tr><td><code>local</code></td><td>Entity-focused graph walk</td><td>"What is X?" queries targeting specific entities</td></tr>
+      <tr><td><code>global</code></td><td>Relation-focused traversal</td><td>"How does X relate to Y?" thematic queries</td></tr>
+      <tr><td><code>hybrid</code> (default)</td><td>Vector + graph fused</td><td>General-purpose; best overall quality</td></tr>
+    </tbody>
+  </table>
+</section>"##,
+            entities = entity_count,
+            relations = relation_count,
+            density = if entity_count > 0 {
+                format!("{:.1}", relation_count as f64 / entity_count as f64)
+            } else {
+                "0".to_string()
+            },
+            types_html = top_types_html,
+        )
+    };
+    render_page_shell("Graph", "/graph", current_project_id, registry, &body)
+}
+
+// ---------------------------------------------------------------------------
+// /ingest page — multi-format upload UI
+// ---------------------------------------------------------------------------
+
+pub fn render_ingest_page(current_project_id: &str, registry: &ProjectRegistry) -> String {
+    let body = r##"<div class="page-header"><h1>Ingest content</h1><p class="subtitle">Add documents, code, and images to the project's semantic index.</p></div>
+
+<div class="grid">
+  <article class="card">
+    <h3>📝 Markdown doc</h3>
+    <p class="muted">Save a markdown file into <code>.the-one/docs/</code> and chunk it into the memory index.</p>
+    <form id="md-form" class="form-grid">
+      <label class="field"><span>Path (relative)</span><input name="path" placeholder="notes/2026-04-06.md" required></label>
+      <label class="field"><span>Content</span><textarea name="content" rows="8" style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;padding:10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-soft);color:var(--text)" required placeholder="# Title&#10;&#10;Body content..."></textarea></label>
+      <div class="actions"><button class="btn primary" type="submit">Save &amp; index</button></div>
+      <p id="md-result" class="muted"></p>
+    </form>
+  </article>
+
+  <article class="card">
+    <h3>🖼️ Image file</h3>
+    <p class="muted">Embed an image path already on disk into the project's image collection. Supports .png, .jpg, .jpeg, .webp.</p>
+    <form id="img-form" class="form-grid">
+      <label class="field"><span>Absolute or relative path</span><input name="path" placeholder="/abs/path/to/screenshot.png" required></label>
+      <label class="field"><span>Caption (optional)</span><input name="caption" placeholder="Architecture diagram v3"></label>
+      <div class="actions"><button class="btn primary" type="submit">Embed image</button></div>
+      <p id="img-result" class="muted"></p>
+    </form>
+  </article>
+
+  <article class="card">
+    <h3>💻 Code file</h3>
+    <p class="muted">Index a source file with the tree-sitter chunker. Supported extensions: <code>.rs .py .ts .tsx .js .jsx .go .c .cpp .java .kt .php .rb .swift .zig</code></p>
+    <form id="code-form" class="form-grid">
+      <label class="field"><span>Path (relative to project root)</span><input name="path" placeholder="src/main.rs" required></label>
+      <label class="field"><span>Content</span><textarea name="content" rows="8" style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;padding:10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-soft);color:var(--text)" required></textarea></label>
+      <div class="actions"><button class="btn primary" type="submit">Chunk &amp; index</button></div>
+      <p id="code-result" class="muted"></p>
+    </form>
+  </article>
+
+  <article class="card">
+    <h3>🔄 Reindex project</h3>
+    <p class="muted">Force a full re-scan of all managed docs. Useful after a backup restore or when you've edited files outside the watcher's view.</p>
+    <div class="actions"><button id="reindex-btn" class="btn primary">Trigger reindex</button></div>
+    <p id="reindex-result" class="muted"></p>
+  </article>
+</div>
+
+<script>
+function wire(formId, resultId, payloadFn, endpoint){
+  var f=document.getElementById(formId);
+  var out=document.getElementById(resultId);
+  f.addEventListener('submit',async function(e){
+    e.preventDefault();
+    out.textContent='Working...';
+    try{
+      var payload=payloadFn(new FormData(f));
+      var res=await fetch(endpoint,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(payload)});
+      var body=await res.json().catch(function(){return {};});
+      out.textContent=res.ok?('✅ '+(body.message||JSON.stringify(body))):('❌ '+(body.error||('HTTP '+res.status)));
+      if(res.ok)f.reset();
+    }catch(err){out.textContent='❌ '+err.message;}
+  });
+}
+wire('md-form','md-result',function(d){return {path:d.get('path'),content:d.get('content')};},'/api/ingest/markdown');
+wire('img-form','img-result',function(d){return {path:d.get('path'),caption:d.get('caption')||null};},'/api/ingest/image');
+wire('code-form','code-result',function(d){return {path:d.get('path'),content:d.get('content')};},'/api/ingest/code');
+document.getElementById('reindex-btn').addEventListener('click',async function(){
+  var out=document.getElementById('reindex-result');
+  out.textContent='Reindexing...';
+  try{
+    var res=await fetch('/api/ingest/reindex',{method:'POST'});
+    var body=await res.json().catch(function(){return {};});
+    out.textContent=res.ok?('✅ '+(body.message||'Reindex complete')):('❌ '+(body.error||'failed'));
+  }catch(e){out.textContent='❌ '+e.message;}
+});
+</script>"##;
+    render_page_shell("Ingest", "/ingest", current_project_id, registry, body)
+}
+
 pub async fn start_embedded_ui_runtime(
     admin: Arc<AdminUi>,
     project_root: PathBuf,
@@ -224,16 +855,27 @@ pub async fn start_embedded_ui_runtime(
     };
 
     let app = Router::new()
+        .route("/", get(home_handler))
         .route("/dashboard", get(dashboard_handler))
         .route("/audit", get(audit_page_handler))
         .route("/config", get(config_page_handler))
         .route("/swagger", get(swagger_ui_page_handler))
         .route("/images", get(images_page_handler))
+        .route("/ingest", get(ingest_page_handler))
+        .route("/graph", get(graph_page_handler))
         .route("/images/thumbnail/{hash}", get(images_thumbnail_handler))
         .route("/api/images", get(api_images_handler))
         .route("/api/health", get(health_handler))
         .route("/api/swagger", get(swagger_handler))
         .route("/api/config", post(config_update_handler))
+        .route("/api/projects", get(api_projects_handler))
+        .route("/api/models", get(api_models_handler))
+        .route("/api/graph", get(api_graph_handler))
+        .route("/api/ingest/markdown", post(api_ingest_markdown_handler))
+        .route("/api/ingest/image", post(api_ingest_image_handler))
+        .route("/api/ingest/code", post(api_ingest_code_handler))
+        .route("/api/ingest/reindex", post(api_ingest_reindex_handler))
+        .route("/api/graph/extract", post(api_graph_extract_handler))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(bind_addr)
@@ -258,19 +900,589 @@ pub async fn start_embedded_ui_runtime(
     })
 }
 
+async fn home_handler(State(state): State<EmbeddedUiState>) -> impl IntoResponse {
+    let mut registry = ProjectRegistry::load();
+    registry.touch(&state.project_root.display().to_string(), &state.project_id);
+    registry.save();
+    Html(render_home_page_v2(
+        &state.project_root.display().to_string(),
+        &state.project_id,
+        &registry,
+    ))
+    .into_response()
+}
+
+async fn ingest_page_handler(State(state): State<EmbeddedUiState>) -> impl IntoResponse {
+    let registry = ProjectRegistry::load();
+    Html(render_ingest_page(&state.project_id, &registry)).into_response()
+}
+
+async fn graph_page_handler(State(state): State<EmbeddedUiState>) -> impl IntoResponse {
+    let registry = ProjectRegistry::load();
+    // Load knowledge graph stats from the persisted file if any.
+    let (entity_count, relation_count, top_types) = load_graph_stats(&state.project_root);
+    Html(render_graph_page(
+        &state.project_id,
+        entity_count,
+        relation_count,
+        &top_types,
+        &registry,
+    ))
+    .into_response()
+}
+
+/// Read `<project_root>/.the-one/knowledge_graph.json` if present and return
+/// (entity_count, relation_count, top_entity_types). Safe fallback to zeroes
+/// on any error — the graph file is optional and may not exist yet.
+fn load_graph_stats(project_root: &Path) -> (usize, usize, Vec<(String, usize)>) {
+    let graph_path = project_root.join(".the-one").join("knowledge_graph.json");
+    let Ok(text) = std::fs::read_to_string(&graph_path) else {
+        return (0, 0, Vec::new());
+    };
+    let Ok(value): Result<serde_json::Value, _> = serde_json::from_str(&text) else {
+        return (0, 0, Vec::new());
+    };
+    let entities = value
+        .get("entities")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let relations = value
+        .get("relations")
+        .and_then(|v| v.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0);
+    let entity_count = entities.len();
+
+    // Count entity types and return top 8
+    let mut type_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for e in &entities {
+        if let Some(ty) = e.get("entity_type").and_then(|v| v.as_str()) {
+            *type_counts.entry(ty.to_string()).or_insert(0) += 1;
+        }
+    }
+    let mut top: Vec<(String, usize)> = type_counts.into_iter().collect();
+    top.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    top.truncate(8);
+
+    (entity_count, relations, top)
+}
+
+// ---------------------------------------------------------------------------
+// API handlers for the multi-project + ingest + graph UI features
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct ProjectsListResponse {
+    projects: Vec<ProjectRegistryEntry>,
+    current_project_id: String,
+}
+
+async fn api_projects_handler(State(state): State<EmbeddedUiState>) -> impl IntoResponse {
+    let registry = ProjectRegistry::load();
+    Json(ProjectsListResponse {
+        projects: registry.projects,
+        current_project_id: state.project_id.clone(),
+    })
+}
+
+#[derive(Serialize)]
+struct ModelEntry {
+    id: String,
+    name: String,
+    tier: String,
+    dims: usize,
+    size_mb: usize,
+    description: String,
+}
+
+#[derive(Serialize)]
+struct ModelsResponse {
+    local: Vec<ModelEntry>,
+    current_embedding_model: String,
+}
+
+async fn api_models_handler(State(state): State<EmbeddedUiState>) -> impl IntoResponse {
+    use the_one_core::config::{AppConfig, RuntimeOverrides};
+    use the_one_memory::models_registry::list_local_models;
+    let models = list_local_models();
+    let local: Vec<ModelEntry> = models
+        .into_iter()
+        .map(|m| ModelEntry {
+            // LocalModel doesn't carry a separate id field; the `name` field
+            // (e.g. "all-MiniLM-L6-v2") IS the identifier used throughout the
+            // config + embedding provider layers.
+            id: m.name.clone(),
+            name: m.name,
+            tier: m.tier,
+            dims: m.dims,
+            size_mb: m.size_mb as usize,
+            description: m.description,
+        })
+        .collect();
+    // Read the active embedding model directly from the resolved AppConfig —
+    // ConfigExportResponse doesn't include it yet, and we want the same
+    // 5-layer resolution as everything else.
+    let current = AppConfig::load(&state.project_root, RuntimeOverrides::default())
+        .map(|c| c.embedding_model)
+        .unwrap_or_default();
+    Json(ModelsResponse {
+        local,
+        current_embedding_model: current,
+    })
+}
+
+#[derive(Serialize, Deserialize)]
+struct GraphNode {
+    id: String,
+    label: String,
+    #[serde(rename = "type")]
+    node_type: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct GraphEdge {
+    source: String,
+    target: String,
+    #[serde(rename = "type")]
+    edge_type: String,
+}
+
+#[derive(Serialize)]
+struct GraphJsonResponse {
+    nodes: Vec<GraphNode>,
+    edges: Vec<GraphEdge>,
+    entity_count: usize,
+    relation_count: usize,
+}
+
+async fn api_graph_handler(State(state): State<EmbeddedUiState>) -> impl IntoResponse {
+    let graph_path = state
+        .project_root
+        .join(".the-one")
+        .join("knowledge_graph.json");
+    let text = match std::fs::read_to_string(&graph_path) {
+        Ok(t) => t,
+        Err(_) => {
+            return Json(GraphJsonResponse {
+                nodes: Vec::new(),
+                edges: Vec::new(),
+                entity_count: 0,
+                relation_count: 0,
+            })
+            .into_response();
+        }
+    };
+    let value: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
+    let entities = value
+        .get("entities")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let relations = value
+        .get("relations")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let nodes: Vec<GraphNode> = entities
+        .iter()
+        .filter_map(|e| {
+            Some(GraphNode {
+                id: e.get("name")?.as_str()?.to_string(),
+                label: e.get("name")?.as_str()?.to_string(),
+                node_type: e
+                    .get("entity_type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("entity")
+                    .to_string(),
+            })
+        })
+        .collect();
+    let edges: Vec<GraphEdge> = relations
+        .iter()
+        .filter_map(|r| {
+            Some(GraphEdge {
+                source: r.get("source")?.as_str()?.to_string(),
+                target: r.get("target")?.as_str()?.to_string(),
+                edge_type: r
+                    .get("relation_type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("relation")
+                    .to_string(),
+            })
+        })
+        .collect();
+
+    Json(GraphJsonResponse {
+        entity_count: nodes.len(),
+        relation_count: edges.len(),
+        nodes,
+        edges,
+    })
+    .into_response()
+}
+
+// ---- Ingest API handlers --------------------------------------------------
+
+#[derive(Deserialize)]
+struct IngestMarkdownPayload {
+    path: String,
+    content: String,
+}
+
+#[derive(Deserialize)]
+struct IngestImagePayload {
+    path: String,
+    caption: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct IngestCodePayload {
+    path: String,
+    content: String,
+}
+
+#[derive(Serialize)]
+struct ApiMessageResponse {
+    message: String,
+}
+
+async fn api_ingest_markdown_handler(
+    State(state): State<EmbeddedUiState>,
+    Json(payload): Json<IngestMarkdownPayload>,
+) -> impl IntoResponse {
+    // Safety: reject absolute paths and ..
+    let path = payload.path.trim();
+    if path.is_empty() || path.contains("..") || Path::new(path).is_absolute() {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "invalid path"})),
+        )
+            .into_response();
+    }
+    let docs_dir = state.project_root.join(".the-one").join("docs");
+    let full = docs_dir.join(path);
+    if let Some(parent) = full.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("create dir: {e}")})),
+            )
+                .into_response();
+        }
+    }
+    if let Err(e) = std::fs::write(&full, payload.content.as_bytes()) {
+        return (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("write: {e}")})),
+        )
+            .into_response();
+    }
+    Json(ApiMessageResponse {
+        message: format!(
+            "Saved to {}. Watcher will index it shortly (or run reindex).",
+            full.display()
+        ),
+    })
+    .into_response()
+}
+
+async fn api_ingest_image_handler(
+    State(state): State<EmbeddedUiState>,
+    Json(payload): Json<IngestImagePayload>,
+) -> impl IntoResponse {
+    use the_one_mcp::api::ImageIngestRequest;
+    match state
+        .admin
+        .broker()
+        .image_ingest(ImageIngestRequest {
+            project_root: state.project_root.display().to_string(),
+            project_id: state.project_id.clone(),
+            path: payload.path.clone(),
+            caption: payload.caption,
+        })
+        .await
+    {
+        Ok(resp) => Json(ApiMessageResponse {
+            message: format!(
+                "Embedded {} (dims={}, ocr={}, thumb={})",
+                resp.path, resp.dims, resp.ocr_extracted, resp.thumbnail_generated
+            ),
+        })
+        .into_response(),
+        Err(e) => (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+async fn api_ingest_code_handler(
+    State(state): State<EmbeddedUiState>,
+    Json(payload): Json<IngestCodePayload>,
+) -> impl IntoResponse {
+    // Code ingest reuses the docs.save + reindex path. We write the file into
+    // .the-one/docs/code/<path> so it gets picked up by the chunker dispatcher
+    // (which routes .rs/.py/etc through the tree-sitter chunker automatically).
+    let path = payload.path.trim();
+    if path.is_empty() || path.contains("..") || Path::new(path).is_absolute() {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "invalid path"})),
+        )
+            .into_response();
+    }
+    let target = state
+        .project_root
+        .join(".the-one")
+        .join("docs")
+        .join("code")
+        .join(path);
+    if let Some(parent) = target.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("create dir: {e}")})),
+            )
+                .into_response();
+        }
+    }
+    if let Err(e) = std::fs::write(&target, payload.content.as_bytes()) {
+        return (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("write: {e}")})),
+        )
+            .into_response();
+    }
+    Json(ApiMessageResponse {
+        message: format!(
+            "Saved {} for tree-sitter chunking. Run reindex to pick it up.",
+            target.display()
+        ),
+    })
+    .into_response()
+}
+
+async fn api_graph_extract_handler(State(state): State<EmbeddedUiState>) -> impl IntoResponse {
+    match state
+        .admin
+        .broker()
+        .graph_extract(&state.project_root, &state.project_id)
+        .await
+    {
+        Ok(result) => Json(result).into_response(),
+        Err(e) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+async fn api_ingest_reindex_handler(State(state): State<EmbeddedUiState>) -> impl IntoResponse {
+    use the_one_mcp::api::DocsReindexRequest;
+    match state
+        .admin
+        .broker()
+        .docs_reindex(DocsReindexRequest {
+            project_root: state.project_root.display().to_string(),
+            project_id: state.project_id.clone(),
+        })
+        .await
+    {
+        Ok(resp) => Json(ApiMessageResponse {
+            message: format!(
+                "Reindex complete: {} new, {} updated, {} removed, {} unchanged",
+                resp.new, resp.updated, resp.removed, resp.unchanged
+            ),
+        })
+        .into_response(),
+        Err(e) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
 async fn dashboard_handler(State(state): State<EmbeddedUiState>) -> impl IntoResponse {
+    let registry = ProjectRegistry::load();
     match state
         .admin
         .health_report(&state.project_root, &state.project_id)
         .await
     {
-        Ok(report) => Html(render_dashboard_html(&report)).into_response(),
+        Ok(report) => {
+            let (graph_entities, graph_relations, _) = load_graph_stats(&state.project_root);
+            Html(render_dashboard_page_v2(
+                &state.project_id,
+                &report,
+                graph_entities,
+                graph_relations,
+                &registry,
+            ))
+            .into_response()
+        }
         Err(err) => (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             format!("dashboard error: {err}"),
         )
             .into_response(),
     }
+}
+
+/// LightRAG-inspired dashboard with stat grid, metrics bar chart, and graph
+/// summary. Replaces the v0.12.x 4-card format.
+pub fn render_dashboard_page_v2(
+    current_project_id: &str,
+    report: &AdminHealthReport,
+    graph_entities: usize,
+    graph_relations: usize,
+    registry: &ProjectRegistry,
+) -> String {
+    let m = &report.metrics;
+    let c = &report.config;
+
+    let counters: Vec<(&str, u64)> = vec![
+        ("memory.search", m.memory_search_calls),
+        ("tool.run", m.tool_run_calls),
+        ("project.init", m.project_init_calls),
+        ("project.refresh", m.project_refresh_calls),
+        ("image.search", m.image_search_calls),
+        ("image.ingest", m.image_ingest_calls),
+        ("resources.list", m.resources_list_calls),
+        ("resources.read", m.resources_read_calls),
+    ];
+    let max_counter = counters.iter().map(|(_, v)| *v).max().unwrap_or(1).max(1);
+    let mut bar_chart = String::new();
+    for (name, val) in &counters {
+        let pct = (*val as f64 / max_counter as f64 * 100.0) as u32;
+        bar_chart.push_str(&format!(
+            "<div class=\"bar-row\"><span class=\"name\">{}</span><div class=\"track\"><div class=\"fill\" style=\"width:{}%\"></div></div><span class=\"num\">{}</span></div>",
+            name, pct, val
+        ));
+    }
+
+    let watcher_total = m.watcher_events_processed + m.watcher_events_failed;
+    let watcher_badge = if watcher_total == 0 {
+        "<span class=\"badge\">idle</span>"
+    } else if m.watcher_events_failed == 0 {
+        "<span class=\"badge ok\">healthy</span>"
+    } else if m.watcher_events_failed * 10 < m.watcher_events_processed {
+        "<span class=\"badge warn\">some failures</span>"
+    } else {
+        "<span class=\"badge err\">degraded</span>"
+    };
+    let qdrant_badge = if m.qdrant_errors == 0 {
+        "<span class=\"badge ok\">ok</span>"
+    } else {
+        "<span class=\"badge err\">errors</span>"
+    };
+    let graph_badge = if graph_entities == 0 {
+        "<span class=\"badge\">empty</span>"
+    } else {
+        "<span class=\"badge ok\">populated</span>"
+    };
+
+    let body = format!(
+        r##"<div class="page-header"><h1>Dashboard</h1><p class="subtitle">Health, metrics, and feature status for project <code>{pid}</code></p></div>
+
+<div class="stat-grid">
+  <div class="stat"><div class="label">Memory searches</div><div class="value">{search_calls}</div><div class="hint">Avg latency: {avg_ms} ms</div></div>
+  <div class="stat"><div class="label">Tool runs</div><div class="value">{tool_runs}</div><div class="hint">Total invocations since startup</div></div>
+  <div class="stat"><div class="label">Graph entities</div><div class="value">{graph_e}</div><div class="hint">{graph_badge} · {graph_r} relations</div></div>
+  <div class="stat"><div class="label">Watcher events</div><div class="value">{watcher_ok}</div><div class="hint">{watcher_badge} · {watcher_fail} failed</div></div>
+  <div class="stat"><div class="label">Qdrant errors</div><div class="value">{qdrant_errs}</div><div class="hint">{qdrant_badge}</div></div>
+  <div class="stat"><div class="label">Audit events</div><div class="value">{audit}</div><div class="hint">Recent events in the log</div></div>
+</div>
+
+<div class="grid">
+  <article class="card">
+    <h3>Tool call distribution</h3>
+    <p class="muted">Relative invocation counts since the broker started. Resets on restart.</p>
+    <div class="bar-chart">{bar_chart}</div>
+  </article>
+
+  <article class="card">
+    <h3>Runtime config</h3>
+    <table>
+      <tr><th>Provider</th><td>{provider}</td></tr>
+      <tr><th>Nano provider</th><td>{nano_provider}</td></tr>
+      <tr><th>Nano model</th><td>{nano_model}</td></tr>
+      <tr><th>Qdrant URL</th><td><code>{qdrant_url}</code></td></tr>
+      <tr><th>Qdrant auth</th><td>{qdrant_auth}</td></tr>
+    </table>
+    <p class="muted" style="margin-top:12px"><a href="/config">Edit config →</a></p>
+  </article>
+
+  <article class="card" id="embedding-card">
+    <h3>Embedding model</h3>
+    <p class="muted">Active local or API embedding model for this project.</p>
+    <div id="embedding-current" style="font-weight:700;font-size:1.1rem;color:var(--accent);margin:8px 0">Loading…</div>
+    <p class="muted"><a href="/api/models">See all available models</a></p>
+  </article>
+
+  <article class="card">
+    <h3>Graph RAG status</h3>
+    <table>
+      <tr><th>Enabled</th><td id="graph-enabled-cell">—</td></tr>
+      <tr><th>Entities</th><td>{graph_e}</td></tr>
+      <tr><th>Relations</th><td>{graph_r}</td></tr>
+    </table>
+    <p class="muted" style="margin-top:12px"><a href="/graph">Open graph explorer →</a></p>
+  </article>
+</div>
+
+<script>
+// Populate via DOM methods only — no innerHTML with dynamic data.
+fetch('/api/models').then(function(r){{return r.json();}}).then(function(j){{
+  var el=document.getElementById('embedding-current');
+  if(el){{el.textContent=j.current_embedding_model||'(none configured)';}}
+}}).catch(function(){{}});
+fetch('/api/graph').then(function(r){{return r.json();}}).then(function(j){{
+  var cell=document.getElementById('graph-enabled-cell');
+  if(!cell)return;
+  var badge=document.createElement('span');
+  badge.className='badge '+(j.entity_count>0?'ok':'');
+  badge.textContent=(j.entity_count>0)?'populated':'empty';
+  cell.textContent='';
+  cell.appendChild(badge);
+}}).catch(function(){{}});
+</script>"##,
+        pid = html_escape(current_project_id),
+        search_calls = m.memory_search_calls,
+        avg_ms = m.memory_search_latency_avg_ms,
+        tool_runs = m.tool_run_calls,
+        graph_e = graph_entities,
+        graph_r = graph_relations,
+        graph_badge = graph_badge,
+        watcher_ok = m.watcher_events_processed,
+        watcher_fail = m.watcher_events_failed,
+        watcher_badge = watcher_badge,
+        qdrant_errs = m.qdrant_errors,
+        qdrant_badge = qdrant_badge,
+        audit = report.recent_audit_events,
+        bar_chart = bar_chart,
+        provider = html_escape(&c.provider),
+        nano_provider = html_escape(&c.nano_provider),
+        nano_model = html_escape(&c.nano_model),
+        qdrant_url = html_escape(&c.qdrant_url),
+        qdrant_auth = if c.qdrant_auth_configured {
+            "configured"
+        } else {
+            "none"
+        },
+    );
+    render_page_shell(
+        "Dashboard",
+        "/dashboard",
+        current_project_id,
+        registry,
+        &body,
+    )
 }
 
 async fn health_handler(State(state): State<EmbeddedUiState>) -> impl IntoResponse {
@@ -734,6 +1946,13 @@ async fn config_update_handler(
 impl AdminUi {
     pub fn new(broker: McpBroker) -> Self {
         Self { broker }
+    }
+
+    /// Passthrough accessor to the underlying broker. Used by the
+    /// v0.13.0 ingest / graph UI handlers that need to call broker
+    /// methods directly.
+    pub fn broker(&self) -> &McpBroker {
+        &self.broker
     }
 
     pub async fn trigger_project_refresh(

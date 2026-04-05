@@ -3927,6 +3927,7 @@ dependencies = [
  "tempfile",
  "the-one-core",
  "the-one-mcp",
+ "the-one-memory",
  "tokio",
 ]
 

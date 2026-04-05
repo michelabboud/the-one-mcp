@@ -175,14 +175,15 @@ bash scripts/build.sh release --status # check workflow progress
 
 Releases are **manual only** — tagging does not auto-trigger builds. You decide when to build artifacts.
 
-## Stats (v0.12.0)
+## Stats (v0.13.0)
 
 | Metric | Count |
 |--------|-------|
 | MCP Tools | 17 |
 | MCP Resource Types | 3 (`docs`, `project`, `catalog`) |
-| Tests | 300 |
-| Rust LOC | ~24,000 |
+| Admin UI Pages | 8 (home, dashboard, ingest, graph, images, config, audit, swagger) |
+| Tests | 302 |
+| Rust LOC | ~25,000 |
 | JSON Schemas | 35 |
 | Catalog Tools | 184 across 10 languages |
 | Supported Code Languages (chunker) | 13 |

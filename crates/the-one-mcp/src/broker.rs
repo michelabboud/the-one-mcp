@@ -2148,6 +2148,76 @@ impl McpBroker {
     // Backup / Restore API (v0.12.0, Task 3.3)
     // -----------------------------------------------------------------------
 
+    // -----------------------------------------------------------------------
+    // Graph RAG extraction + stats (v0.13.0, Task 12/9)
+    // -----------------------------------------------------------------------
+
+    /// Trigger entity/relation extraction on the project's currently-indexed
+    /// chunks. Requires `THE_ONE_GRAPH_ENABLED=true` and `THE_ONE_GRAPH_BASE_URL`
+    /// pointing at an OpenAI-compatible chat completions endpoint (Ollama,
+    /// LM Studio, LiteLLM, etc.).
+    ///
+    /// See `docs/guides/graph-rag.md` for the full env var set.
+    #[instrument(skip_all)]
+    pub async fn graph_extract(
+        &self,
+        project_root: &Path,
+        project_id: &str,
+    ) -> Result<the_one_memory::graph_extractor::GraphExtractResult, CoreError> {
+        let key = Self::project_memory_key(project_root, project_id);
+        let memories = self.memory_by_project.read().await;
+        let engine = memories.get(&key).ok_or_else(|| {
+            CoreError::InvalidProjectConfig(
+                "project memory not indexed — run setup.refresh first".to_string(),
+            )
+        })?;
+        let chunks = engine.chunks().to_vec();
+        drop(memories);
+
+        let result = the_one_memory::graph_extractor::extract_and_persist(project_root, &chunks)
+            .await
+            .map_err(CoreError::Embedding)?;
+
+        // Reload the graph into the memory engine so `Local`/`Global`/`Hybrid`
+        // retrieval modes can immediately use the new entities without a
+        // server restart.
+        let graph_path = project_root.join(".the-one").join("knowledge_graph.json");
+        if graph_path.exists() {
+            if let Ok(graph) = the_one_memory::graph::KnowledgeGraph::load_from_file(&graph_path) {
+                let mut memories = self.memory_by_project.write().await;
+                if let Some(engine) = memories.get_mut(&key) {
+                    *engine.graph_mut() = graph;
+                }
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Return summary statistics for the project's knowledge graph.
+    /// Reads from `<project>/.the-one/knowledge_graph.json` if present,
+    /// otherwise returns zeros. Never fails.
+    #[instrument(skip_all)]
+    pub async fn graph_stats(&self, project_root: &Path, _project_id: &str) -> serde_json::Value {
+        let graph_path = project_root.join(".the-one").join("knowledge_graph.json");
+        let Ok(graph) = the_one_memory::graph::KnowledgeGraph::load_from_file(&graph_path) else {
+            return serde_json::json!({
+                "entity_count": 0,
+                "relation_count": 0,
+                "graph_enabled": the_one_memory::graph_extractor::is_graph_enabled(),
+                "extraction_configured": std::env::var("THE_ONE_GRAPH_BASE_URL").is_ok(),
+                "file_exists": false,
+            });
+        };
+        serde_json::json!({
+            "entity_count": graph.entity_count(),
+            "relation_count": graph.relation_count(),
+            "graph_enabled": the_one_memory::graph_extractor::is_graph_enabled(),
+            "extraction_configured": std::env::var("THE_ONE_GRAPH_BASE_URL").is_ok(),
+            "file_exists": true,
+        })
+    }
+
     /// Create a gzipped tar backup of the project's `.the-one/` state plus
     /// shared catalog/registry under `~/.the-one/`. See [`crate::backup`] for
     /// details on exclusions (`.fastembed_cache/`, Qdrant wal/raft state).

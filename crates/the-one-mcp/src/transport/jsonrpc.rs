@@ -756,6 +756,31 @@ async fn dispatch_maintain(broker: &McpBroker, args: Value) -> Result<Value, Str
                 .await
                 .map_err(|e| e.to_string())
         }
+        // v0.13.0: Graph RAG extraction + stats
+        "graph.extract" => {
+            let project_root = params["project_root"]
+                .as_str()
+                .ok_or("missing params.project_root")?;
+            let project_id = params["project_id"]
+                .as_str()
+                .ok_or("missing params.project_id")?;
+            let result = broker
+                .graph_extract(Path::new(project_root), project_id)
+                .await
+                .map_err(|e| e.to_string())?;
+            serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+        "graph.stats" => {
+            let project_root = params["project_root"]
+                .as_str()
+                .ok_or("missing params.project_root")?;
+            let project_id = params["project_id"]
+                .as_str()
+                .ok_or("missing params.project_id")?;
+            Ok(broker
+                .graph_stats(Path::new(project_root), project_id)
+                .await)
+        }
         // v0.12.0: backup / restore
         "backup" => {
             let request: crate::api::BackupRequest = serde_json::from_value(params)

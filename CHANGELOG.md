@@ -2,6 +2,60 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.13.0] - 2026-04-06
+
+Major UI overhaul + Graph RAG end-to-end wiring, based on research into
+[HKU's LightRAG](https://github.com/hkuds/lightrag) for the retrieval-quality
+pieces we were missing.
+
+### Added
+
+#### Admin UI — multi-project home + new pages + v2 dashboard
+
+- **Landing page at `/`** — hero banner, feature summary, admin section links, GitHub / docs / issues links, install one-liner, responsive layout.
+- **`/ingest` page** — 4-card form for markdown upload, image path ingest, code file chunking, and full reindex. Validates paths against `..` traversal, talks to new `/api/ingest/{markdown,image,code,reindex}` endpoints.
+- **`/graph` page** — entity/relation explorer. Empty-state with setup CTA when graph is not yet populated. Stat grid + top-entity-types bar chart + query-modes reference table + placeholder for Sigma.js force-directed viz (v0.13.1).
+- **Dashboard v2** — replaces the v0.12.x 4-card format. Includes a 6-stat grid (searches / tool runs / graph entities / watcher health / Qdrant errors / audit events), a LightRAG-inspired bar chart of tool-call distribution across 8 counters, runtime config table, embedding model card with async fetch, and a Graph RAG status table.
+- **Top nav with project switcher** — `NAV_ITEMS` const drives a shared `render_nav(active, project_id, registry)` helper used by every page. Project switcher reads from `~/.the-one/projects.json` (new `ProjectRegistry` with `load/save/touch`). Live cross-project switching is documented as a v0.13.1 follow-up (the embedded UI is still scoped to one project per server instance).
+- **Shared `render_page_shell(title, active, project, registry, body)`** — every new page uses it for a consistent header/nav/footer. Dark-mode-aware CSS variables in `shell_styles()` respect `prefers-color-scheme`. Mobile breakpoint at 720px. Sticky top nav, badge system (ok/warn/err/idle), bar-chart component, stat-grid, empty-state card.
+- **New JSON APIs**:
+  - `GET /api/projects` — list tracked projects with last-seen timestamps
+  - `GET /api/models` — list local FastEmbed models + current active model
+  - `GET /api/graph` — nodes + edges JSON for viz consumers
+  - `POST /api/ingest/markdown|image|code|reindex` — ingest handlers
+  - `POST /api/graph/extract` — triggers extraction
+
+#### Graph RAG — end-to-end wiring (Tasks 12 + 9 from roadmap)
+
+- **`crates/the-one-memory/src/graph_extractor.rs`** — new module implementing the LLM extraction pipeline. Takes indexed chunks, builds the extraction prompt via existing `graph::build_extraction_prompt`, calls an OpenAI-compatible `/v1/chat/completions` endpoint via reqwest, parses responses with `graph::parse_extraction_response`, merges into `KnowledgeGraph`, persists to `knowledge_graph.json`. Includes `GraphExtractResult` with chunks processed/skipped/errors for UI display.
+- **Environment-driven config** — `THE_ONE_GRAPH_ENABLED`, `THE_ONE_GRAPH_BASE_URL`, `THE_ONE_GRAPH_MODEL`, `THE_ONE_GRAPH_API_KEY`, `THE_ONE_GRAPH_ENTITY_TYPES`, `THE_ONE_GRAPH_MAX_CHUNKS`. Works with Ollama, LM Studio, LiteLLM, LocalAI, vLLM, OpenAI proper. Disabled by default — returns `disabled_reason` in the response if not enabled rather than erroring.
+- **`McpBroker::graph_extract(project_root, project_id)`** — public method that drains the project's chunks, calls the extractor, reloads the updated graph into the memory engine so `Local`/`Global`/`Hybrid` retrieval modes can see new entities immediately.
+- **`McpBroker::graph_stats(project_root, project_id)`** — returns entity/relation counts + whether extraction is configured.
+- **Two new `maintain` actions** — `graph.extract` and `graph.stats` exposed via JSON-RPC dispatch. See [Graph RAG guide](docs/guides/graph-rag.md) for full usage.
+- **`MemoryEngine::chunks()` accessor** — read-only slice exposed so the extractor can iterate without borrowing the whole engine.
+
+#### Documentation
+
+- **New `docs/guides/graph-rag.md`** (~400 lines) — what Graph RAG is, current implementation state (shipped vs v0.13.1 vs v0.14.0), enablement walkthrough with Ollama / gpt-4o-mini examples, 4 retrieval modes explanation, storage model, prompt format, cost table, limitations, comparison matrix with LightRAG upstream, roadmap.
+
+### Tests
+
+- +2 `graph_extractor` tests (disabled-by-default behaviour, missing-base-url error)
+- Workspace total: **302 tests**, 0 failures on default and lean matrices
+
+### Dependencies
+
+- `the-one-ui` now depends on `the-one-memory` (previously only on `the-one-core`) for the models_registry passthrough on the embedding model card
+
+### Known follow-ups (v0.13.1 roadmap)
+
+- Live cross-project switching via cookie/header (currently requires server restart with new `THE_ONE_PROJECT_ID`)
+- Sigma.js force-directed graph visualization on `/graph` (placeholder renders today)
+- Graph extraction config fields in `config.json` instead of env vars, with matching UI selector on `/config` page
+- Entity name normalization + description summarization (LightRAG parity)
+- Entity-description vector store for proper `Local` mode (currently uses keyword match)
+- Config page embedding model dropdown (endpoint exists, page edit deferred)
+
 ## [0.12.1] - 2026-04-06
 
 ### Documentation
