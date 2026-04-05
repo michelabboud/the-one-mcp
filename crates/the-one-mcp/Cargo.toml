@@ -8,6 +8,10 @@ license.workspace = true
 default = ["embed-swagger", "local-embeddings"]
 embed-swagger = []
 local-embeddings = ["the-one-memory/local-embeddings"]
+# v0.11.0: dynamic-loaded ONNX Runtime for platforms without prebuilt
+# libraries (notably Intel Mac). Use INSTEAD of local-embeddings when
+# building for x86_64-apple-darwin.
+local-embeddings-dynamic = ["the-one-memory/local-embeddings-dynamic"]
 image-embeddings = ["the-one-memory/image-embeddings", "dep:image"]
 image-ocr = ["the-one-memory/image-ocr"]
 
@@ -33,5 +37,8 @@ the-one-router = { path = "../the-one-router" }
 tokio.workspace = true
 tokio-stream = { version = "0.1", features = ["sync"] }
 tracing.workspace = true
+# v0.12.0: backup / restore support via `maintain: backup` and `maintain: restore`
+tar = "0.4"
+flate2 = "1"
 
 [dev-dependencies]

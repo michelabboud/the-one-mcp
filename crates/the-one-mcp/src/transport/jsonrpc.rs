@@ -756,6 +756,25 @@ async fn dispatch_maintain(broker: &McpBroker, args: Value) -> Result<Value, Str
                 .await
                 .map_err(|e| e.to_string())
         }
+        // v0.12.0: backup / restore
+        "backup" => {
+            let request: crate::api::BackupRequest = serde_json::from_value(params)
+                .map_err(|e| format!("invalid backup params: {e}"))?;
+            let result = broker
+                .backup_project(request)
+                .await
+                .map_err(|e| e.to_string())?;
+            serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+        "restore" => {
+            let request: crate::api::RestoreRequest = serde_json::from_value(params)
+                .map_err(|e| format!("invalid restore params: {e}"))?;
+            let result = broker
+                .restore_project(request)
+                .await
+                .map_err(|e| e.to_string())?;
+            serde_json::to_value(result).map_err(|e| e.to_string())
+        }
         _ => Err(format!("unknown maintain action: {action}")),
     }
 }

@@ -6,6 +6,48 @@ pub struct ProjectInitRequest {
     pub project_id: String,
 }
 
+// ---------------------------------------------------------------------------
+// Backup / restore (v0.12.0, Task 3.3)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BackupRequest {
+    pub project_root: String,
+    pub project_id: String,
+    pub output_path: String,
+    #[serde(default = "default_true")]
+    pub include_images: bool,
+    #[serde(default)]
+    pub include_qdrant_local: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BackupResponse {
+    pub output_path: String,
+    pub size_bytes: u64,
+    pub file_count: usize,
+    pub manifest_version: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RestoreRequest {
+    pub backup_path: String,
+    pub target_project_root: String,
+    pub target_project_id: String,
+    #[serde(default)]
+    pub overwrite_existing: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RestoreResponse {
+    pub restored_files: usize,
+    pub warnings: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProjectInitResponse {
     pub project_id: String,
@@ -201,6 +243,29 @@ pub struct MetricsSnapshotResponse {
     pub router_fallback_calls: u64,
     pub router_decision_latency_ms_total: u64,
     pub router_provider_error_calls: u64,
+    // v0.12.0: observability deep dive — new fields.
+    //
+    // These are `serde(default)` so older clients deserializing a newer
+    // snapshot still get a zero value if they were generated from a binary
+    // that did not track the field yet.
+    #[serde(default)]
+    pub memory_search_latency_ms_total: u64,
+    #[serde(default)]
+    pub memory_search_latency_avg_ms: u64,
+    #[serde(default)]
+    pub image_search_calls: u64,
+    #[serde(default)]
+    pub image_ingest_calls: u64,
+    #[serde(default)]
+    pub resources_list_calls: u64,
+    #[serde(default)]
+    pub resources_read_calls: u64,
+    #[serde(default)]
+    pub watcher_events_processed: u64,
+    #[serde(default)]
+    pub watcher_events_failed: u64,
+    #[serde(default)]
+    pub qdrant_errors: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

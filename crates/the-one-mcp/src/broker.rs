@@ -52,7 +52,9 @@ pub struct McpBroker {
     global_registry_path: Option<PathBuf>,
     policy: PolicyEngine,
     session_approvals: RwLock<HashSet<String>>,
-    metrics: BrokerMetrics,
+    // v0.12.0: wrapped in Arc so spawned tasks (e.g. the file watcher) can
+    // share it lock-free via the atomic counter fields.
+    metrics: Arc<BrokerMetrics>,
     catalog: std::sync::Mutex<Option<the_one_core::tool_catalog::ToolCatalog>>,
     tools_embedded: std::sync::atomic::AtomicBool,
 }
@@ -79,6 +81,15 @@ struct BrokerMetrics {
     router_fallback_calls: AtomicU64,
     router_decision_latency_ms_total: AtomicU64,
     router_provider_error_calls: AtomicU64,
+    // v0.12.0: observability deep dive — new counters
+    memory_search_latency_ms_total: AtomicU64,
+    image_search_calls: AtomicU64,
+    image_ingest_calls: AtomicU64,
+    resources_list_calls: AtomicU64,
+    resources_read_calls: AtomicU64,
+    watcher_events_processed: AtomicU64,
+    watcher_events_failed: AtomicU64,
+    qdrant_errors: AtomicU64,
 }
 
 impl Default for McpBroker {
@@ -109,7 +120,7 @@ impl McpBroker {
             global_registry_path,
             policy,
             session_approvals: RwLock::new(HashSet::new()),
-            metrics: BrokerMetrics::default(),
+            metrics: Arc::new(BrokerMetrics::default()),
             catalog: std::sync::Mutex::new(None),
             tools_embedded: std::sync::atomic::AtomicBool::new(false),
         }
@@ -327,6 +338,7 @@ impl McpBroker {
 
         // Clone the Arc so the spawned task can reach the per-project engines
         let memory_by_project = Arc::clone(&self.memory_by_project);
+        let metrics = Arc::clone(&self.metrics);
         let project_key = Self::project_memory_key(project_root, &project_id);
 
         match the_one_memory::watcher::spawn_watcher(
@@ -375,8 +387,18 @@ impl McpBroker {
                                         .map(|n| format!("removed {n} chunks for {}", p.display())),
                                 };
                                 match result {
-                                    Ok(msg) => tracing::info!("auto-index: {msg}"),
-                                    Err(e) => tracing::warn!("auto-index failed: {e}"),
+                                    Ok(msg) => {
+                                        metrics
+                                            .watcher_events_processed
+                                            .fetch_add(1, Ordering::Relaxed);
+                                        tracing::info!("auto-index: {msg}");
+                                    }
+                                    Err(e) => {
+                                        metrics
+                                            .watcher_events_failed
+                                            .fetch_add(1, Ordering::Relaxed);
+                                        tracing::warn!("auto-index failed: {e}");
+                                    }
                                 }
                             } else {
                                 tracing::debug!(
@@ -647,6 +669,7 @@ impl McpBroker {
 
     #[instrument(skip_all)]
     pub async fn memory_search(&self, request: MemorySearchRequest) -> MemorySearchResponse {
+        let search_start = std::time::Instant::now();
         self.metrics
             .memory_search_calls
             .fetch_add(1, Ordering::Relaxed);
@@ -702,6 +725,11 @@ impl McpBroker {
         } else {
             Vec::new()
         };
+
+        let search_latency_ms = search_start.elapsed().as_millis() as u64;
+        self.metrics
+            .memory_search_latency_ms_total
+            .fetch_add(search_latency_ms, Ordering::Relaxed);
 
         MemorySearchResponse {
             hits,
@@ -1488,10 +1516,20 @@ impl McpBroker {
     }
 
     pub fn metrics_snapshot(&self) -> MetricsSnapshotResponse {
+        let memory_search_calls = self.metrics.memory_search_calls.load(Ordering::Relaxed);
+        let memory_search_latency_ms_total = self
+            .metrics
+            .memory_search_latency_ms_total
+            .load(Ordering::Relaxed);
+        let memory_search_latency_avg_ms = if memory_search_calls > 0 {
+            memory_search_latency_ms_total / memory_search_calls
+        } else {
+            0
+        };
         MetricsSnapshotResponse {
             project_init_calls: self.metrics.project_init_calls.load(Ordering::Relaxed),
             project_refresh_calls: self.metrics.project_refresh_calls.load(Ordering::Relaxed),
-            memory_search_calls: self.metrics.memory_search_calls.load(Ordering::Relaxed),
+            memory_search_calls,
             tool_run_calls: self.metrics.tool_run_calls.load(Ordering::Relaxed),
             router_fallback_calls: self.metrics.router_fallback_calls.load(Ordering::Relaxed),
             router_decision_latency_ms_total: self
@@ -1502,6 +1540,19 @@ impl McpBroker {
                 .metrics
                 .router_provider_error_calls
                 .load(Ordering::Relaxed),
+            // v0.12.0: observability deep dive
+            memory_search_latency_ms_total,
+            memory_search_latency_avg_ms,
+            image_search_calls: self.metrics.image_search_calls.load(Ordering::Relaxed),
+            image_ingest_calls: self.metrics.image_ingest_calls.load(Ordering::Relaxed),
+            resources_list_calls: self.metrics.resources_list_calls.load(Ordering::Relaxed),
+            resources_read_calls: self.metrics.resources_read_calls.load(Ordering::Relaxed),
+            watcher_events_processed: self
+                .metrics
+                .watcher_events_processed
+                .load(Ordering::Relaxed),
+            watcher_events_failed: self.metrics.watcher_events_failed.load(Ordering::Relaxed),
+            qdrant_errors: self.metrics.qdrant_errors.load(Ordering::Relaxed),
         }
     }
 
@@ -1764,6 +1815,9 @@ impl McpBroker {
         &self,
         request: crate::api::ImageSearchRequest,
     ) -> Result<crate::api::ImageSearchResponse, CoreError> {
+        self.metrics
+            .image_search_calls
+            .fetch_add(1, Ordering::Relaxed);
         // Validate mutual exclusion regardless of feature flag.
         match (&request.query, &request.image_base64) {
             (Some(_), Some(_)) => {
@@ -1912,6 +1966,9 @@ impl McpBroker {
         &self,
         request: crate::api::ImageIngestRequest,
     ) -> Result<crate::api::ImageIngestResponse, CoreError> {
+        self.metrics
+            .image_ingest_calls
+            .fetch_add(1, Ordering::Relaxed);
         #[cfg(feature = "image-embeddings")]
         {
             self._image_ingest_impl(request).await
@@ -2066,6 +2123,9 @@ impl McpBroker {
         project_root: &Path,
         _project_id: &str,
     ) -> Result<crate::resources::ResourcesListResponse, CoreError> {
+        self.metrics
+            .resources_list_calls
+            .fetch_add(1, Ordering::Relaxed);
         let resources = crate::resources::list_resources(project_root)?;
         Ok(crate::resources::ResourcesListResponse { resources })
     }
@@ -2078,7 +2138,45 @@ impl McpBroker {
         _project_id: &str,
         uri: &str,
     ) -> Result<crate::resources::ResourcesReadResponse, CoreError> {
+        self.metrics
+            .resources_read_calls
+            .fetch_add(1, Ordering::Relaxed);
         crate::resources::read_resource(project_root, uri)
+    }
+
+    // -----------------------------------------------------------------------
+    // Backup / Restore API (v0.12.0, Task 3.3)
+    // -----------------------------------------------------------------------
+
+    /// Create a gzipped tar backup of the project's `.the-one/` state plus
+    /// shared catalog/registry under `~/.the-one/`. See [`crate::backup`] for
+    /// details on exclusions (`.fastembed_cache/`, Qdrant wal/raft state).
+    #[instrument(skip_all)]
+    pub async fn backup_project(
+        &self,
+        request: crate::api::BackupRequest,
+    ) -> Result<crate::api::BackupResponse, CoreError> {
+        // Backup is disk-heavy — run on the blocking pool.
+        let req = request;
+        tokio::task::spawn_blocking(move || crate::backup::create_backup(&req))
+            .await
+            .map_err(|e| CoreError::InvalidProjectConfig(format!("join error: {e}")))?
+            .map_err(CoreError::InvalidProjectConfig)
+    }
+
+    /// Restore a project from a backup tarball previously produced by
+    /// [`Self::backup_project`]. Rejects unsafe archive paths and refuses to
+    /// overwrite existing state unless `overwrite_existing` is true.
+    #[instrument(skip_all)]
+    pub async fn restore_project(
+        &self,
+        request: crate::api::RestoreRequest,
+    ) -> Result<crate::api::RestoreResponse, CoreError> {
+        let req = request;
+        tokio::task::spawn_blocking(move || crate::backup::restore_backup(&req))
+            .await
+            .map_err(|e| CoreError::InvalidProjectConfig(format!("join error: {e}")))?
+            .map_err(CoreError::InvalidProjectConfig)
     }
 
     #[instrument(skip_all)]

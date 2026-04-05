@@ -8,6 +8,9 @@ license.workspace = true
 default = ["embed-swagger", "local-embeddings"]
 embed-swagger = ["the-one-mcp/embed-swagger"]
 local-embeddings = ["the-one-mcp/local-embeddings"]
+# v0.11.0: runtime-loaded ONNX Runtime alternative for Intel Mac + other
+# platforms lacking prebuilt ort binaries. Use instead of local-embeddings.
+local-embeddings-dynamic = ["the-one-mcp/local-embeddings-dynamic"]
 image-embeddings = ["the-one-mcp/image-embeddings"]
 
 [dependencies]

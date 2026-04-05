@@ -2,6 +2,56 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.12.0] - 2026-04-06
+
+Phase 3 of the v0.8.2 → v0.12.0 roadmap: Intel Mac prep, observability deep dive, and backup / restore. All three tasks bundled into one release because the code paths are orthogonal but small individually.
+
+### Task 3.1 — Intel Mac `local-embeddings-dynamic` feature flag
+
+- **New feature flag `local-embeddings-dynamic`** — enables FastEmbed-based local embeddings on platforms where the prebuilt ONNX Runtime binaries are unavailable, most notably **Intel Mac** (`x86_64-apple-darwin`). When enabled, the binary links against a runtime-loaded `libonnxruntime.dylib` / `.so` / `.dll` instead of bundling C++ libraries at build time.
+
+  Intel Mac users can now get local embeddings with:
+
+  ```bash
+  brew install onnxruntime
+  cargo build --release -p the-one-mcp \
+      --no-default-features \
+      --features "embed-swagger,local-embeddings-dynamic"
+  ```
+
+- **Workspace + per-crate feature wiring** — `the-one-memory`, `the-one-mcp`, and `the-one-ui` all expose `local-embeddings-dynamic` as a passthrough feature.
+- **INSTALL.md** — new "Intel Mac local embeddings (v0.11.0)" section (retained header; applies as of this v0.12.0 release).
+- `fastembed` workspace dep now declares `default-features = false` so feature selection propagates cleanly through both `local-embeddings` and `local-embeddings-dynamic` bundles.
+
+_Not shipping:_ CI matrix Intel Mac job still ships lean by default. Pure-Rust tract backend is not included because fastembed 5.13 does not expose one — upstream support would unblock that cleanly.
+
+### Task 3.2 — Observability deep dive
+
+- **`BrokerMetrics` extended with 8 new counters** for the v0.12.0 snapshot:
+  `memory_search_latency_ms_total`, `image_search_calls`, `image_ingest_calls`, `resources_list_calls`, `resources_read_calls`, `watcher_events_processed`, `watcher_events_failed`, `qdrant_errors`.
+- **`MetricsSnapshotResponse` extended** with the eight new fields plus a derived `memory_search_latency_avg_ms`. All new fields are `#[serde(default)]` for forward/backward compatibility.
+- **`BrokerMetrics` now held as `Arc<BrokerMetrics>`** so the watcher task can clone it and increment watcher event counters from outside the broker's own methods.
+- **Wired increments** in `memory_search` (with latency timing), `image_search`, `image_ingest`, `resources_list`, `resources_read`, and the watcher task.
+
+### Task 3.3 — Backup / restore via `maintain: backup`
+
+- **New `crates/the-one-mcp/src/backup.rs` module** implementing gzipped tar backup + restore of project state.
+- **Two new `maintain` actions:** `backup` (takes `project_root`, `project_id`, `output_path`, optional `include_images`) and `restore` (takes `backup_path`, `target_project_root`, `target_project_id`, optional `overwrite_existing`).
+- **What gets backed up:** the full `<project>/.the-one/` tree, `~/.the-one/catalog.db`, and `~/.the-one/registry/`.
+- **What is excluded:** `.fastembed_cache/` (models re-download on first use), Qdrant wal/raft state (too large), `.DS_Store`.
+- **Security:** unsafe archive paths (absolute, `..`, NUL, etc.) are rejected at restore time before any write. Restore refuses to overwrite existing project state unless `overwrite_existing: true`.
+- **Manifest:** every backup embeds `backup-manifest.json` at the archive root with version, the-one-mcp version, timestamp, file count, and include/exclude lists. Restore validates the manifest version before unpacking.
+- New API types: `BackupRequest`, `BackupResponse`, `RestoreRequest`, `RestoreResponse`.
+
+### Tests
+
+- +4 backup tests: roundtrip (backup → restore → verify content), fastembed_cache exclusion, refuse-without-overwrite, unknown-entry warning handling. Isolated via a `HomeGuard` helper that swaps `$HOME` during the test to avoid clobbering real user state.
+- Workspace total: 296 → **300 tests**, all green on default and lean matrices.
+
+### Dependencies
+
+- New: `tar 0.4`, `flate2 1` — pulled into `the-one-mcp` for the backup module. Pure-Rust, widely used, no C deps.
+
 ## [0.10.0] - 2026-04-06
 
 ### Added

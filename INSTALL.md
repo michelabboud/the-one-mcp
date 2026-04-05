@@ -214,10 +214,35 @@ rm -rf ~/.the-one
 |----------|-------------|--------|
 | Linux | x86-64 | Fully supported |
 | Linux | ARM64 | Fully supported |
-| macOS | x86-64 (Intel) | Fully supported |
+| macOS | x86-64 (Intel) | Supported — lean build by default; local embeddings via `local-embeddings-dynamic` + `brew install onnxruntime` (see below) |
 | macOS | ARM64 (Apple Silicon) | Fully supported |
 | Windows | x86-64 | Supported (binary works, bash scripts need Git Bash/MSYS2) |
 | Windows | ARM64 | Supported |
+
+### Intel Mac local embeddings (v0.11.0)
+
+Default Intel Mac binaries ship lean (API embeddings only) because the
+upstream `ort-sys 2.0.0-rc.11` crate dropped prebuilt ONNX Runtime libraries
+for `x86_64-apple-darwin` in early 2026. v0.11.0 adds a dynamic-loading
+alternative that works on Intel Mac:
+
+```bash
+# 1. Install libonnxruntime via Homebrew (one-time)
+brew install onnxruntime
+
+# 2. Build from source with the dynamic feature
+cargo build --release -p the-one-mcp \
+    --no-default-features \
+    --features "embed-swagger,local-embeddings-dynamic"
+```
+
+The resulting binary resolves `libonnxruntime.dylib` at startup from the
+standard Homebrew location. Performance should match the bundled ort
+backend on other platforms. If `libonnxruntime` cannot be found at
+runtime the binary will fall back to API embeddings with a warning.
+
+Users who prefer API embeddings (OpenAI, Voyage, Cohere) can continue
+to use the lean binary — nothing about this release changes that path.
 
 ## Troubleshooting
 

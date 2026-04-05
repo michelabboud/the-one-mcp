@@ -6,7 +6,31 @@ license.workspace = true
 
 [features]
 default = ["local-embeddings", "image-embeddings", "tree-sitter-chunker"]
-local-embeddings = ["dep:fastembed"]
+# Default local embeddings: pulls in fastembed with its `ort-download-binaries`
+# backend, which downloads prebuilt ONNX Runtime C++ libraries at build time.
+# This works on Linux x86_64/aarch64, macOS arm64, and Windows, but does NOT
+# support Intel Mac (x86_64-apple-darwin) as of ort-sys 2.0.0-rc.11.
+local-embeddings = [
+    "dep:fastembed",
+    "fastembed?/ort-download-binaries-native-tls",
+    "fastembed?/hf-hub-native-tls",
+    "fastembed?/image-models",
+]
+
+# Intel Mac / dynamic-load alternative (v0.11.0): use fastembed's
+# `ort-load-dynamic` feature so the ONNX Runtime library is resolved at
+# runtime from a system-installed libonnxruntime. Intel Mac users can get
+# this via `brew install onnxruntime`. Linux users via their distro's
+# package. Downstream crates should enable EITHER `local-embeddings`
+# (build-time bundled ort) OR `local-embeddings-dynamic` (runtime-loaded
+# ort), not both.
+local-embeddings-dynamic = [
+    "dep:fastembed",
+    "fastembed?/ort-load-dynamic",
+    "fastembed?/hf-hub-native-tls",
+    "fastembed?/image-models",
+]
+
 image-embeddings = ["local-embeddings", "dep:image"]
 image-ocr = ["image-embeddings", "dep:tesseract"]
 

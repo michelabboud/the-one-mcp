@@ -25,7 +25,7 @@ thiserror = "2.0"
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "net", "signal", "sync", "io-util", "io-std", "process"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
-fastembed = "5.13"
+fastembed = { version = "5.13", default-features = false }
 async-trait = "0.1"
 toml = "0.8"
 clap = { version = "4", features = ["derive"] }
