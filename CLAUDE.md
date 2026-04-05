@@ -85,7 +85,7 @@ All crates use `CoreError` from `the-one-core::error`. Library code uses `thiser
 - Releases are manual-only via `build.sh release v0.8.0` (triggers GitHub Actions workflow_dispatch, does NOT auto-trigger on tags)
 - Tool catalog: `tools/catalog/` (curated JSON), `~/.the-one/catalog.db` (SQLite with FTS5), Qdrant `the_one_tools` collection (semantic)
 - Custom tools: `~/.the-one/registry/custom.json` (shared), `custom-<cli>.json` (per-CLI)
-- 17 MCP tools (see `crates/the-one-mcp/src/transport/tools.rs`) + 3 MCP resource types (`docs`, `project`, `catalog` via `the-one://` URI scheme, v0.10.0+), 300 tests, 35 schemas, 184 catalog entries across 10 languages
+- 17 MCP tools (see `crates/the-one-mcp/src/transport/tools.rs`) + 3 MCP resource types (`docs`, `project`, `catalog` via `the-one://` URI scheme, v0.10.0+), 308 tests, 35 schemas, 184 catalog entries across 10 languages
 - Hybrid search: `hybrid_search_enabled`, `hybrid_dense_weight`, `hybrid_sparse_weight`, `sparse_model` config fields; requires reindex after enabling
 - File watcher: `auto_index_enabled`, `auto_index_debounce_ms` config fields; background tokio task with auto-reingestion for markdown (v0.8.0) AND images (v0.8.2) via `image_ingest_standalone`/`image_remove_standalone` free functions
 - Admin UI image gallery: `/images` route, `/images/thumbnail/<hash>`, `/api/images` JSON endpoint

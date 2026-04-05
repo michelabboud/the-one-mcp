@@ -1,9 +1,10 @@
 # Graph RAG Guide
 
-> v0.13.0 wires the latent Graph RAG implementation into the ingest pipeline
-> and exposes it through the admin UI and the `maintain: graph.extract` /
-> `maintain: graph.stats` MCP actions. This guide covers what Graph RAG is,
-> how to enable it, and the trade-offs vs. pure vector search.
+> v0.13.1 achieves **full LightRAG parity** for Graph RAG — entity name
+> normalization, entity/relation description vector store, query keyword
+> extraction, description summarization, gleaning, and canvas-based graph
+> visualization all shipped. This guide covers what Graph RAG is, how to
+> enable it, and the trade-offs vs. pure vector search.
 
 ## What is Graph RAG?
 
@@ -38,23 +39,25 @@ Pure vector RAG has well-known weaknesses:
 
 Graph RAG addresses all three via four retrieval modes (see below).
 
-## Current implementation state (v0.13.0)
+## Current implementation state (v0.13.1 — full LightRAG parity)
 
 | Component | Status | Location |
 |-----------|--------|----------|
 | `Entity`, `Relation`, `KnowledgeGraph` types | ✅ shipped | `crates/the-one-memory/src/graph.rs` |
 | `merge_extraction`, load/save JSON | ✅ shipped | `crates/the-one-memory/src/graph.rs` |
 | `build_extraction_prompt` / `parse_extraction_response` | ✅ shipped | `crates/the-one-memory/src/graph.rs` |
-| **LLM extraction pipeline** | ✅ **new in v0.13.0** | `crates/the-one-memory/src/graph_extractor.rs` |
-| **`maintain: graph.extract` MCP action** | ✅ **new in v0.13.0** | `crates/the-one-mcp/src/transport/jsonrpc.rs` |
-| **`maintain: graph.stats` MCP action** | ✅ **new in v0.13.0** | same |
-| **`/graph` admin UI page** | ✅ **new in v0.13.0** | `crates/the-one-ui/src/lib.rs` |
-| **`/api/graph` JSON endpoint** | ✅ **new in v0.13.0** | same |
+| **LLM extraction pipeline** | ✅ v0.13.0 | `crates/the-one-memory/src/graph_extractor.rs` |
+| **`maintain: graph.extract` MCP action** | ✅ v0.13.0 | `crates/the-one-mcp/src/transport/jsonrpc.rs` |
+| **`maintain: graph.stats` MCP action** | ✅ v0.13.0 | same |
+| **`/graph` admin UI page** | ✅ v0.13.0 | `crates/the-one-ui/src/lib.rs` |
+| **`/api/graph` JSON endpoint** | ✅ v0.13.0 | same |
 | 4 retrieval modes (naive/local/global/hybrid) | ✅ shipped | `crates/the-one-memory/src/lib.rs` |
-| Automatic extraction on ingest | ⏳ v0.13.1 | On the roadmap |
-| Sigma.js interactive graph viz | ⏳ v0.13.1 | `/graph` page currently shows stats + a placeholder |
-| Entity-description vector search (LightRAG "local" mode) | ⏳ v0.13.1 | Currently uses keyword search over entity names |
-| Gleaning pass (second-round extraction) | ⏳ v0.14.0 | Upstream LightRAG bumps quality ~15-25% with a 2nd extraction pass |
+| **Entity name normalization** | ✅ **v0.13.1** | `graph.rs` — `normalize_entity_name()` |
+| **Entity/relation description vector store** | ✅ **v0.13.1** | `qdrant.rs` — 3 new Qdrant collections per project |
+| **Description summarization (map-reduce)** | ✅ **v0.13.1** | `graph_extractor.rs` — `summarize_description()` |
+| **Query keyword extraction (LightRAG core)** | ✅ **v0.13.1** | `graph_extractor.rs` — `extract_query_keywords()` |
+| **Gleaning / continue-extraction pass** | ✅ **v0.13.1** | `graph_extractor.rs` — `extract_with_gleaning()` |
+| **Canvas force-directed graph visualization** | ✅ **v0.13.1** | `/graph` page — zero-dep vanilla JS renderer |
 
 ## Enabling extraction
 
@@ -85,11 +88,11 @@ export THE_ONE_GRAPH_MAX_CHUNKS=50
 
 Then restart the broker so the new env vars are picked up.
 
-> **Why env vars instead of config file?** v0.13.0 deliberately keeps graph
+> **Why env vars instead of config file?** v0.13.x deliberately keeps graph
 > extraction out of `config.json` to avoid touching the four different
 > config structs (FileConfig / ProjectOverlay / ProjectConfigUpdate /
-> AppConfig). Proper config fields will land in v0.13.1 alongside the
-> config page model selector. Env vars work today and let you iterate.
+> AppConfig). Proper config fields will land in v0.14.0. Env vars work
+> today and let you iterate quickly.
 
 ## Running extraction
 
@@ -284,29 +287,18 @@ Extraction time on a typical project (~50 chunks):
 
 ## Limitations and trade-offs
 
-### Known limitations
+### Known limitations (after v0.13.1 parity pass)
 
-1. **No entity name normalization.** If three chunks say `Rust`, `rust`,
-   and `RUST`, you get three entities. LightRAG normalizes to uppercase
-   before hashing; we don't yet. Fix is planned for v0.13.1.
-2. **No description summarization.** When an entity is referenced in many
-   chunks, its description becomes an unbounded concatenation. LightRAG
-   map-reduces descriptions via a second LLM call when they exceed a
-   threshold; we don't.
+1. ~~**No entity name normalization.**~~ **Fixed in v0.13.1.** `normalize_entity_name()` collapses `Rust`/`rust`/`RUST` into one entity.
+2. ~~**No description summarization.**~~ **Fixed in v0.13.1.** Descriptions exceeding `THE_ONE_GRAPH_SUMMARIZE_THRESHOLD` (default 2000 chars) are map-reduced via an LLM call.
 3. **Relation dedup is fragile.** Relations `A→B` and `B→A` are stored as
-   distinct edges even when they're semantically the same. If this matters
-   for your use case, post-process the JSON.
-4. **No gleaning pass.** A single extraction call per chunk. LightRAG runs
-   a second "did you miss anything" pass that recovers ~15-25% more
-   entities. Planned for v0.14.0.
-5. **Local mode uses keyword search, not entity-description vector
-   search.** LightRAG's "local" mode embeds entity descriptions into a
-   separate vector store and searches that. Our Local mode currently uses
-   substring matching against entity names. This is cheaper but misses
-   synonyms and paraphrases.
+   distinct edges even when they're semantically the same. Normalize by
+   sorting endpoints if this matters for your use case.
+4. ~~**No gleaning pass.**~~ **Fixed in v0.13.1.** `THE_ONE_GRAPH_GLEANING_ROUNDS=1` (default) runs a second "what did you miss?" pass per chunk.
+5. ~~**Local mode uses keyword search.**~~ **Fixed in v0.13.1.** Entity/relation descriptions are now embedded into dedicated Qdrant vector collections. `search_graph` routes through them when available.
 6. **No incremental extraction.** Every `graph.extract` call processes
    chunks from scratch. Adding new chunks re-extracts everything (bounded
-   by `THE_ONE_GRAPH_MAX_CHUNKS`).
+   by `THE_ONE_GRAPH_MAX_CHUNKS`). Planned for v0.14.0.
 
 ### When NOT to use Graph RAG
 
@@ -338,32 +330,30 @@ implemented) will make ongoing cost marginal.
 LightRAG is a research implementation in Python. Our implementation is a
 pragmatic production port in Rust with a deliberately narrower feature set:
 
-| Feature | LightRAG | the-one-mcp v0.13.0 |
+| Feature | LightRAG | the-one-mcp v0.13.1 |
 |---------|----------|-----------|
 | Entity / relation extraction | ✅ (delimiter tuples) | ✅ (JSON format) |
 | Four retrieval modes | ✅ | ✅ |
-| Entity description vector store | ✅ | ❌ (v0.13.1) |
-| Keyword extraction for queries | ✅ | ❌ (v0.13.1) |
-| Sigma.js graph viz | ✅ | ❌ placeholder (v0.13.1) |
-| Gleaning (continue-extraction) | ✅ | ❌ (v0.14.0) |
-| Description summarization | ✅ | ❌ (v0.13.1) |
-| Entity name normalization | ✅ | ❌ (v0.13.1) |
-| Languages | Python | Rust |
-| Storage | NetworkX + multiple vector stores | Single JSON file + Qdrant |
+| Entity description vector store | ✅ | ✅ (3 Qdrant collections per project) |
+| Keyword extraction for queries | ✅ | ✅ (LLM-driven high/low split) |
+| Graph visualization | ✅ (Sigma.js) | ✅ (Canvas force-directed, zero deps) |
+| Gleaning (continue-extraction) | ✅ | ✅ (configurable rounds, early termination) |
+| Description summarization | ✅ | ✅ (LLM map-reduce above threshold) |
+| Entity name normalization | ✅ | ✅ (title-case + acronym preservation + dedup) |
+| Languages | Python | **Rust** |
+| Storage | NetworkX + multiple vector stores | **Single JSON + 3 Qdrant collections** |
 
-Our v0.13.0 is the **minimum viable wiring** that ships an end-to-end
-working path. The deferred features are quality-of-life improvements that
-compound nicely but aren't blocking.
+As of v0.13.1, the-one-mcp has **full feature parity** with LightRAG's
+core Graph RAG pipeline, reimplemented in Rust with a production-grade
+admin UI.
 
-## Roadmap
+## Roadmap (v0.14.0+)
 
-- **v0.13.1** — entity name normalization, Sigma.js viz, config fields
-  (instead of env vars), entity-description vector store for real Local
-  mode, model selector in config page
-- **v0.14.0** — gleaning pass, description summarization, incremental
-  extraction, automatic extraction on ingest
+- **v0.14.0** — graph extraction config fields in `config.json` (instead of
+  env vars), incremental extraction (only new chunks), automatic extraction
+  on ingest
 - **v0.15.0** — multi-hop relation traversal, entity merge UI, graph
-  pruning for concept drift
+  pruning for concept drift, Sigma.js upgrade for larger graphs
 
 ## See also
 

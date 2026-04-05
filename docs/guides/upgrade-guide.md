@@ -4,6 +4,38 @@
 
 ---
 
+## Upgrading to v0.13.1 (from v0.13.0)
+
+### New features (non-breaking)
+
+- **Full LightRAG parity** — 6 features that were missing in v0.13.0 are now
+  shipped: entity name normalization, entity/relation description vector store,
+  description summarization, query keyword extraction, gleaning pass, and canvas
+  force-directed graph visualization. See the updated [Graph RAG guide](graph-rag.md)
+  for the full parity matrix.
+- **New env vars** for the Graph RAG pipeline: `THE_ONE_GRAPH_GLEANING_ROUNDS`
+  (default 1), `THE_ONE_GRAPH_SUMMARIZE_THRESHOLD` (default 2000),
+  `THE_ONE_GRAPH_QUERY_EXTRACT` (default true).
+
+### Required action
+
+- **None.** All new features are disabled by default (behind `THE_ONE_GRAPH_ENABLED`).
+  Existing graph data is forward-compatible.
+
+### Optional actions
+
+- **Re-run extraction** if you populated the graph in v0.13.0 — the new
+  normalization + gleaning will produce a cleaner, more complete graph.
+- **Check graph viz** at http://localhost:8788/graph after running extraction.
+  The canvas renderer replaces the v0.13.0 placeholder.
+
+### No breaking changes
+
+- `MemoryEngine::search_graph` is now async but all callers are in async contexts
+- `MemoryEngine` has a new `project_id` field (defaults to `None`, no external effect)
+
+---
+
 ## Upgrading to v0.12.0 (from v0.10.x or earlier)
 
 ### New features (non-breaking)

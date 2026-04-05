@@ -1,10 +1,10 @@
 # Progress Report
 
-## Current Version: v0.13.0
+## Current Version: v0.13.1
 
 ## Overall Status
 
-All planned stages complete. Fourteen major releases shipped:
+All planned stages complete. Fifteen major releases shipped:
 - **v0.1.0** — Initial workspace: 8 crates, 14 MCP tools, stub implementations
 - **v0.2.0** — Production overhaul: async broker, real embeddings, 3 transports, 24 tools
 - **v0.3.0** — Tool catalog: SQLite + Qdrant semantic search, tool lifecycle, 31 tools
@@ -20,8 +20,9 @@ All planned stages complete. Fourteen major releases shipped:
 - **v0.12.0** — Phase 3 bundled: Intel Mac `local-embeddings-dynamic` feature flag, observability deep dive (+8 metric counters + per-operation latency + Arc<BrokerMetrics>), backup/restore via `maintain: backup` and `maintain: restore` with tar+gzip, 300 tests
 - **v0.12.1** — Docs refresh: 3 new guides (mcp-resources, backup-restore, observability) + README/CLAUDE.md/api-reference/tool-catalog/upgrade-guide/troubleshooting updated for v0.12.0 feature surface
 - **v0.13.0** — Major UI overhaul (landing page, /ingest, /graph, v2 dashboard, top nav with project switcher, shared page shell, dark-mode-aware) + Graph RAG end-to-end wiring (extraction pipeline, `maintain: graph.extract`/`graph.stats`, LightRAG-inspired research) + graph-rag.md guide, 302 tests
+- **v0.13.1** — Full LightRAG parity: entity name normalization, entity/relation description vector store (3 Qdrant collections), description summarization, query keyword extraction, gleaning/continue-extraction pass, canvas force-directed graph visualization, 308 tests
 
-Build/test gates: all green. 302 tests (default), 0 failures.
+Build/test gates: all green. 308 tests (default), 0 failures.
 
 ## Stats
 

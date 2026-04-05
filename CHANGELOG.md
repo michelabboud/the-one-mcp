@@ -2,6 +2,39 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.13.1] - 2026-04-06
+
+Full LightRAG parity — all six features from the v0.13.0 comparison matrix that were marked ❌ are now ✅.
+
+### Added
+
+1. **Entity name normalization** — `normalize_entity_name()` in `graph.rs`: trim, collapse whitespace, strip surrounding punctuation, preserve acronyms (all-uppercase like `API`, `HTTP`), title-case everything else. Applied in `merge_extraction` + new `ExtractionResult::merge` for full dedup across passes. +6 unit tests.
+2. **Entity + relation description vector store** — 6 new Qdrant methods (`create/upsert/search` for both entities and relations). `EntityPoint`, `RelationPoint`, `EntitySearchResult`, `RelationSearchResult` types. `MemoryEngine` gains `upsert_entity_vectors` / `upsert_relation_vectors` / `search_entities_semantic` / `search_relations_semantic`. Broker's `graph_extract()` now upserts all entities + relations into Qdrant after extraction.
+3. **Description summarization** — `summarize_description()` in `graph_extractor.rs`. After the per-chunk extraction loop, entities whose descriptions exceed `THE_ONE_GRAPH_SUMMARIZE_THRESHOLD` (default 2000 chars) get map-reduced via a single LLM summarization call.
+4. **Query keyword extraction** — `extract_query_keywords()` in `graph_extractor.rs`. Splits user queries into `high_level` (themes for Global mode) and `low_level` (identifiers for Local mode) via an LLM call. `search_graph()` upgraded from sync to async, now routes through the new Qdrant entity/relation collections when available. Graceful fallback to in-memory keyword search when disabled/offline. Enabled by default when `THE_ONE_GRAPH_ENABLED=true` (opt out via `THE_ONE_GRAPH_QUERY_EXTRACT=false`).
+5. **Gleaning / continue-extraction pass** — `extract_with_gleaning()` wraps each chunk's extraction with up to `THE_ONE_GRAPH_GLEANING_ROUNDS` (default 1) follow-up "what did you miss?" prompts. Early-terminates when a round returns empty. `ExtractionResult::merge()` deduplicates entities/relations across passes using normalized names.
+6. **Canvas force-directed graph visualization** — `/graph` page now renders a self-contained force-directed layout in ~80 lines of vanilla JS + `<canvas>`. Fetches `/api/graph`, runs 200 force simulation ticks, renders nodes colored by entity type + edges + labels (when < 80 nodes). Click to animate. Zero external deps, works offline.
+
+### Infrastructure changes
+
+- `MemoryEngine` gains `project_id: Option<String>` field + `set_project_id()` setter for scoping Qdrant entity/relation collections.
+- `search_graph()` is now `async` (3 call sites updated to `.await`).
+- `KnowledgeGraph` gains `all_entities()`, `all_relations()`, and `get_entity_mut()` public accessors.
+- Dashboard test assertion updated for v2 heading change.
+
+### New env vars (v0.13.1)
+
+| Var | Default | Purpose |
+|-----|---------|---------|
+| `THE_ONE_GRAPH_GLEANING_ROUNDS` | `1` | Extra extraction passes per chunk |
+| `THE_ONE_GRAPH_SUMMARIZE_THRESHOLD` | `2000` | Description char length triggering LLM summarization |
+| `THE_ONE_GRAPH_QUERY_EXTRACT` | `true` | Enable query keyword extraction for Local/Global modes |
+
+### Tests
+
+- +6 entity name normalization tests (title-case, acronyms, multi-word, punctuation, empty, dedup roundtrip)
+- Workspace total: **308 tests**, 0 failures on default + lean matrices
+
 ## [0.13.0] - 2026-04-06
 
 Major UI overhaul + Graph RAG end-to-end wiring, based on research into
