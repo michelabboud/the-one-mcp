@@ -292,6 +292,74 @@ impl McpBroker {
         Ok(engine)
     }
 
+    /// Spawn a background file watcher task for the given project if
+    /// `auto_index_enabled` is true in the project config.
+    ///
+    /// The watcher logs events but defers actual re-ingestion to a future
+    /// release. Users can trigger a manual reindex with `maintain:reindex`.
+    fn maybe_spawn_watcher(&self, project_root: &Path, project_id: &str) {
+        let config = match AppConfig::load(project_root, RuntimeOverrides::default()) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("watcher: could not load config for {project_id}: {e}");
+                return;
+            }
+        };
+
+        if !config.auto_index_enabled {
+            return;
+        }
+
+        let docs_path = project_root.join(".the-one").join("docs");
+        let images_path = project_root.join(".the-one").join("images");
+        let extensions = the_one_memory::watcher::DEFAULT_WATCHED_EXTENSIONS
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>();
+        let debounce_ms = config.auto_index_debounce_ms;
+        let project_id = project_id.to_string();
+
+        match the_one_memory::watcher::spawn_watcher(
+            vec![docs_path, images_path],
+            extensions,
+            debounce_ms,
+        ) {
+            Ok((mut rx, cancel, debouncer)) => {
+                tracing::info!(
+                    "auto-indexing enabled for project {project_id} (debounce={debounce_ms}ms)"
+                );
+                tokio::spawn(async move {
+                    // Keep debouncer alive for the lifetime of the task
+                    let _guard = debouncer;
+                    while let Some(event) = rx.recv().await {
+                        if cancel.is_cancelled() {
+                            break;
+                        }
+                        match event {
+                            the_one_memory::watcher::WatchEvent::Upserted(path) => {
+                                tracing::info!(
+                                    "auto-index: file changed [{}] — run `maintain:reindex` \
+                                     to update the index",
+                                    path.display()
+                                );
+                            }
+                            the_one_memory::watcher::WatchEvent::Removed(path) => {
+                                tracing::info!(
+                                    "auto-index: file removed [{}] — run `maintain:reindex` \
+                                     to update the index",
+                                    path.display()
+                                );
+                            }
+                        }
+                    }
+                });
+            }
+            Err(e) => {
+                tracing::warn!("failed to start file watcher for {project_id}: {e}");
+            }
+        }
+    }
+
     async fn route_query(&self, project_root: &Path, query: &str) -> RoutedDecision {
         let config = match AppConfig::load(project_root, RuntimeOverrides::default()) {
             Ok(config) => config,
@@ -413,13 +481,19 @@ impl McpBroker {
     ) -> Result<usize, CoreError> {
         let key = Self::project_memory_key(project_root, project_id);
         let mut memories = self.memory_by_project.write().await;
-        if !memories.contains_key(&key) {
+        let is_new = !memories.contains_key(&key);
+        if is_new {
             let engine = self.build_memory_engine(project_root, project_id)?;
             memories.insert(key.clone(), engine);
         }
         let memory = memories.get_mut(&key).ok_or_else(|| {
             CoreError::InvalidProjectConfig("project memory not indexed".to_string())
         })?;
+
+        // Spawn watcher once when the engine is first created
+        if is_new {
+            self.maybe_spawn_watcher(project_root, project_id);
+        }
 
         match memory.ingest_markdown_tree(docs_root).await {
             Ok(count) => Ok(count),

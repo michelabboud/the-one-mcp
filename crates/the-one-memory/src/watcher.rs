@@ -36,7 +36,9 @@ pub fn is_watched(path: &Path, extensions: &[&str]) -> bool {
         return false;
     };
     let ext_lower = ext.to_ascii_lowercase();
-    extensions.iter().any(|e| e.eq_ignore_ascii_case(&ext_lower))
+    extensions
+        .iter()
+        .any(|e| e.eq_ignore_ascii_case(&ext_lower))
 }
 
 /// Spawn a file watcher that sends events to an async mpsc channel.
@@ -93,8 +95,7 @@ pub fn spawn_watcher(
                 Ok(events) => {
                     for event in events {
                         let path = event.path;
-                        let ext_refs: Vec<&str> =
-                            extensions.iter().map(String::as_str).collect();
+                        let ext_refs: Vec<&str> = extensions.iter().map(String::as_str).collect();
                         if !is_watched(&path, &ext_refs) {
                             continue;
                         }
@@ -158,10 +159,7 @@ mod tests {
 
         match result {
             Ok(Some(WatchEvent::Upserted(path))) => {
-                assert_eq!(
-                    path.file_name().and_then(|n| n.to_str()),
-                    Some("test.md")
-                );
+                assert_eq!(path.file_name().and_then(|n| n.to_str()), Some("test.md"));
             }
             other => panic!("expected upsert event, got {other:?}"),
         }
@@ -170,12 +168,9 @@ mod tests {
     #[tokio::test]
     async fn test_watcher_ignores_unwatched_extensions() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let (mut rx, cancel, _debouncer) = spawn_watcher(
-            vec![tmp.path().to_path_buf()],
-            vec!["md".to_string()],
-            100,
-        )
-        .expect("spawn watcher");
+        let (mut rx, cancel, _debouncer) =
+            spawn_watcher(vec![tmp.path().to_path_buf()], vec!["md".to_string()], 100)
+                .expect("spawn watcher");
 
         tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -195,11 +190,7 @@ mod tests {
         // A path that doesn't exist should be skipped (no error, no watch)
         let tmp = tempfile::tempdir().expect("tempdir");
         let nonexistent = tmp.path().join("does-not-exist");
-        let result = spawn_watcher(
-            vec![nonexistent],
-            vec!["md".to_string()],
-            100,
-        );
+        let result = spawn_watcher(vec![nonexistent], vec!["md".to_string()], 100);
         // Should succeed (nonexistent paths are silently skipped)
         assert!(result.is_ok(), "should not error on missing path");
     }
