@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "the-one.mcp.v1beta.memory.search_images.response",
+  "title": "memory.search_images response",
+  "type": "object",
+  "required": ["hits"],
+  "properties": {
+    "hits": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "source_path", "score"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "source_path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "thumbnail_path": {
+            "type": ["string", "null"]
+          },
+          "caption": {
+            "type": ["string", "null"]
+          },
+          "ocr_text": {
+            "type": ["string", "null"]
+          },
+          "score": {
+            "type": "number",
+            "minimum": 0.0,
+            "maximum": 1.0
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

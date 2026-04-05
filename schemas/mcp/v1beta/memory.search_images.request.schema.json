@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "the-one.mcp.v1beta.memory.search_images.request",
+  "title": "memory.search_images request",
+  "type": "object",
+  "required": ["project_root", "project_id", "query"],
+  "properties": {
+    "project_root": {
+      "type": "string",
+      "minLength": 1
+    },
+    "project_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "query": {
+      "type": "string",
+      "minLength": 1
+    },
+    "top_k": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 5
+    }
+  },
+  "additionalProperties": false
+}

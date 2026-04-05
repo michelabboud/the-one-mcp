@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "the-one.mcp.v1beta.memory.ingest_image.response",
+  "title": "memory.ingest_image response",
+  "type": "object",
+  "required": ["path", "dims", "ocr_extracted", "thumbnail_generated"],
+  "properties": {
+    "path": {
+      "type": "string",
+      "minLength": 1
+    },
+    "dims": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "ocr_extracted": {
+      "type": "boolean"
+    },
+    "thumbnail_generated": {
+      "type": "boolean"
+    }
+  },
+  "additionalProperties": false
+}
