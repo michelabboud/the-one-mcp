@@ -18,9 +18,9 @@ use std::path::Path;
 use crate::chunker::{chunk_markdown, ChunkMeta};
 use crate::embeddings::EmbeddingProvider;
 use crate::graph::KnowledgeGraph;
-use crate::qdrant::{
-    AsyncQdrantBackend, HybridPoint, QdrantOptions, QdrantPayload, QdrantPoint, QdrantSparseVector,
-};
+use crate::qdrant::{AsyncQdrantBackend, QdrantOptions, QdrantPayload, QdrantPoint};
+#[cfg(feature = "local-embeddings")]
+use crate::qdrant::{HybridPoint, QdrantSparseVector};
 use crate::reranker::Reranker;
 #[cfg(feature = "local-embeddings")]
 use crate::sparse_embeddings::SparseEmbeddingProvider;
@@ -102,10 +102,13 @@ pub struct MemoryEngine {
     #[cfg(feature = "local-embeddings")]
     sparse_provider: Option<Box<dyn SparseEmbeddingProvider>>,
     /// Whether to use hybrid (dense + sparse) vector search.
+    #[cfg_attr(not(feature = "local-embeddings"), allow(dead_code))]
     hybrid_search_enabled: bool,
     /// Weight for the dense cosine score in hybrid fusion (0.0-1.0).
+    #[cfg_attr(not(feature = "local-embeddings"), allow(dead_code))]
     hybrid_dense_weight: f32,
     /// Weight for the normalized sparse score in hybrid fusion (0.0-1.0).
+    #[cfg_attr(not(feature = "local-embeddings"), allow(dead_code))]
     hybrid_sparse_weight: f32,
 }
 
@@ -821,6 +824,7 @@ impl MemoryEngine {
 /// - At score=0: returns 0.0
 /// - At score=5: returns 0.5
 /// - As score goes to infinity: approaches 1.0
+#[cfg(feature = "local-embeddings")]
 fn bm25_normalize(score: f32) -> f32 {
     const K: f32 = 5.0;
     score / (score + K)

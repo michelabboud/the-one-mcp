@@ -136,7 +136,12 @@ jobs:
         shell: bash
         run: |
           BUILD_CMD="${{ matrix.cross && 'cross' || 'cargo' }}"
-          $BUILD_CMD build --release --target "$TARGET" -p the-one-ui --bin embedded-ui
+          if [ "${{ matrix.no_local_embeddings }}" = "true" ]; then
+            $BUILD_CMD build --release --target "$TARGET" -p the-one-ui --bin embedded-ui \
+              --no-default-features --features embed-swagger
+          else
+            $BUILD_CMD build --release --target "$TARGET" -p the-one-ui --bin embedded-ui
+          fi
 
       - name: Package artifacts
         shell: bash

@@ -396,6 +396,7 @@ impl EmbeddingProvider for ApiEmbeddingProvider {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "local-embeddings")]
     use super::*;
 
     #[cfg(feature = "local-embeddings")]

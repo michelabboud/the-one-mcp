@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.7.1] - 2026-04-05
+
+### Fixed
+- **Intel macOS build:** `embedded-ui` binary now respects the `no_local_embeddings` CI flag, fixing the `ort-sys@2.0.0-rc.11: ort does not provide prebuilt binaries for the target x86_64-apple-darwin` failure that blocked 1/6 platforms in the v0.7.0 release.
+- `the-one-ui` crate now has proper feature passthrough (`local-embeddings`, `image-embeddings`, `embed-swagger`) so it can be built lean without fastembed.
+- `the-one-mcp/src/broker.rs` and `the-one-memory/src/lib.rs` dead-code warnings on the `--no-default-features` build path (reranker import, hybrid_* fields, bm25_normalize function) now properly gated behind `#[cfg(feature = "local-embeddings")]`.
+
+### Changed
+- `the-one-ui` depends on `the-one-mcp` with `default-features = false`, then re-enables via its own feature passthrough.
+- Release workflow `Build embedded UI` step now branches on `matrix.no_local_embeddings`, mirroring the pattern used for `the-one-mcp` binary builds.
+
 ## [0.7.0] - 2026-04-05
 
 ### Added
