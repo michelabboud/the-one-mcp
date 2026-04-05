@@ -2,6 +2,28 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.8.0] - 2026-04-05
+
+### Added
+- **Watcher auto-reindex** — the file watcher now actually re-ingests changed markdown files instead of only logging events. Finishes the v0.7.0 watcher promise. Image auto-reindex still logs-only (deferred to v0.8.1).
+- **Code-aware chunker** — language-aware chunking for 5 programming languages:
+  - Rust (`.rs`): top-level `fn`, `struct`, `enum`, `impl`, `trait`, `mod`, `type`, `const`, `static`, `macro_rules!`
+  - Python (`.py`): top-level `def`, `async def`, `class` with decorator handling
+  - TypeScript (`.ts`, `.tsx`): `function`, `class`, `interface`, `type`, `enum`, `const`/`let`/`var` with template literal awareness
+  - JavaScript (`.js`, `.jsx`, `.mjs`, `.cjs`): same engine as TypeScript
+  - Go (`.go`): `func` (including method receivers), `type`, `var`, `const`, paren-block handling
+- **`chunk_file` dispatcher** — automatically selects the right chunker by file extension; falls back to blank-line text chunking for unknown types
+- **Extended `ChunkMeta`** — new optional fields: `language`, `symbol`, `signature`, `line_range`. LLMs can now see function signatures and line ranges in search results.
+- **MemoryEngine methods** — `ingest_single_markdown(path)` for incremental updates, `remove_by_path(path)` for deletion
+- User guide: `docs/guides/code-chunking.md`
+
+### Changed
+- `MemoryEngine` is now held as `Arc<RwLock<HashMap<String, MemoryEngine>>>` in the broker, enabling the watcher's spawned tokio task to hold its own reference for auto-reindex operations
+- `split_on_blank_lines` helper promoted to `chunker.rs` as `pub(crate)` for sharing across language chunkers
+
+### Dependencies
+- `regex 1` (already a transitive dep, now direct for `the-one-memory`)
+
 ## [0.7.1] - 2026-04-05
 
 ### Fixed

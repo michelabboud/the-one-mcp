@@ -1,10 +1,10 @@
 # Progress Report
 
-## Current Version: v0.7.0
+## Current Version: v0.8.0
 
 ## Overall Status
 
-All planned stages complete. Seven major releases shipped:
+All planned stages complete. Eight major releases shipped:
 - **v0.1.0** — Initial workspace: 8 crates, 14 MCP tools, stub implementations
 - **v0.2.0** — Production overhaul: async broker, real embeddings, 3 transports, 24 tools
 - **v0.3.0** — Tool catalog: SQLite + Qdrant semantic search, tool lifecycle, 31 tools
@@ -12,20 +12,21 @@ All planned stages complete. Seven major releases shipped:
 - **v0.5.0** — Tool consolidation: 33→15 tools (~52% token savings), multiplexed admin, merged work tools
 - **v0.6.0** — Multimodal: image embeddings, OCR, reranking (fastembed 5.x), 17 tools, 208 tests
 - **v0.7.0** — Hybrid search (dense+sparse), file watcher, admin UI image gallery, screenshot image search, 234 tests
+- **v0.8.0** — Watcher auto-reindex (real re-ingestion), code-aware chunker (5 languages), extended ChunkMeta, 272 tests
 
-Build/test gates: all green. 234 tests, 0 failures.
+Build/test gates: all green. 272 tests, 0 failures.
 
 ## Stats
 
-| Metric | v0.1.0 | v0.2.0 | v0.3.0 | v0.4.0 | v0.5.0 | v0.6.0 | v0.7.0 |
-|--------|--------|--------|--------|--------|--------|--------|--------|
-| MCP Tools | 14 | 24 | 31 | 33 | 15 | 17 | **17** |
-| Tests | 68 | 122 | 135 | 174 | 183 | 208 | **234** |
-| Rust LOC | 6,400 | ~10,000 | ~12,800 | ~14,000 | ~14,200 | ~16,500 | **~19,000** |
-| JSON Schemas | 33 | 49 | 63 | 63 | 31 | 35 | **35** |
-| Catalog Tools | — | — | 28 | 28 | 28 | 28 | **28** |
-| Platforms | 1 | 1 | 6 | 6 | 6 | 6 | **6** |
-| AI CLIs | 2 | 2 | 4 | 4 | 4 | 4 | **4** |
+| Metric | v0.1.0 | v0.2.0 | v0.3.0 | v0.4.0 | v0.5.0 | v0.6.0 | v0.7.0 | v0.8.0 |
+|--------|--------|--------|--------|--------|--------|--------|--------|--------|
+| MCP Tools | 14 | 24 | 31 | 33 | 15 | 17 | **17** | **17** |
+| Tests | 68 | 122 | 135 | 174 | 183 | 208 | **234** | **272** |
+| Rust LOC | 6,400 | ~10,000 | ~12,800 | ~14,000 | ~14,200 | ~16,500 | **~19,000** | **~21,000** |
+| JSON Schemas | 33 | 49 | 63 | 63 | 31 | 35 | **35** | **35** |
+| Catalog Tools | — | — | 28 | 28 | 28 | 28 | **28** | **28** |
+| Platforms | 1 | 1 | 6 | 6 | 6 | 6 | **6** | **6** |
+| AI CLIs | 2 | 2 | 4 | 4 | 4 | 4 | **4** | **4** |
 
 ## Stage Progress (v0.1.0)
 
@@ -216,6 +217,34 @@ All complete: Claude Code + Gemini CLI + OpenCode + Codex auto-detection, tiered
   - New guides: `docs/guides/hybrid-search.md`, `docs/guides/auto-indexing.md`
   - All top-level docs updated (README, CHANGELOG, PROGRESS, CLAUDE.md, INSTALL.md, VERSION)
   - v0.7.0 tagged and cross-platform release triggered
+
+## Watcher Auto-Reindex + Code Chunker (v0.8.0) — 4 Phases
+
+- Phase A+B: Watcher auto-reindex
+  - `ingest_single_markdown(path)` and `remove_by_path(path)` added to `MemoryEngine`
+  - `MemoryEngine` HashMap promoted to `Arc<RwLock<...>>` shared between broker and watcher task
+  - Watcher tokio task now calls `ingest_single_markdown` on `Create`/`Modify` events and `remove_by_path` on `Remove` events
+  - Image events still log-only (auto-reindex deferred to v0.8.1)
+  - Integration test: `test_watcher_auto_reindex` with 2s debounce verification
+
+- Phase C: Code chunker core + Rust
+  - `ChunkMeta` extended with `language`, `symbol`, `signature`, `line_range` fields
+  - `chunk_file(path, content, max_tokens)` dispatcher — selects chunker by extension
+  - `split_on_blank_lines` promoted to `pub(crate)` for sharing across chunkers
+  - Rust chunker: brace-depth tracking, `impl … for …` detection, all top-level Rust item types
+  - `regex 1` added as direct dependency of `the-one-memory`
+
+- Phase D: Python/TypeScript/JavaScript/Go chunkers
+  - Python chunker: indentation-based, decorator handling, `async def` support
+  - TypeScript/JavaScript chunker: shared engine, template-literal-aware brace tracking
+  - Go chunker: method receiver detection (`func (r *T) Method`), paren-block handling for `var`/`const`
+  - All 4 chunkers tested: 14 new tests covering edge cases (decorators, receivers, template literals, paren blocks)
+
+- Phase E: Documentation + release
+  - New guide: `docs/guides/code-chunking.md`
+  - All top-level docs updated (README, CHANGELOG, PROGRESS, CLAUDE.md, INSTALL.md, VERSION)
+  - `docs/guides/auto-indexing.md` updated to reflect watcher now does real re-ingestion
+  - v0.8.0 tagged and cross-platform release triggered
 
 ## What's Next
 

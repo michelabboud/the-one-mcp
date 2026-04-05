@@ -43,7 +43,8 @@ The LLM is the brain. The MCP is the data layer — catalog, filtering, executio
 - **Managed Knowledge Base** — Create, update, and organize markdown docs that persist across sessions. The LLM writes notes, decisions, architecture docs.
 - **Smart Discovery** — `tool.find` filters by project profile (languages, frameworks), groups by install state (enabled / available / recommended). Token-efficient.
 - **Policy-Gated Execution** — Approval scopes (once/session/forever) for high-risk tools. Headless deny-by-default.
-- **Auto-Indexing** — Optional background file watcher on `.the-one/docs/` and `.the-one/images/`. Detects file changes with configurable debounce. Full auto-reingestion in v0.7.1.
+- **Auto-Indexing** — Background file watcher on `.the-one/docs/`. Detects file changes and automatically re-ingests updated markdown into the search index. Opt-in via `auto_index_enabled: true`.
+- **Code-Aware Chunking** — Language-aware chunking for Rust, Python, TypeScript, JavaScript, and Go. Search results include function/class names, signatures, and line ranges as structured metadata. See [Code Chunking Guide](docs/guides/code-chunking.md).
 - **Multi-CLI** — Same server works with Claude Code, Gemini CLI, OpenCode, Codex. Per-CLI custom tools via `clientInfo` detection.
 
 ## Architecture
@@ -125,7 +126,8 @@ Enable with `"image_embedding_enabled": true` in config. OCR text extraction ava
 | [Image Search Guide](docs/guides/image-search.md) | Semantic image search, OCR, thumbnails, screenshot search |
 | [Reranking Guide](docs/guides/reranking.md) | Cross-encoder reranking for memory.search |
 | [Hybrid Search Guide](docs/guides/hybrid-search.md) | Dense + sparse search for exact-match retrieval |
-| [Auto-Indexing Guide](docs/guides/auto-indexing.md) | Background file watcher for docs and images |
+| [Auto-Indexing Guide](docs/guides/auto-indexing.md) | Background file watcher with automatic re-ingestion |
+| [Code Chunking Guide](docs/guides/code-chunking.md) | Language-aware chunking for Rust, Python, TypeScript, JavaScript, Go |
 | [Operator Runbook](docs/ops/operator-runbook.md) | Operations, backup, incident triage |
 | [Tool Ecosystem](docs/plans/tool-ecosystem-architecture.md) | 7-layer tool catalog vision |
 | [Contributing](CONTRIBUTING.md) | Add tools to the catalog |
@@ -154,7 +156,7 @@ bash scripts/build.sh check           # full CI pipeline
 bash scripts/build.sh info            # show build config
 
 # Cross-platform release (triggers GitHub Actions — manual only)
-bash scripts/build.sh release v0.7.0  # build for 6 platforms + create GitHub Release
+bash scripts/build.sh release v0.8.0  # build for 6 platforms + create GitHub Release
 bash scripts/build.sh release --status # check workflow progress
 ```
 
@@ -165,8 +167,8 @@ Releases are **manual only** — tagging does not auto-trigger builds. You decid
 | Metric | Count |
 |--------|-------|
 | MCP Tools | 17 |
-| Tests | 234 |
-| Rust LOC | ~19,000 |
+| Tests | 272 |
+| Rust LOC | ~21,000 |
 | JSON Schemas | 35 |
 | Catalog Tools | 28 (growing) |
 | Supported Platforms | 6 (Linux/macOS/Windows x86-64 + ARM64) |
