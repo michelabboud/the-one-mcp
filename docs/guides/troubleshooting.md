@@ -1,6 +1,6 @@
 # Troubleshooting
 
-Common problems and their fixes for the-one-mcp v0.7.0.
+Common problems and their fixes for the-one-mcp v0.8.0.
 
 ---
 
@@ -462,7 +462,7 @@ The broker falls back to SQLite FTS5 when the Qdrant connection fails. Check:
 
 ---
 
-## Image Search Issues (v0.6.0)
+## Image Search Issues
 
 ### `image embeddings not enabled`
 
@@ -586,7 +586,7 @@ export THE_ONE_LIMIT_MAX_IMAGE_SIZE_BYTES=20971520
 
 ---
 
-## Reranking Issues (v0.6.0)
+## Reranking Issues
 
 ### Reranker model download is slow
 
@@ -945,7 +945,7 @@ bash scripts/release-gate.sh
 
 ---
 
-## Hybrid Search Issues (v0.7.0)
+## Hybrid Search Issues
 
 ### "Hybrid search requires Qdrant 1.7+"
 
@@ -973,17 +973,17 @@ Check the config layer resolution. A project config file can override the global
 
 ---
 
-## File Watcher Issues (v0.7.0)
+## File Watcher Issues (v0.8.0)
 
 ### Watcher log lines not appearing
 
 1. Verify `auto_index_enabled: true` in resolved config: `config (action: export)`
 2. Set `log_level: "info"` — watcher logs at INFO level
-3. Ensure the project was initialized: call `setup (action: init)` — the watcher is started per-project at init time
+3. Ensure the project was initialized: call `setup (action: project)` — the watcher is started per-project at init time
 
 ### "Failed to start watcher"
 
-The most common cause is missing directories. Ensure `.the-one/docs/` and `.the-one/images/` exist. They are created on `setup (action: init)`.
+The most common cause is missing directories. Ensure `.the-one/docs/` and `.the-one/images/` exist. They are created on `setup (action: project)`.
 
 On Linux, also check inotify watch limits:
 
@@ -993,13 +993,41 @@ cat /proc/sys/fs/inotify/max_user_watches
 sudo sysctl fs.inotify.max_user_watches=524288
 ```
 
-### Files changed but index not updated
+### Markdown file changed but index not updated
 
-This is expected in v0.7.0. The watcher detects and logs changes but does not automatically re-ingest files. Auto-reingestion is planned for v0.7.1. Run `maintain (action: reindex)` manually after editing docs.
+Ensure the project was initialized (`setup (action: project)` was called) — the watcher is started per-project at init time, and a fresh server session won't have an active watcher until init runs. Also verify `auto_index_enabled: true` is set. If after init changes still don't appear, run `maintain (action: reindex)` to force a full reindex.
+
+### Image events fire but images are not re-indexed
+
+This is expected in v0.8.0. Image event detection works; automatic image re-ingestion is planned for v0.8.1. Run `maintain (action: images.rescan)` manually to update image search.
 
 ---
 
-## Admin UI Image Gallery Issues (v0.7.0)
+## Code Chunker Issues (v0.8.0)
+
+### Code file indexed but `language` / `symbol` fields are null in fetch results
+
+The file extension is not in the supported set (`.rs`, `.py`, `.ts`, `.tsx`, `.js`, `.jsx`, `.mjs`, `.cjs`, `.go`). Other extensions fall back to blank-line paragraph splitting — the chunk will have `language: null` and `symbol: null`. Check the file extension and see the [Code Chunking Guide](code-chunking.md) for the full list.
+
+### Symbol name search returns no results
+
+The chunker extracted the function but the search didn't find it. Try a semantic query that describes the function's behavior rather than its name. For exact name matching, enable hybrid search (`hybrid_search_enabled: true`) — the sparse SPLADE++ signal gives high weight to rare tokens like function names.
+
+### After running `setup:refresh`, code chunks still show old boundaries
+
+The chunker runs on the content that was passed at ingest time. If you changed the file on disk but the managed doc wasn't updated via `docs.save`, the index still has the old version. Use `docs.save` to re-ingest the file, or run `maintain (action: reindex)` to force a full re-indexing pass.
+
+### Rust brace-depth tracking produces oversized chunks for large `impl` blocks
+
+Very large `impl` blocks (with many methods) may exceed `max_chunk_tokens` and be split on blank lines within the block. Each sub-chunk retains the same `symbol` and `signature` as the parent item. This is expected behavior — the sub-chunks are tagged consistently, so searches for the symbol still return all relevant sub-chunks.
+
+### TypeScript template literals confuse the chunker
+
+The TypeScript/JavaScript chunker handles backtick template literals by tracking nesting depth and ignoring `{` inside them. If you see unexpected chunk boundaries in a file with complex template literals, this is a known edge case with the regex-based approach. The planned tree-sitter upgrade (v0.9.0) will resolve this.
+
+---
+
+## Admin UI Image Gallery Issues
 
 ### `/images` page is blank
 
@@ -1015,7 +1043,7 @@ The `/images/thumbnail/<hash>` route validates the hash against the pattern `^[a
 
 ---
 
-## Screenshot Image Search Issues (v0.7.0)
+## Screenshot Image Search Issues
 
 ### "Provide either query or image_base64, not both" error
 

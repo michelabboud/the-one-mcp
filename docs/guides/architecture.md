@@ -1,7 +1,7 @@
 # Architecture Overview
 
 > High-level architecture of the-one-mcp for contributors and integrators.
-> Version: v0.6.0
+> Version: v0.8.0
 
 ## Design Goals
 
@@ -86,7 +86,11 @@ The RAG layer. Async throughout.
 Key modules:
 - `lib.rs` — `MemoryEngine`: the top-level async struct. Owns an `EmbeddingProvider`
   and a Qdrant client.
-- `chunker.rs` — heading-aware markdown chunker that preserves document structure.
+- `chunker.rs` — `chunk_file()` dispatcher: routes to a language-specific chunker by file
+  extension, falling back to blank-line splitting for unsupported types. Language chunkers
+  (`chunker_rust.rs`, `chunker_python.rs`, `chunker_typescript.rs`, `chunker_go.rs`) use
+  regex + brace-depth tracking to produce function/struct/class-level chunks with extended
+  `ChunkMeta` fields: `language`, `symbol`, `signature`, `line_range` (all added in v0.8.0).
 - `embeddings.rs` — `EmbeddingProvider` trait with two implementations:
   `FastEmbedProvider` (local ONNX via fastembed, tiered: fast/balanced/quality/multilingual)
   and `ApiEmbeddingProvider` (OpenAI-compatible HTTP).
@@ -113,7 +117,7 @@ Key modules:
   `*Request` / `*Response` struct here.
 - `transport/jsonrpc.rs` — JSON-RPC 2.0 dispatcher. Deserializes incoming requests,
   calls the appropriate `McpBroker` method, serializes the response.
-- `transport/tools.rs` — the `tool_definitions()` function that returns the 33 MCP tool
+- `transport/tools.rs` — the `tool_definitions()` function that returns the 17 MCP tool
   descriptors sent during `initialize`.
 - `transport/stdio.rs`, `sse.rs`, `stream.rs` — transport implementations. The broker
   never knows which transport is active.
@@ -190,13 +194,17 @@ use `tokio::task::spawn_blocking`.
 ### Per-Project Isolation
 
 ```rust
-memory_by_project: RwLock<HashMap<String, MemoryEngine>>
+memory_by_project: Arc<RwLock<HashMap<String, MemoryEngine>>>
 docs_by_project:   RwLock<HashMap<String, DocsManager>>
 ```
 
 Both maps are keyed by `"{project_root}::{project_id}"`. Projects never share memory
 vectors, doc state, or enabled-tool state. The `ToolCatalog` is global (shared), but
 `enabled_tools` state inside it is per-CLI per-project-root.
+
+`memory_by_project` was promoted to `Arc<RwLock<...>>` in v0.8.0 so the file watcher's
+spawned tokio task can hold its own reference for re-ingestion without borrowing from the
+broker.
 
 ### Layered Config
 
@@ -239,7 +247,7 @@ and loads:
 
 ## Tool Dispatch Architecture
 
-The 33 MCP tools are split into two groups:
+The 17 MCP tools are split into two groups:
 
 ### Work Tools (direct methods)
 
@@ -278,10 +286,16 @@ tool has a secondary dispatch on the `action` parameter.
 ## RAG Pipeline
 
 ```
-Markdown document
+Source file (any extension)
   |
-  v  chunker.rs (heading-aware, preserves structure)
-Chunks (title + content + heading path)
+  v  chunker.rs — dispatches by file extension (v0.8.0)
+  |     .rs  → chunker_rust.rs   (fn/struct/impl/trait/etc.)
+  |     .py  → chunker_python.rs (def/class + decorators)
+  |     .ts/.tsx → chunker_typescript.rs (function/class/interface/type/enum)
+  |     .js/.jsx/.mjs/.cjs → chunker_javascript.rs (same engine as TS)
+  |     .go  → chunker_go.rs (func/type/var/const with receiver handling)
+  |     other → split_on_blank_lines (text/markdown fallback)
+Chunks (title + content + heading path + language + symbol + signature + line_range)
   |
   v  embeddings.rs (FastEmbedProvider or ApiEmbeddingProvider)
 Vectors (384–1024 dimensions depending on model tier)
@@ -304,7 +318,7 @@ Candidate chunks
 Final ranked results → broker → client
 ```
 
-## Image Pipeline (v0.6.0)
+## Image Pipeline
 
 Images are indexed in a separate Qdrant collection from text documents:
 
@@ -326,7 +340,7 @@ Separate Qdrant collection: "{project_id}_images"
 Triggered by:
 - `memory.ingest_image` — manual ingestion of a specific file
 - `maintain` with `action: images.rescan` — full project image re-scan
-- `project.init` / `project.refresh` — automatic detection when fingerprint changes
+- `setup` (action: `project`) / `setup` (action: `refresh`) — automatic detection when fingerprint changes
 
 Feature flags control availability:
 - `image-embeddings` — enables `FastEmbedImageProvider`
@@ -392,7 +406,7 @@ the-one-mcp:      broker integration tests (#[tokio::test]); schema validation t
 Environment isolation: config tests use `temp_env::with_vars` to prevent variable
 pollution between parallel test runs.
 
-The full test suite: `cargo test --workspace` (174 tests as of v0.6.0).
+The full test suite: `cargo test --workspace` (272 tests as of v0.8.0).
 
 Release gate: `bash scripts/release-gate.sh` — runs fmt check, clippy, full test suite,
 and binary smoke test.

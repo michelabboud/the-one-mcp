@@ -223,7 +223,7 @@ Semantic search over indexed project images. Finds screenshots, diagrams, photos
 and mockups matching a natural-language query or a reference image. Requires
 `image_embedding_enabled` to be active in the project configuration.
 
-As of v0.7.0, exactly one of `query` or `image_base64` must be provided:
+Exactly one of `query` or `image_base64` must be provided:
 
 - **Text query** — natural language description ("database schema diagram")
 - **Image query** — base64-encoded image for image→image similarity (screenshot search)

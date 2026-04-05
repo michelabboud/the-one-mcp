@@ -105,7 +105,7 @@ The watcher monitors exactly two paths per project:
 | `<project_root>/.the-one/docs/` | `*.md` | `docs.save`, manual file edits |
 | `<project_root>/.the-one/images/` | `*.png`, `*.jpg`, `*.jpeg`, `*.webp` | `memory.ingest_image`, manual file copies |
 
-Subdirectories are **not** recursively watched in v0.7.0. Only the top-level files in each directory are monitored.
+Subdirectories are **not** recursively watched. Only the top-level files in each directory are monitored.
 
 Files created outside these directories — including your project source files — are not watched. The watcher does not monitor `src/`, your workspace root, or any other directory. Its scope is intentionally narrow.
 
@@ -143,7 +143,7 @@ The file watcher uses `notify` (inotify on Linux, FSEvents on macOS, ReadDirecto
 
 The debounce timer uses a single tokio interval and does not busywait.
 
-In practice, the watcher has negligible CPU and battery impact during normal development. The only compute cost is the event processing, which in v0.7.0 is a log write — extremely cheap.
+In practice, the watcher has negligible CPU and battery impact during normal development. The compute cost per markdown event is a single `ingest_single_markdown` call — fast relative to a full reindex, and only triggered when files actually change.
 
 ---
 

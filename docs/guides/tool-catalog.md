@@ -57,7 +57,7 @@ tools/catalog/
 
 ### Local Storage: SQLite at `~/.the-one/catalog.db`
 
-When `project.init` runs (or `maintain` with `action: tool.refresh`), the broker imports
+When `setup` (action: `project`) runs (or `maintain` with `action: tool.refresh`), the broker imports
 all catalog JSON files into a local SQLite database at `~/.the-one/catalog.db`. This database
 has two search mechanisms:
 
@@ -309,7 +309,7 @@ This performs two operations:
 1. Downloads the latest `tools/catalog/` JSON files from the repository
 2. Re-runs the system inventory scan (`which <binary>` for every catalog entry)
 
-The catalog refresh also triggers automatically on `project.refresh` if the project
+The catalog refresh also triggers automatically on `setup` (action: `refresh`) if the project
 fingerprint has changed since the last scan.
 
 ## System Inventory
@@ -319,8 +319,8 @@ in the catalog. This is how it distinguishes `recommended` (not installed) from 
 (installed but not enabled) states.
 
 The inventory is updated:
-- On `project.init` (first run for a project)
-- On `project.refresh` when the fingerprint changes
+- On `setup` (action: `project`) — first run for a project
+- On `setup` (action: `refresh`) when the fingerprint changes
 - On `tool.install` (after a successful install)
 - On `maintain` with `action: tool.refresh` (explicit refresh)
 

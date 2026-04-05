@@ -1,6 +1,6 @@
 # Hybrid Search Guide
 
-> v0.7.0 — combines dense cosine similarity with sparse lexical matching for stronger exact-match retrieval.
+> v0.8.0 — combines dense cosine similarity with sparse lexical matching for stronger exact-match retrieval.
 
 ## What Hybrid Search Is
 

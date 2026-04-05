@@ -1,10 +1,10 @@
 # Configuration Reference
 
-> v0.7.0 — authoritative source: `crates/the-one-core/src/config.rs` and `crates/the-one-core/src/limits.rs`
+> v0.8.0 — authoritative source: `crates/the-one-core/src/config.rs` and `crates/the-one-core/src/limits.rs`
 
 ## Overview
 
-the-one-mcp resolves its configuration through five ordered layers. Every setting is optional; unset fields fall back to the previous layer until the built-in default is reached. The resolved config is immutable for the lifetime of a server process unless you use the `config update` MCP action, which rewrites the project config file and takes effect on the next `project.init` or server restart.
+the-one-mcp resolves its configuration through five ordered layers. Every setting is optional; unset fields fall back to the previous layer until the built-in default is reached. The resolved config is immutable for the lifetime of a server process unless you use the `config update` MCP action, which rewrites the project config file and takes effect on the next `setup` (action: `project`) or server restart.
 
 ---
 
@@ -173,7 +173,7 @@ Hybrid search combines dense cosine similarity with sparse lexical matching (SPL
 
 ### Auto-Indexing (File Watcher)
 
-An optional background file watcher that monitors `.the-one/docs/` and `.the-one/images/` for changes. In v0.7.0 events are logged only; automatic re-ingestion arrives in v0.7.1. See [Auto-Indexing Guide](auto-indexing.md).
+An optional background file watcher that monitors `.the-one/docs/` and `.the-one/images/` for changes. As of v0.8.0, markdown file changes are automatically re-ingested. Image auto-reindex is planned for v0.8.1. See [Auto-Indexing Guide](auto-indexing.md).
 
 | Field | Type | Default | Description |
 |---|---|---|---|
@@ -466,7 +466,7 @@ Using `embedding_model: "fast"` selects the all-MiniLM-L6-v2 tier alias (23 MB, 
 
 ## Updating Config at Runtime
 
-The `config` MCP tool exposes an `update` action that writes directly to the project config file. Changes take effect on the next `project.init` or server restart.
+The `config` MCP tool exposes an `update` action that writes directly to the project config file. Changes take effect on the next `setup` (action: `project`) or server restart.
 
 **Export current config:**
 ```json

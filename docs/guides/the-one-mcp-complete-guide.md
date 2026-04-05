@@ -8,8 +8,10 @@ It provides:
 
 - **Project lifecycle** — detect languages, frameworks, and risk profile; cache results via fingerprinting
 - **Semantic memory** — production-grade RAG with fastembed 5.13 (1024-dim ONNX) or API embeddings over Qdrant
-- **Image search** — multimodal CLIP-based image indexing and search with optional OCR (v0.6.0+)
-- **Reranking** — optional cross-encoder reranking for higher-precision search results (v0.6.0+)
+- **Image search** — multimodal image indexing and search with optional OCR
+- **Reranking** — optional cross-encoder reranking for higher-precision search results
+- **Code-aware chunking** — language-specific chunkers for Rust, Python, TypeScript, JavaScript, Go with function/struct/class-level boundaries and symbol metadata (v0.8.0+)
+- **Watcher auto-reindex** — background file watcher automatically re-ingests changed markdown files (v0.8.0+)
 - **Managed documents** — full CRUD for markdown files with soft-delete, trash, and auto-sync
 - **Policy-gated tools** — risk-tier approval gates (once/session/forever) with headless deny-by-default
 - **Intelligent routing** — rules-first with optional nano LLM provider pool (priority/round-robin/latency)
@@ -21,7 +23,7 @@ It provides:
 |-------|---------------|
 | `the-one-core` | Config layering, SQLite storage (WAL), policy engine, profiler, manifests, docs manager, configurable limits |
 | `the-one-mcp` | Async broker orchestrator, 17 MCP tools (13 work + 4 multiplexed admin), JSON-RPC dispatch, transport layer (stdio/SSE/stream), CLI binary |
-| `the-one-memory` | Smart markdown chunker, embedding providers (fastembed local + OpenAI-compatible API), async Qdrant HTTP backend |
+| `the-one-memory` | Code-aware chunker (Rust/Python/TypeScript/JavaScript/Go + markdown fallback), embedding providers (fastembed local + OpenAI-compatible API), async Qdrant HTTP backend |
 | `the-one-router` | Rules-first request classification, OpenAI-compatible nano provider, provider pool with health tracking and 3 routing policies |
 | `the-one-registry` | Capability catalog with risk-tier filtering, visibility modes (core/project/dormant) |
 | `the-one-claude` | Claude Code adapter (thin async wrapper over broker) |
@@ -66,7 +68,7 @@ The installer:
 5. Auto-detects Claude Code, Gemini CLI, OpenCode, Codex and registers the MCP
 6. Validates with a smoke test
 
-Options: `--version v0.6.0`, `--lean` (no swagger), `--local ./target/release`, `--uninstall`
+Options: `--version v0.8.0`, `--lean` (no swagger), `--local ./target/release`, `--uninstall`
 
 ### Build from Source
 
@@ -397,7 +399,7 @@ The broker manages a docs folder at `<project>/.the-one/docs/`:
 
 Set `external_docs_root` to ingest an external directory read-only into RAG. No CRUD operations.
 
-## 10. Image Search (v0.6.0)
+## 10. Image Search
 
 The broker supports multimodal search over images — screenshots, diagrams, and UI snapshots — stored in a dedicated Qdrant collection (`the_one_images_*`).
 
@@ -430,7 +432,7 @@ The broker supports multimodal search over images — screenshots, diagrams, and
 
 Image embeddings are stored in a separate collection from text: `the_one_images_<project_id>`. This keeps image and text search independent and allows clearing images without affecting text RAG.
 
-## 10b. Reranking (v0.6.0+)
+## 10b. Reranking
 
 After a vector search, an optional cross-encoder reranker can re-score and re-order results for higher precision.
 
@@ -439,21 +441,30 @@ After a vector search, an optional cross-encoder reranker can re-score and re-or
 ```json
 {
   "reranker_enabled": true,
-  "reranker_model": "cross-encoder/ms-marco-MiniLM-L-6-v2"
+  "reranker_model": "jina-reranker-v2-base-multilingual"
 }
 ```
 
-Reranking runs locally via fastembed ONNX (bumped to v5.13 in v0.6.0). It adds latency (~20–80ms per query depending on result count) but meaningfully improves result ordering for ambiguous queries.
+Reranking runs locally via fastembed ONNX. It adds latency (~20–80ms per query depending on result count) but meaningfully improves result ordering for ambiguous queries.
 
 ## 11. RAG Pipeline (Text)
 
 ### Chunking
+
+The chunker dispatches by file extension (v0.8.0):
+
+- **Code files** (`.rs`, `.py`, `.ts`, `.tsx`, `.js`, `.jsx`, `.mjs`, `.cjs`, `.go`) — language-aware chunkers split by function/struct/class/interface boundaries using brace-depth tracking or indentation depth. Each chunk carries extended `ChunkMeta` fields: `language`, `symbol`, `signature`, `line_range`.
+- **Markdown / other** — heading-aware splitting, then paragraph splitting for large sections. `language`, `symbol`, `signature`, `line_range` are `null`.
+
+For markdown, the chunking steps are:
 
 1. Parse heading hierarchy (`#`, `##`, `###`, etc.)
 2. Split into sections at heading boundaries
 3. Large sections split on paragraph boundaries (never mid-paragraph or mid-code-block)
 4. Each chunk: source path, heading hierarchy, byte offset, content hash
 5. Target: `max_chunk_tokens` (default 512, ~2KB)
+
+See [Code Chunking Guide](code-chunking.md) for details on supported languages and the extended metadata fields.
 
 ### Search
 
@@ -644,13 +655,13 @@ Releases are **manual only** — tagging does not auto-trigger builds. You decid
 
 ```bash
 # Trigger a release (builds 6 platform binaries on GitHub Actions)
-bash scripts/build.sh release v0.6.0
+bash scripts/build.sh release v0.8.0
 
 # Check release workflow status
 bash scripts/build.sh release --status
 
 # Preview without triggering
-bash scripts/build.sh --dry-run release v0.5.0
+bash scripts/build.sh --dry-run release v0.8.1
 ```
 
 Or via GitHub UI: Actions → release → Run workflow → enter version tag.
@@ -685,7 +696,11 @@ Automated weekly (Monday 06:00 UTC) + on every push/PR:
 | Config | `crates/the-one-core/src/config.rs` |
 | Limits | `crates/the-one-core/src/limits.rs` |
 | Docs manager | `crates/the-one-core/src/docs_manager.rs` |
-| Chunker | `crates/the-one-memory/src/chunker.rs` |
+| Chunker (dispatcher) | `crates/the-one-memory/src/chunker.rs` |
+| Chunker — Rust | `crates/the-one-memory/src/chunker_rust.rs` |
+| Chunker — Python | `crates/the-one-memory/src/chunker_python.rs` |
+| Chunker — TypeScript/JS | `crates/the-one-memory/src/chunker_typescript.rs` |
+| Chunker — Go | `crates/the-one-memory/src/chunker_go.rs` |
 | Embeddings | `crates/the-one-memory/src/embeddings.rs` |
 | Qdrant | `crates/the-one-memory/src/qdrant.rs` |
 | Image embeddings | `crates/the-one-memory/src/image_embeddings.rs` |

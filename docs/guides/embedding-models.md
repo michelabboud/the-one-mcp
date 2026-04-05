@@ -1,6 +1,6 @@
 # Embedding Models Guide
 
-> v0.7.0 — authoritative sources: `models/local-models.toml`, `models/api-models.toml`, `models/image-models.toml`, `models/rerank-models.toml`
+> v0.8.0 — authoritative sources: `models/local-models.toml`, `models/api-models.toml`, `models/image-models.toml`, `models/rerank-models.toml`
 
 ## Overview
 
@@ -360,7 +360,7 @@ Total disk usage equals the ONNX model file plus tokenizer and config files (usu
 
 ### Pre-downloading for offline use
 
-To cache a model before working offline, trigger a `project.init` or call the `docs.index` tool while connected to the internet. The model download happens at first embedding call and is then cached permanently.
+To cache a model before working offline, call `setup` (action: `project`) while connected to the internet. The model download happens at first embedding call and is then cached permanently.
 
 To pre-download multiple models simultaneously, initialize multiple projects with different `embedding_model` values.
 

@@ -4,6 +4,31 @@
 
 ---
 
+## Upgrading to v0.8.0 (from v0.7.x)
+
+### New features (non-breaking)
+
+- **Watcher auto-reindex:** if you had `auto_index_enabled: true` in v0.7.x, it will now actually re-ingest changed `.md` files instead of just logging. No action needed.
+- **Code-aware chunker:** automatic — code files (`.rs`, `.py`, `.ts`, `.tsx`, `.js`, `.jsx`, `.mjs`, `.cjs`, `.go`) are now chunked by function/class/struct instead of as plain text. Takes effect on the next `setup:refresh`.
+- **Extended ChunkMeta:** search results now carry `language`, `symbol`, `signature`, `line_range` fields when chunks came from code files. Older consumers ignore these fields.
+
+### Re-index recommended (not required)
+
+If your project has code files that were previously indexed, running `setup:refresh` will re-chunk them with the new language-aware chunker. This substantially improves retrieval quality for function/class/struct searches.
+
+```bash
+# Via MCP (from the LLM):
+# Call `setup` tool with action: "refresh"
+```
+
+### No breaking changes
+
+- Tool count unchanged at 17
+- Config schema unchanged
+- Existing ChunkMeta consumers unaffected (new fields are Option with None default for markdown chunks)
+
+---
+
 ## Upgrading to v0.6.0 (from v0.5.0)
 
 ### New Features (no migration needed)
@@ -314,6 +339,8 @@ Follow these steps for any version upgrade:
 
    | Version | Tool count |
    |---|---|
+   | v0.8.0 | 17 |
+   | v0.7.0 | 17 |
    | v0.6.0 | 17 |
    | v0.5.0 | 15 |
    | v0.4.0 | 33 |

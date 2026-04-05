@@ -114,7 +114,7 @@ LLM calls: memory.ingest_image({
 
 ## Searching Images: `memory.search_images`
 
-As of v0.7.0, `memory.search_images` supports two search modes. Exactly one of `query` or `image_base64` must be provided.
+`memory.search_images` supports two search modes. Exactly one of `query` or `image_base64` must be provided.
 
 ### Text query (natural language)
 
@@ -372,7 +372,7 @@ LLM reads the ocr_text field from the search result and answers directly.
 | Slow first ingest | Image model downloading (~150-330MB), cached after first use |
 | Large memory usage during ingest | Each model loads into RAM; the nomic-vision model uses ~500MB during embedding |
 
-## Admin UI Image Gallery (v0.7.0)
+## Admin UI Image Gallery
 
 The embedded admin UI now includes an image gallery at `/images`. When running the admin UI server:
 
