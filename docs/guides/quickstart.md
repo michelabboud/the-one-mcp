@@ -8,7 +8,7 @@ Shortest path to a working MCP server connected to your AI assistant.
 curl -fsSL https://raw.githubusercontent.com/michelabboud/the-one-mcp/main/scripts/install.sh | bash
 ```
 
-This auto-detects your OS, downloads the latest release, creates default config, imports the tool catalog (28+ tools), and registers with every AI CLI it finds.
+This auto-detects your OS, downloads the latest release, creates default config, imports the tool catalog (125+ tools), and registers with every AI CLI it finds.
 
 **Done.** Start an AI coding session — the MCP connects automatically.
 
@@ -25,13 +25,14 @@ bash scripts/install.sh --local ./target/release
 
 1. You start a Claude Code / Gemini / OpenCode session
 2. The MCP server starts automatically (stdio transport)
-3. On first `project.init`, it:
+3. On first use, `setup` initializes your project:
    - Detects your project (languages, frameworks)
    - Imports the tool catalog into SQLite
    - Scans your system for installed tools
    - Indexes your docs into the RAG engine
 4. Now you can:
    - Ask about your code → `memory.search` finds relevant docs
+   - Search images → `memory.search_images` finds screenshots and diagrams
    - Ask for tool recommendations → `tool.find` returns what's available
    - Save knowledge → `docs.save` persists it across sessions
    - Run tools → `tool.run` with policy-gated approval
@@ -77,6 +78,6 @@ $EDITOR ~/.the-one/config.json
 ## Full Docs
 
 - **[INSTALL.md](../../INSTALL.md)** — complete installation guide
-- **[Complete Guide](the-one-mcp-complete-guide.md)** — 19 sections, all features
+- **[Complete Guide](the-one-mcp-complete-guide.md)** — all features including image search and reranking
 - **[Operator Runbook](../ops/operator-runbook.md)** — backup, incident triage
 - **[Tool Ecosystem](../plans/tool-ecosystem-architecture.md)** — catalog vision

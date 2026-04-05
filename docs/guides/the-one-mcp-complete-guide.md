@@ -7,7 +7,9 @@
 It provides:
 
 - **Project lifecycle** — detect languages, frameworks, and risk profile; cache results via fingerprinting
-- **Semantic memory** — production-grade RAG with fastembed (1024-dim ONNX) or API embeddings over Qdrant
+- **Semantic memory** — production-grade RAG with fastembed 5.13 (1024-dim ONNX) or API embeddings over Qdrant
+- **Image search** — multimodal CLIP-based image indexing and search with optional OCR (v0.6.0+)
+- **Reranking** — optional cross-encoder reranking for higher-precision search results (v0.6.0+)
 - **Managed documents** — full CRUD for markdown files with soft-delete, trash, and auto-sync
 - **Policy-gated tools** — risk-tier approval gates (once/session/forever) with headless deny-by-default
 - **Intelligent routing** — rules-first with optional nano LLM provider pool (priority/round-robin/latency)
@@ -18,7 +20,7 @@ It provides:
 | Crate | Responsibility |
 |-------|---------------|
 | `the-one-core` | Config layering, SQLite storage (WAL), policy engine, profiler, manifests, docs manager, configurable limits |
-| `the-one-mcp` | Async broker orchestrator, 17 MCP tool API types, JSON-RPC dispatch, transport layer (stdio/SSE/stream), CLI binary |
+| `the-one-mcp` | Async broker orchestrator, 17 MCP tools (13 work + 4 multiplexed admin), JSON-RPC dispatch, transport layer (stdio/SSE/stream), CLI binary |
 | `the-one-memory` | Smart markdown chunker, embedding providers (fastembed local + OpenAI-compatible API), async Qdrant HTTP backend |
 | `the-one-router` | Rules-first request classification, OpenAI-compatible nano provider, provider pool with health tracking and 3 routing policies |
 | `the-one-registry` | Capability catalog with risk-tier filtering, visibility modes (core/project/dormant) |
@@ -228,6 +230,11 @@ Configuration follows a 5-layer precedence model (lowest to highest):
 | `nano_routing_policy` | `"priority"` | Provider pool routing: `"priority"`, `"round_robin"`, or `"latency"` |
 | `nano_providers` | `[]` | Array of OpenAI-compatible provider configurations |
 | `external_docs_root` | `null` | External docs directory to ingest read-only |
+| `image_embedding_enabled` | `false` | Enable image embedding for `memory.search_images` / `memory.ingest_image` |
+| `image_embedding_model` | `null` | Image embedding model name (CLIP-compatible) |
+| `image_ocr_enabled` | `false` | Enable OCR text extraction from ingested images |
+| `reranker_enabled` | `false` | Enable cross-encoder reranking of search results |
+| `reranker_model` | `null` | Reranker model name (cross-encoder, local ONNX) |
 
 ### Environment Variables
 
@@ -390,7 +397,55 @@ The broker manages a docs folder at `<project>/.the-one/docs/`:
 
 Set `external_docs_root` to ingest an external directory read-only into RAG. No CRUD operations.
 
-## 10. RAG Pipeline
+## 10. Image Search (v0.6.0)
+
+The broker supports multimodal search over images — screenshots, diagrams, and UI snapshots — stored in a dedicated Qdrant collection (`the_one_images_*`).
+
+### Enable Image Embedding
+
+```json
+{
+  "image_embedding_enabled": true,
+  "image_embedding_model": "clip-vit-base-patch32",
+  "image_ocr_enabled": true
+}
+```
+
+### Tools
+
+| Tool | Description |
+|------|-------------|
+| `memory.ingest_image` | Ingest an image file (JPEG, PNG, etc.) into the image index. Optionally runs OCR to extract text alongside the visual embedding. |
+| `memory.search_images` | Semantic search over ingested images using a text query. Returns matching images with paths, scores, and any extracted OCR text. |
+
+### maintain Actions for Images
+
+| Action | Description |
+|--------|-------------|
+| `images.rescan` | Re-scan and re-index all images in the project |
+| `images.clear` | Remove all image embeddings from the index |
+| `images.delete` | Delete a specific image from the index by path |
+
+### Qdrant Collections
+
+Image embeddings are stored in a separate collection from text: `the_one_images_<project_id>`. This keeps image and text search independent and allows clearing images without affecting text RAG.
+
+## 10b. Reranking (v0.6.0+)
+
+After a vector search, an optional cross-encoder reranker can re-score and re-order results for higher precision.
+
+### Enable Reranking
+
+```json
+{
+  "reranker_enabled": true,
+  "reranker_model": "cross-encoder/ms-marco-MiniLM-L-6-v2"
+}
+```
+
+Reranking runs locally via fastembed ONNX (bumped to v5.13 in v0.6.0). It adds latency (~20–80ms per query depending on result count) but meaningfully improves result ordering for ambiguous queries.
+
+## 11. RAG Pipeline (Text)
 
 ### Chunking
 
@@ -410,24 +465,16 @@ Returns chunks with source paths and headings. Follow up with `docs.get` for ful
 
 ### Incremental Re-indexing
 
-On `project.refresh`, only changed files are re-embedded (via content hash). Full reindex via `docs.reindex`.
+Only changed files are re-embedded (via content hash). Full reindex via `maintain` (action: `reindex`).
 
-## 11. Project Lifecycle
+## 12. Project Lifecycle
 
-### project.init
+The `setup` multiplexed admin tool manages project initialization and refresh:
 
-Scans signal files to detect:
-- **Languages**: Rust, JavaScript, Python, Go
-- **Frameworks**: axum, tokio, Docker, GitHub Actions
-- **Risk profile**: HighRisk / Caution / Safe
+- **`setup` (action: `init`)** — scans signal files to detect languages (Rust, JavaScript, Python, Go), frameworks (axum, tokio, Docker, GitHub Actions), and risk profile (HighRisk / Caution / Safe). Creates `.the-one/` with manifests, SQLite database, and profile.
+- **`setup` (action: `refresh`)** — computes SHA-256 fingerprint of signal files. If unchanged, returns cached profile. If changed, recomputes and syncs document index.
 
-Creates `.the-one/` with manifests, SQLite database, and profile.
-
-### project.refresh
-
-Computes SHA-256 fingerprint of signal files. If unchanged, returns cached profile. If changed, recomputes and syncs document index.
-
-## 12. Tool Catalog
+## 13. Tool Catalog
 
 The broker includes a curated catalog of developer tools, LSPs, and MCP servers — stored in SQLite with FTS5 full-text search and Qdrant semantic search.
 
@@ -444,8 +491,11 @@ tools/catalog/                     Source of truth (JSON files on GitHub)
 Qdrant: the_one_tools              Semantic search over tool descriptions
 ```
 
-### How tool.suggest Works
+### How tool.find Works
 
+`tool.find` is the unified discovery interface with three modes:
+
+**`mode: "suggest"`** — project-aware recommendations:
 ```
 User: "I need QA tools"
   → LLM calls: tool.find({ mode: "suggest", query: "qa" })
@@ -457,12 +507,12 @@ User: "I need QA tools"
   → LLM decides which to enable/install/run
 ```
 
-### How tool.search Works
-
-Three-tier fallback:
+**`mode: "search"`** — semantic/keyword search, three-tier fallback:
 1. **Qdrant semantic search** — "check deps for security issues" finds `cargo-audit` even though words don't match
 2. **SQLite FTS5** — keyword-based fallback when Qdrant unavailable
 3. **Registry fallback** — legacy capability registry
+
+**`mode: "list"`** — enumerate tools by state (enabled / available / all)
 
 ### Tool Lifecycle MCP Tools
 
@@ -493,15 +543,18 @@ Add tools via the `tool.add` MCP command (the LLM calls it), or edit the JSON fi
 
 ### Adding Tools via MCP
 
-The LLM can add tools on your behalf:
+The LLM can add tools on your behalf via the `config` admin tool:
 ```
 User: "Add my custom linter as a tool"
-LLM calls: tool.add({
-  id: "my-linter",
-  name: "My Linter",
-  description: "Custom linting for our project",
-  install_command: "npm install -g my-linter",
-  run_command: "my-linter check ."
+LLM calls: config({
+  action: "tool.add",
+  params: {
+    id: "my-linter",
+    name: "My Linter",
+    description: "Custom linting for our project",
+    install_command: "npm install -g my-linter",
+    run_command: "my-linter check ."
+  }
 })
 ```
 
@@ -509,7 +562,7 @@ LLM calls: tool.add({
 
 See [CONTRIBUTING.md](../../CONTRIBUTING.md) — submit via GitHub Issue or PR.
 
-## 13. Policy and Approvals
+## 14. Policy and Approvals
 
 | Risk Level | Approval Required |
 |------------|------------------|
@@ -524,7 +577,7 @@ See [CONTRIBUTING.md](../../CONTRIBUTING.md) — submit via GitHub Issue or PR.
 
 **Headless mode**: high-risk tools denied unless prior approval exists.
 
-## 14. Observability
+## 15. Observability
 
 ### Metrics (`observe (action: metrics)`)
 
@@ -534,7 +587,7 @@ See [CONTRIBUTING.md](../../CONTRIBUTING.md) — submit via GitHub Issue or PR.
 
 All tool executions logged with timestamps and JSON payloads. Max 200 per query.
 
-## 15. Embedded Admin UI
+## 16. Embedded Admin UI
 
 ```bash
 THE_ONE_PROJECT_ROOT="$(pwd)" THE_ONE_PROJECT_ID="demo" cargo run -p the-one-ui --bin embedded-ui
@@ -550,7 +603,7 @@ THE_ONE_PROJECT_ROOT="$(pwd)" THE_ONE_PROJECT_ID="demo" cargo run -p the-one-ui 
 | `/api/swagger` | Raw OpenAPI JSON |
 | `/api/config` | POST endpoint for config updates |
 
-## 16. Project State Layout
+## 17. Project State Layout
 
 ```
 ~/.the-one/                            # global state ($THE_ONE_HOME)
@@ -569,7 +622,7 @@ THE_ONE_PROJECT_ROOT="$(pwd)" THE_ONE_PROJECT_ID="demo" cargo run -p the-one-ui 
 +-- qdrant/                            # local index fallback
 ```
 
-## 17. CI and Release
+## 18. CI and Release
 
 ### Local Validation
 
@@ -610,18 +663,18 @@ Automated weekly (Monday 06:00 UTC) + on every push/PR:
 - `cargo audit` — dependency vulnerability scanning
 - `gitleaks` — secret detection in committed code
 
-## 18. Troubleshooting
+## 19. Troubleshooting
 
 | Problem | Solution |
 |---------|----------|
 | `remote qdrant requires api key` | Set `qdrant_api_key` or `qdrant_strict_auth: false` |
 | Swagger 404 | Build with `--features embed-swagger` (default) |
-| No search results | Run `docs.reindex`, lower `search_score_threshold` |
+| No search results | Run `maintain` (action: `reindex`), lower `search_score_threshold` |
 | Headless tool denied | Set approval via interactive mode first |
 | Nano provider timeouts | Check URL, increase `timeout_ms`, pool auto-falls back to rules |
 | Slow first embedding | Model download (~30MB), cached after |
 
-## 19. Source Reference
+## 20. Source Reference
 
 | Component | File |
 |-----------|------|
@@ -635,6 +688,11 @@ Automated weekly (Monday 06:00 UTC) + on every push/PR:
 | Chunker | `crates/the-one-memory/src/chunker.rs` |
 | Embeddings | `crates/the-one-memory/src/embeddings.rs` |
 | Qdrant | `crates/the-one-memory/src/qdrant.rs` |
+| Image embeddings | `crates/the-one-memory/src/image_embeddings.rs` |
+| Image ingest | `crates/the-one-memory/src/image_ingest.rs` |
+| Thumbnail | `crates/the-one-memory/src/thumbnail.rs` |
+| OCR | `crates/the-one-memory/src/ocr.rs` |
+| Reranker | `crates/the-one-memory/src/reranker.rs` |
 | Provider pool | `crates/the-one-router/src/provider_pool.rs` |
 | Health tracking | `crates/the-one-router/src/health.rs` |
 | v1beta schemas | `schemas/mcp/v1beta/` |

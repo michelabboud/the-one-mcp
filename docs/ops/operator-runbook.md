@@ -1,7 +1,7 @@
 # The-One MCP Operator Runbook
 
-Last updated: 2026-04-04
-Applies to: v0.3.1 (`v1beta` schema)
+Last updated: 2026-04-05
+Applies to: v0.6.0 (`v1beta` schema)
 
 ## 1. Service Health Checklist
 
@@ -20,7 +20,7 @@ bash scripts/release-gate.sh
 
 ### Verify Project State
 
-After `project.init`, check these files exist:
+After `setup` (action: `init`), check these files exist:
 - `<project>/.the-one/project.json`
 - `<project>/.the-one/overrides.json`
 - `<project>/.the-one/fingerprint.json`
@@ -53,24 +53,27 @@ After `project.init`, check these files exist:
 
 If users report issues:
 
-1. **Query audit events** — `audit.events` tool with recent limit
-2. **Check metrics** — `metrics.snapshot` for:
+1. **Query audit events** — `observe` (action: `events`) with recent limit
+2. **Check metrics** — `observe` (action: `metrics`) for:
    - `router_fallback_calls` (high = providers failing)
    - `router_provider_error_calls` (provider errors)
    - `router_decision_latency_ms_total` (routing performance)
-3. **Inspect config** — `config.export` to verify settings
-4. **Check provider health** — `metrics.snapshot` shows pool status
+3. **Inspect config** — `config` (action: `export`) to verify settings
+4. **Check provider health** — `observe` (action: `metrics`) shows pool status
 5. **Check nano providers** — verify URLs are reachable, API keys valid
 
 ### Common Issues
 
 | Symptom | Diagnosis | Fix |
 |---------|-----------|-----|
-| All searches return empty | Docs not ingested | Run `docs.reindex` |
+| All searches return empty | Docs not ingested | Run `maintain` (action: `reindex`) |
 | Provider pool falling back constantly | All nano providers unreachable | Check URLs, increase `timeout_ms` |
 | `remote qdrant requires api key` | Strict auth enabled, no key | Set `qdrant_api_key` or `qdrant_strict_auth: false` |
 | High-risk tool denied | Headless mode, no prior approval | Approve interactively first with `session` or `forever` scope |
 | Slow first request | fastembed model downloading | Wait for ~30MB download, cached after |
+| `memory.search_images` returns empty | Image embedding not enabled or no images ingested | Set `image_embedding_enabled: true`, run `maintain` (action: `images.rescan`) |
+| OCR text missing from image results | OCR not enabled | Set `image_ocr_enabled: true`, re-ingest images |
+| Image index inconsistent after restore | Image Qdrant collection not restored | Ensure `qdrant-images.bak/` was included in backup; run `maintain` (action: `images.rescan`) |
 
 ## 4. Backup and Restore
 
@@ -79,7 +82,8 @@ If users report issues:
 1. Trigger via admin UI or `trigger_manual_backup` API
 2. Verify artifacts:
    - `<backup>/state.db.bak` (SQLite database)
-   - `<backup>/qdrant.bak/` (vector index)
+   - `<backup>/qdrant.bak/` (text vector index — `the_one_*` collections)
+   - `<backup>/qdrant-images.bak/` (image vector index — `the_one_images_*` collections, if image embedding is enabled)
 
 ### Restore
 
@@ -87,12 +91,13 @@ If users report issues:
 2. Verify:
    - `<project>/.the-one/state.db` exists and is readable
    - `<project>/.the-one/qdrant/` content present
-3. Run `project.refresh` and a `memory.search` smoke test
+   - `<project>/.the-one/qdrant-images/` present (if image embedding was enabled)
+3. Run `setup` (action: `refresh`) and a `memory.search` smoke test
 
 ### Recovery Drill (recommended weekly)
 
 1. Create backup from seeded project
-2. Mutate `.the-one/state.db` and `.the-one/qdrant/`
+2. Mutate `.the-one/state.db` and `.the-one/qdrant/` (and `.the-one/qdrant-images/` if applicable)
 3. Restore and validate content recovered
 4. Document results
 
@@ -109,12 +114,11 @@ If users report issues:
 
 ### Operations
 
-- Create: `docs.create` (validates .md extension, size, count limits)
-- Update: `docs.update` (must exist)
+- Create or update: `docs.save` (upsert — validates .md extension, size, count limits)
 - Delete: `docs.delete` (moves to `.trash/`)
-- Restore: `docs.trash.restore` (moves back from `.trash/`)
-- Empty trash: `docs.trash.empty` (permanent delete)
-- Reindex: `docs.reindex` (re-ingests all docs into RAG)
+- Restore: `maintain` (action: `trash.restore`)
+- Empty trash: `maintain` (action: `trash.empty`)
+- Reindex: `maintain` (action: `reindex`) — re-ingests all docs into RAG
 
 ### External Docs
 
@@ -130,7 +134,7 @@ Set `external_docs_root` in config to ingest an external directory read-only. Ch
 
 ### Update via MCP Tool
 
-Use `config.update` with a JSON payload of fields to change.
+Use `config` (action: `update`) with a JSON payload of fields to change.
 
 ### Update via File
 
@@ -162,7 +166,7 @@ Set `"enabled": false` in the provider entry.
 
 ### Monitor Health
 
-Use `metrics.snapshot` — includes per-provider call counts, errors, and latency.
+Use `observe` (action: `metrics`) — includes per-provider call counts, errors, and latency.
 
 ### Routing Policies
 
