@@ -18,8 +18,7 @@ use crate::chunker::{chunk_markdown, ChunkMeta};
 use crate::embeddings::EmbeddingProvider;
 use crate::graph::KnowledgeGraph;
 use crate::qdrant::{
-    AsyncQdrantBackend, HybridPoint, QdrantOptions, QdrantPayload, QdrantPoint,
-    QdrantSparseVector,
+    AsyncQdrantBackend, HybridPoint, QdrantOptions, QdrantPayload, QdrantPoint, QdrantSparseVector,
 };
 use crate::reranker::Reranker;
 #[cfg(feature = "local-embeddings")]
@@ -634,19 +633,16 @@ impl MemoryEngine {
     /// Note: this is the LightRAG-style hybrid (vector + graph). The
     /// BM25-sparse hybrid (dense cosine + sparse SPLADE) runs inside
     /// `search_vector` when `hybrid_search_enabled` is true.
-    async fn search_hybrid_mode(
-        &self,
-        request: &MemorySearchRequest,
-    ) -> Vec<MemorySearchResult> {
+    async fn search_hybrid_mode(&self, request: &MemorySearchRequest) -> Vec<MemorySearchResult> {
         // Get vector search results (without reranking -- we'll rerank the merged set)
         let vector_results = {
             let fetch_k = (request.top_k * 2).max(10);
             if let Some(qdrant) = &self.qdrant {
-                let query_vector =
-                    match self.embedding_provider.embed_single(&request.query).await {
-                        Ok(v) => v,
-                        Err(_) => return self.search_graph(request),
-                    };
+                let query_vector = match self.embedding_provider.embed_single(&request.query).await
+                {
+                    Ok(v) => v,
+                    Err(_) => return self.search_graph(request),
+                };
 
                 match qdrant
                     .search(query_vector, fetch_k, request.score_threshold)

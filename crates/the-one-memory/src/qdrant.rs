@@ -505,10 +505,14 @@ impl AsyncQdrantBackend {
             self.client.post(&url).json(&sparse_body).send(),
         );
 
-        let dense_results =
-            Self::parse_search_response(dense_resp.map_err(|e| format!("dense search failed: {e}"))?).await?;
-        let sparse_results =
-            Self::parse_search_response(sparse_resp.map_err(|e| format!("sparse search failed: {e}"))?).await?;
+        let dense_results = Self::parse_search_response(
+            dense_resp.map_err(|e| format!("dense search failed: {e}"))?,
+        )
+        .await?;
+        let sparse_results = Self::parse_search_response(
+            sparse_resp.map_err(|e| format!("sparse search failed: {e}"))?,
+        )
+        .await?;
 
         Ok((dense_results, sparse_results))
     }

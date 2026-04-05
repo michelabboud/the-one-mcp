@@ -64,8 +64,7 @@ mod local {
         pub fn new(model_name: &str) -> Result<Self, String> {
             let model_enum = resolve_sparse_model(model_name);
             let model = fastembed::SparseTextEmbedding::try_new(
-                fastembed::SparseInitOptions::new(model_enum)
-                    .with_show_download_progress(false),
+                fastembed::SparseInitOptions::new(model_enum).with_show_download_progress(false),
             )
             .map_err(|e| format!("fastembed sparse init failed: {e}"))?;
 
@@ -137,8 +136,9 @@ mod tests {
     use std::sync::LazyLock;
 
     // Reuse a single provider across tests to avoid re-downloading the model.
-    static PROVIDER: LazyLock<FastEmbedSparseProvider> =
-        LazyLock::new(|| FastEmbedSparseProvider::new("bm25").expect("sparse provider should init"));
+    static PROVIDER: LazyLock<FastEmbedSparseProvider> = LazyLock::new(|| {
+        FastEmbedSparseProvider::new("bm25").expect("sparse provider should init")
+    });
 
     #[test]
     fn test_resolve_sparse_model_aliases() {
@@ -169,7 +169,10 @@ mod tests {
     fn test_bm25_embed_produces_nonempty() {
         let provider = &*PROVIDER;
         let sv = provider.embed_single("hello world").expect("should embed");
-        assert!(!sv.indices.is_empty(), "sparse vector should have non-empty indices");
+        assert!(
+            !sv.indices.is_empty(),
+            "sparse vector should have non-empty indices"
+        );
         assert_eq!(
             sv.indices.len(),
             sv.values.len(),
@@ -184,8 +187,12 @@ mod tests {
     #[test]
     fn test_bm25_deterministic() {
         let provider = &*PROVIDER;
-        let sv1 = provider.embed_single("the quick brown fox").expect("embed 1");
-        let sv2 = provider.embed_single("the quick brown fox").expect("embed 2");
+        let sv1 = provider
+            .embed_single("the quick brown fox")
+            .expect("embed 1");
+        let sv2 = provider
+            .embed_single("the quick brown fox")
+            .expect("embed 2");
         assert_eq!(sv1.indices, sv2.indices, "indices must be deterministic");
         assert_eq!(sv1.values.len(), sv2.values.len());
         for (a, b) in sv1.values.iter().zip(sv2.values.iter()) {
@@ -199,7 +206,11 @@ mod tests {
     #[test]
     fn test_bm25_batch_length_matches_input() {
         let provider = &*PROVIDER;
-        let texts = vec!["hello".to_string(), "world".to_string(), "foo bar".to_string()];
+        let texts = vec![
+            "hello".to_string(),
+            "world".to_string(),
+            "foo bar".to_string(),
+        ];
         let results = provider.embed_batch(&texts).expect("batch should embed");
         assert_eq!(results.len(), 3, "one sparse vector per input text");
     }
@@ -207,9 +218,16 @@ mod tests {
     #[test]
     fn test_bm25_different_texts_produce_different_vectors() {
         let provider = &*PROVIDER;
-        let sv_a = provider.embed_single("memory search retrieval").expect("embed a");
-        let sv_b = provider.embed_single("coffee espresso latte").expect("embed b");
+        let sv_a = provider
+            .embed_single("memory search retrieval")
+            .expect("embed a");
+        let sv_b = provider
+            .embed_single("coffee espresso latte")
+            .expect("embed b");
         // They may share some token indices, but the full index sets should differ
-        assert_ne!(sv_a.indices, sv_b.indices, "different texts should produce different sparse vectors");
+        assert_ne!(
+            sv_a.indices, sv_b.indices,
+            "different texts should produce different sparse vectors"
+        );
     }
 }
