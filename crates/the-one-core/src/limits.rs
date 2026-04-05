@@ -28,10 +28,18 @@ pub struct ConfigurableLimits {
     pub image_search_score_threshold: f32,
 }
 
-fn default_max_image_size_bytes() -> usize { 10_485_760 }
-fn default_max_images_per_project() -> usize { 500 }
-fn default_max_image_search_hits() -> usize { 5 }
-fn default_image_search_score_threshold() -> f32 { 0.25 }
+fn default_max_image_size_bytes() -> usize {
+    10_485_760
+}
+fn default_max_images_per_project() -> usize {
+    500
+}
+fn default_max_image_search_hits() -> usize {
+    5
+}
+fn default_image_search_score_threshold() -> f32 {
+    0.25
+}
 
 impl Default for ConfigurableLimits {
     fn default() -> Self {
@@ -48,7 +56,7 @@ impl Default for ConfigurableLimits {
             max_nano_retries: 3,
             max_nano_providers: 5,
             search_score_threshold: 0.3,
-            max_image_size_bytes: 10_485_760,  // 10MB
+            max_image_size_bytes: 10_485_760, // 10MB
             max_images_per_project: 500,
             max_image_search_hits: 5,
             image_search_score_threshold: 0.25,
@@ -144,11 +152,15 @@ impl ConfigurableLimits {
         self.max_image_size_bytes = clamp_usize(
             "max_image_size_bytes",
             self.max_image_size_bytes,
-            102_400,        // 100 KB min
-            104_857_600,    // 100 MB max
+            102_400,     // 100 KB min
+            104_857_600, // 100 MB max
         );
-        self.max_images_per_project =
-            clamp_usize("max_images_per_project", self.max_images_per_project, 10, 10_000);
+        self.max_images_per_project = clamp_usize(
+            "max_images_per_project",
+            self.max_images_per_project,
+            10,
+            10_000,
+        );
         self.max_image_search_hits =
             clamp_usize("max_image_search_hits", self.max_image_search_hits, 1, 50);
         self.image_search_score_threshold = clamp_f32(
@@ -197,9 +209,18 @@ mod tests {
             (validated.search_score_threshold - defaults.search_score_threshold).abs()
                 < f32::EPSILON
         );
-        assert_eq!(validated.max_image_size_bytes, defaults.max_image_size_bytes);
-        assert_eq!(validated.max_images_per_project, defaults.max_images_per_project);
-        assert_eq!(validated.max_image_search_hits, defaults.max_image_search_hits);
+        assert_eq!(
+            validated.max_image_size_bytes,
+            defaults.max_image_size_bytes
+        );
+        assert_eq!(
+            validated.max_images_per_project,
+            defaults.max_images_per_project
+        );
+        assert_eq!(
+            validated.max_image_search_hits,
+            defaults.max_image_search_hits
+        );
         assert!(
             (validated.image_search_score_threshold - defaults.image_search_score_threshold).abs()
                 < f32::EPSILON

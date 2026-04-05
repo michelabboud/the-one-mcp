@@ -1676,7 +1676,7 @@ impl McpBroker {
         &self,
         request: crate::api::ImageIngestRequest,
     ) -> Result<crate::api::ImageIngestResponse, CoreError> {
-        use the_one_memory::image_embeddings::FastEmbedImageProvider;
+        use the_one_memory::image_embeddings::{FastEmbedImageProvider, ImageEmbeddingProvider};
         use the_one_memory::image_ingest::DEFAULT_IMAGE_EXTENSIONS;
         use the_one_memory::qdrant::{AsyncQdrantBackend, ImagePoint, QdrantOptions};
 

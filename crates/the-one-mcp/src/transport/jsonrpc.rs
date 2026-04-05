@@ -406,7 +406,10 @@ async fn dispatch_tool(broker: &McpBroker, tool_name: &str, args: Value) -> Resu
                 .ok_or("missing project_root")?;
             let project_id = args["project_id"].as_str().ok_or("missing project_id")?;
             let path = args["path"].as_str().ok_or("missing path")?;
-            let caption = args.get("caption").and_then(|v| v.as_str()).map(String::from);
+            let caption = args
+                .get("caption")
+                .and_then(|v| v.as_str())
+                .map(String::from);
             let result = broker
                 .image_ingest(ImageIngestRequest {
                     project_root: project_root.to_string(),

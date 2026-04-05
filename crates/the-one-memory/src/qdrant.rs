@@ -456,10 +456,7 @@ impl AsyncQdrantBackend {
         threshold: f32,
     ) -> Result<Vec<ImageSearchResult>, String> {
         let collection = Self::image_collection_name(project_id);
-        let url = format!(
-            "{}/collections/{}/points/search",
-            self.base_url, collection
-        );
+        let url = format!("{}/collections/{}/points/search", self.base_url, collection);
 
         let body = json!({
             "vector": query_vector,
@@ -494,8 +491,7 @@ impl AsyncQdrantBackend {
                     .iter()
                     .filter_map(|item| {
                         let payload = item.get("payload")?;
-                        let source_path =
-                            payload.get("source_path")?.as_str()?.to_string();
+                        let source_path = payload.get("source_path")?.as_str()?.to_string();
                         let score = item.get("score")?.as_f64()? as f32;
                         let file_size = payload
                             .get("file_size")
@@ -571,10 +567,7 @@ impl AsyncQdrantBackend {
         source_path: &str,
     ) -> Result<(), String> {
         let collection = Self::image_collection_name(project_id);
-        let url = format!(
-            "{}/collections/{}/points/delete",
-            self.base_url, collection
-        );
+        let url = format!("{}/collections/{}/points/delete", self.base_url, collection);
 
         let body = json!({
             "filter": {
