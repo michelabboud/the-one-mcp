@@ -323,9 +323,37 @@ pub fn chunk_file(path: &Path, content: &str, max_tokens: usize) -> Vec<ChunkMet
     {
         Some("md") | Some("markdown") => chunk_markdown(path_str, content, max_tokens),
         Some("rs") => crate::chunker_rust::chunk_rust(path_str, content, max_tokens),
-        // Python, TypeScript, JavaScript, Go in Phase D
+        Some("py") => crate::chunker_python::chunk_python(path_str, content, max_tokens),
+        Some("ts") | Some("tsx") => {
+            crate::chunker_typescript::chunk_typescript(path_str, content, max_tokens)
+        }
+        Some("js") | Some("jsx") | Some("mjs") | Some("cjs") => {
+            crate::chunker_typescript::chunk_javascript(path_str, content, max_tokens)
+        }
+        Some("go") => crate::chunker_go::chunk_go(path_str, content, max_tokens),
         _ => chunk_text_fallback(path_str, content, max_tokens),
     }
+}
+
+/// Split content on blank lines into sub-chunks, each at most `max_chars` characters.
+///
+/// Shared across language chunkers to handle oversized items.
+pub(crate) fn split_on_blank_lines(content: &str, max_chars: usize) -> Vec<String> {
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    for line in content.lines() {
+        if line.trim().is_empty() && current.len() >= max_chars / 2 {
+            chunks.push(current.trim_end().to_string());
+            current.clear();
+        } else {
+            current.push_str(line);
+            current.push('\n');
+        }
+    }
+    if !current.is_empty() {
+        chunks.push(current.trim_end().to_string());
+    }
+    chunks
 }
 
 /// Generic fallback chunker for unknown file types.
@@ -557,5 +585,52 @@ mod tests {
         let chunks = chunk_file(Path::new("test.rs"), content, 500);
         assert!(!chunks.is_empty());
         assert_eq!(chunks[0].language.as_deref(), Some("rust"));
+    }
+
+    #[test]
+    fn test_chunk_file_python_path() {
+        let chunks = chunk_file(
+            Path::new("test.py"),
+            "def hello():\n    return 'world'",
+            500,
+        );
+        assert!(!chunks.is_empty());
+        assert_eq!(chunks[0].language.as_deref(), Some("python"));
+    }
+
+    #[test]
+    fn test_chunk_file_typescript_path() {
+        let chunks = chunk_file(
+            Path::new("test.ts"),
+            "export function foo() { return 1; }",
+            500,
+        );
+        assert!(!chunks.is_empty());
+        assert_eq!(chunks[0].language.as_deref(), Some("typescript"));
+    }
+
+    #[test]
+    fn test_chunk_file_javascript_path() {
+        let chunks = chunk_file(Path::new("test.js"), "function bar() { return 2; }", 500);
+        assert!(!chunks.is_empty());
+        assert_eq!(chunks[0].language.as_deref(), Some("javascript"));
+    }
+
+    #[test]
+    fn test_chunk_file_tsx_path() {
+        let chunks = chunk_file(
+            Path::new("Component.tsx"),
+            "export function App() { return null; }",
+            500,
+        );
+        assert!(!chunks.is_empty());
+        assert_eq!(chunks[0].language.as_deref(), Some("typescript"));
+    }
+
+    #[test]
+    fn test_chunk_file_go_path() {
+        let chunks = chunk_file(Path::new("test.go"), "package main\nfunc main() {}", 500);
+        assert!(!chunks.is_empty());
+        assert_eq!(chunks[0].language.as_deref(), Some("go"));
     }
 }

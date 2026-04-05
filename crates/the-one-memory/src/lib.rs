@@ -1,5 +1,8 @@
 pub mod chunker;
+pub mod chunker_go;
+pub mod chunker_python;
 pub mod chunker_rust;
+pub mod chunker_typescript;
 pub mod embeddings;
 pub mod graph;
 pub mod image_embeddings;

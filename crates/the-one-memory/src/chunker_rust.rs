@@ -98,7 +98,7 @@ pub fn chunk_rust(source_path: &str, content: &str, max_tokens: usize) -> Vec<Ch
             chunk_index += 1;
         } else {
             // Large item: split on blank lines
-            let mut sub_chunks = split_on_blank_lines(&item_content, max_chars);
+            let mut sub_chunks = crate::chunker::split_on_blank_lines(&item_content, max_chars);
             for (sub_idx, sub) in sub_chunks.drain(..).enumerate() {
                 chunks.push(ChunkMeta {
                     id: format!("{source_path}:{chunk_index}"),
@@ -277,24 +277,6 @@ fn extract_rust_symbol(line: &str, kind: &str) -> String {
         }
     }
     format!("{kind} {name}")
-}
-
-fn split_on_blank_lines(content: &str, max_chars: usize) -> Vec<String> {
-    let mut chunks = Vec::new();
-    let mut current = String::new();
-    for line in content.lines() {
-        if line.trim().is_empty() && current.len() >= max_chars / 2 {
-            chunks.push(current.trim_end().to_string());
-            current.clear();
-        } else {
-            current.push_str(line);
-            current.push('\n');
-        }
-    }
-    if !current.is_empty() {
-        chunks.push(current.trim_end().to_string());
-    }
-    chunks
 }
 
 #[cfg(test)]
