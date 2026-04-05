@@ -489,12 +489,57 @@ pub struct ToolListResponse {
     pub tools: Vec<the_one_core::tool_catalog::ToolSummary>,
 }
 
+// ---------------------------------------------------------------------------
+// Image search / ingest types
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ImageSearchRequest {
+    pub project_root: String,
+    pub project_id: String,
+    pub query: String,
+    pub top_k: usize,
+}
+
+/// Note: cannot derive `Eq` because `score` is `f32`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ImageSearchHit {
+    pub id: String,
+    pub source_path: String,
+    pub thumbnail_path: Option<String>,
+    pub caption: Option<String>,
+    pub ocr_text: Option<String>,
+    pub score: f32,
+}
+
+/// Note: cannot derive `Eq` because `hits` contains `f32` scores.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ImageSearchResponse {
+    pub hits: Vec<ImageSearchHit>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ImageIngestRequest {
+    pub project_root: String,
+    pub project_id: String,
+    pub path: String,
+    pub caption: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ImageIngestResponse {
+    pub path: String,
+    pub dims: usize,
+    pub ocr_extracted: bool,
+    pub thumbnail_generated: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         ConfigExportRequest, ConfigExportResponse, DocsListRequest, DocsSaveRequest,
-        MemoryFetchChunkRequest, MemorySearchRequest, ProjectInitRequest, ToolFindRequest,
-        ToolRunRequest,
+        ImageIngestRequest, MemoryFetchChunkRequest, MemorySearchRequest, ProjectInitRequest,
+        ToolFindRequest, ToolRunRequest,
     };
 
     #[test]
@@ -614,5 +659,25 @@ mod tests {
         let decoded: ToolFindRequest = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(decoded.mode, "search");
         assert_eq!(decoded.query, Some("linter".to_string()));
+    }
+
+    #[test]
+    fn test_image_ingest_request_roundtrip() {
+        let req = ImageIngestRequest {
+            project_root: "/tmp/repo".to_string(),
+            project_id: "p1".to_string(),
+            path: "/tmp/repo/screenshot.png".to_string(),
+            caption: Some("App screenshot".to_string()),
+        };
+        let json = serde_json::to_string(&req).expect("serialize");
+        let decoded: ImageIngestRequest = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded, req);
+
+        // Without caption
+        let no_caption: ImageIngestRequest = serde_json::from_str(
+            r#"{"project_root":"/tmp","project_id":"p","path":"/img.png","caption":null}"#,
+        )
+        .expect("deserialize without caption");
+        assert_eq!(no_caption.caption, None);
     }
 }
