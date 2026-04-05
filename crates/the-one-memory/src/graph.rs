@@ -143,15 +143,28 @@ impl KnowledgeGraph {
     }
 
     /// Merge extraction results into the graph, deduplicating entities.
+    ///
+    /// Entity names are normalized via [`normalize_entity_name`] before dedup
+    /// so that `"rust"`, `"Rust"`, and `"  Rust  "` all collapse to a single
+    /// entity. Relation endpoints are normalized identically so edges don't
+    /// reference orphaned names. Shipped in v0.13.1 as part of the LightRAG
+    /// parity pass.
     pub fn merge_extraction(&mut self, extraction: &ExtractionResult) {
         for entity in &extraction.entities {
-            let key = entity.name.to_lowercase();
+            let canonical = normalize_entity_name(&entity.name);
+            if canonical.is_empty() {
+                continue;
+            }
+            let key = canonical.to_lowercase();
             let existing = self.entities.entry(key).or_insert_with(|| Entity {
-                name: entity.name.clone(),
+                name: canonical.clone(),
                 entity_type: entity.entity_type.clone(),
                 description: String::new(),
                 source_chunks: Vec::new(),
             });
+            // Prefer the canonical display name even if a previous merge used
+            // a less-polished form.
+            existing.name = canonical;
             // Merge descriptions (append if new info)
             if !entity.description.is_empty() && !existing.description.contains(&entity.description)
             {
@@ -169,21 +182,32 @@ impl KnowledgeGraph {
         }
 
         for relation in &extraction.relations {
-            let source_key = relation.source.to_lowercase();
+            let source_canonical = normalize_entity_name(&relation.source);
+            let target_canonical = normalize_entity_name(&relation.target);
+            if source_canonical.is_empty() || target_canonical.is_empty() {
+                continue;
+            }
+            // Store a canonicalised clone so the edges reference the same
+            // entity name format as the nodes table.
+            let mut canonical_relation = relation.clone();
+            canonical_relation.source = source_canonical.clone();
+            canonical_relation.target = target_canonical.clone();
+
+            let source_key = source_canonical.to_lowercase();
             let entry = self.relations.entry(source_key).or_default();
-            // Check for duplicate relation
             let exists = entry.iter().any(|r| {
-                r.source.to_lowercase() == relation.source.to_lowercase()
-                    && r.target.to_lowercase() == relation.target.to_lowercase()
-                    && r.relation_type.to_lowercase() == relation.relation_type.to_lowercase()
+                r.source.eq_ignore_ascii_case(&canonical_relation.source)
+                    && r.target.eq_ignore_ascii_case(&canonical_relation.target)
+                    && r.relation_type
+                        .eq_ignore_ascii_case(&canonical_relation.relation_type)
             });
             if !exists {
-                entry.push(relation.clone());
-                // Also add reverse lookup
+                entry.push(canonical_relation.clone());
+                // Also add reverse lookup under the target key
                 self.relations
-                    .entry(relation.target.to_lowercase())
+                    .entry(target_canonical.to_lowercase())
                     .or_default()
-                    .push(relation.clone());
+                    .push(canonical_relation);
             }
         }
     }
@@ -258,6 +282,39 @@ impl KnowledgeGraph {
     /// Get total entity count.
     pub fn entity_count(&self) -> usize {
         self.entities.len()
+    }
+
+    /// Iterate all entities (read-only). v0.13.1 — used by the broker to
+    /// upsert entity vectors into Qdrant after extraction.
+    pub fn all_entities(&self) -> Vec<Entity> {
+        self.entities.values().cloned().collect()
+    }
+
+    /// Get a mutable reference to an entity by name. v0.13.1 — used by the
+    /// description-summarization pass in `graph_extractor`.
+    pub fn get_entity_mut(&mut self, name: &str) -> Option<&mut Entity> {
+        let key = normalize_entity_name(name).to_lowercase();
+        self.entities.get_mut(&key)
+    }
+
+    /// Iterate all unique relations (read-only). Deduplicates the internal
+    /// forward/reverse lookup by keying on (source, target, relation_type).
+    /// v0.13.1 — used by the broker to upsert relation vectors into Qdrant.
+    pub fn all_relations(&self) -> Vec<Relation> {
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        for rel in self.relations.values().flatten() {
+            let key = format!(
+                "{}|{}|{}",
+                rel.source.to_lowercase(),
+                rel.target.to_lowercase(),
+                rel.relation_type.to_lowercase()
+            );
+            if seen.insert(key) {
+                out.push(rel.clone());
+            }
+        }
+        out
     }
 
     /// Get total unique relation count.
@@ -453,12 +510,227 @@ fn extract_json_block(text: &str) -> &str {
 }
 
 // ---------------------------------------------------------------------------
+// Entity name normalization (v0.13.1)
+// ---------------------------------------------------------------------------
+
+/// Normalize a raw entity name from an LLM extraction into a canonical form
+/// that can be used as a dedup key + display name.
+///
+/// Rules (mirrored from LightRAG's `clean_str` logic):
+/// 1. Unicode-normalize via `.trim()` and collapse whitespace runs
+/// 2. Strip leading/trailing punctuation (quotes, parentheses, dots, commas)
+/// 3. Preserve pure acronyms (all-uppercase alphabetic like `RUST`, `API`)
+/// 4. Title-case word-by-word, skipping 1-2 char words to keep things like
+///    `of`, `to`, `in` intact
+///
+/// This is a pure function and cheap to call — it runs inside merge loops.
+pub fn normalize_entity_name(raw: &str) -> String {
+    // 1. trim + collapse whitespace
+    let collapsed: String = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    // 2. strip surrounding punctuation
+    let stripped: String = collapsed
+        .trim_matches(|c: char| {
+            c == '"'
+                || c == '\''
+                || c == '.'
+                || c == ','
+                || c == '('
+                || c == ')'
+                || c == '['
+                || c == ']'
+        })
+        .to_string();
+    if stripped.is_empty() {
+        return String::new();
+    }
+    // 3. preserve all-uppercase acronyms (must have at least one letter)
+    let has_letter = stripped.chars().any(|c| c.is_alphabetic());
+    let all_upper = has_letter
+        && stripped
+            .chars()
+            .all(|c| !c.is_alphabetic() || c.is_uppercase());
+    if all_upper {
+        return stripped;
+    }
+    // 4. title-case
+    stripped
+        .split(' ')
+        .map(|word| {
+            if word.is_empty() {
+                String::new()
+            } else if word.len() <= 2 {
+                word.to_string()
+            } else {
+                let mut chars = word.chars();
+                match chars.next() {
+                    Some(first) => {
+                        first.to_uppercase().collect::<String>()
+                            + chars.as_str().to_lowercase().as_str()
+                    }
+                    None => String::new(),
+                }
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+// ---------------------------------------------------------------------------
+// ExtractionResult::merge — used by the gleaning loop (v0.13.1) to combine
+// multiple passes over the same chunk while deduplicating entities/relations.
+// ---------------------------------------------------------------------------
+
+impl ExtractionResult {
+    /// Merge another extraction's entities and relations into this one,
+    /// deduplicating by normalized entity name + relation triple.
+    ///
+    /// Used by [`crate::graph_extractor::extract_with_gleaning`] to
+    /// accumulate results across the initial extraction pass and any
+    /// follow-up "gleaning" passes without counting the same entity twice.
+    pub fn merge(&mut self, other: ExtractionResult) {
+        for incoming in other.entities {
+            let canonical = normalize_entity_name(&incoming.name);
+            if canonical.is_empty() {
+                continue;
+            }
+            let key = canonical.to_lowercase();
+            if let Some(existing) = self
+                .entities
+                .iter_mut()
+                .find(|e| normalize_entity_name(&e.name).to_lowercase() == key)
+            {
+                if !incoming.description.is_empty()
+                    && !existing.description.contains(&incoming.description)
+                {
+                    if !existing.description.is_empty() {
+                        existing.description.push_str("; ");
+                    }
+                    existing.description.push_str(&incoming.description);
+                }
+                for chunk_id in incoming.source_chunks {
+                    if !existing.source_chunks.contains(&chunk_id) {
+                        existing.source_chunks.push(chunk_id);
+                    }
+                }
+            } else {
+                let mut normalized = incoming;
+                normalized.name = canonical;
+                self.entities.push(normalized);
+            }
+        }
+
+        for incoming in other.relations {
+            let src = normalize_entity_name(&incoming.source);
+            let tgt = normalize_entity_name(&incoming.target);
+            if src.is_empty() || tgt.is_empty() {
+                continue;
+            }
+            let exists = self.relations.iter().any(|r| {
+                normalize_entity_name(&r.source).eq_ignore_ascii_case(&src)
+                    && normalize_entity_name(&r.target).eq_ignore_ascii_case(&tgt)
+                    && r.relation_type
+                        .eq_ignore_ascii_case(&incoming.relation_type)
+            });
+            if !exists {
+                let mut normalized = incoming;
+                normalized.source = src;
+                normalized.target = tgt;
+                self.relations.push(normalized);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_normalize_entity_name_title_case() {
+        assert_eq!(normalize_entity_name("rust"), "Rust");
+        assert_eq!(normalize_entity_name("  rust  "), "Rust");
+        assert_eq!(normalize_entity_name("Rust"), "Rust");
+    }
+
+    #[test]
+    fn test_normalize_entity_name_preserves_acronyms() {
+        assert_eq!(normalize_entity_name("RUST"), "RUST");
+        assert_eq!(normalize_entity_name("API"), "API");
+        assert_eq!(normalize_entity_name("HTTP"), "HTTP");
+        assert_eq!(normalize_entity_name("gRPC"), "Grpc"); // mixed-case not an acronym
+    }
+
+    #[test]
+    fn test_normalize_entity_name_multi_word() {
+        assert_eq!(
+            normalize_entity_name("model context protocol"),
+            "Model Context Protocol"
+        );
+        // Short words stay as-is so "of", "to", "in" don't get title-cased
+        assert_eq!(
+            normalize_entity_name("bureau of investigation"),
+            "Bureau of Investigation"
+        );
+    }
+
+    #[test]
+    fn test_normalize_entity_name_strips_punctuation() {
+        assert_eq!(normalize_entity_name("\"rust\""), "Rust");
+        assert_eq!(normalize_entity_name("(Rust)"), "Rust");
+        assert_eq!(normalize_entity_name("rust."), "Rust");
+    }
+
+    #[test]
+    fn test_normalize_entity_name_empty() {
+        assert_eq!(normalize_entity_name(""), "");
+        assert_eq!(normalize_entity_name("   "), "");
+        assert_eq!(normalize_entity_name("\"\""), "");
+    }
+
+    #[test]
+    fn test_merge_extraction_dedups_across_cases() {
+        let mut graph = KnowledgeGraph::new();
+        let extraction1 = ExtractionResult {
+            entities: vec![Entity {
+                name: "rust".to_string(),
+                entity_type: "technology".to_string(),
+                description: "A systems programming language".to_string(),
+                source_chunks: vec!["chunk-1".to_string()],
+            }],
+            relations: vec![],
+        };
+        let extraction2 = ExtractionResult {
+            entities: vec![Entity {
+                name: "Rust".to_string(),
+                entity_type: "technology".to_string(),
+                description: "Memory safe without GC".to_string(),
+                source_chunks: vec!["chunk-2".to_string()],
+            }],
+            relations: vec![],
+        };
+        let extraction3 = ExtractionResult {
+            entities: vec![Entity {
+                name: "  RUST  ".to_string(),
+                entity_type: "technology".to_string(),
+                description: "".to_string(),
+                source_chunks: vec!["chunk-3".to_string()],
+            }],
+            relations: vec![],
+        };
+        graph.merge_extraction(&extraction1);
+        graph.merge_extraction(&extraction2);
+        graph.merge_extraction(&extraction3);
+        // All three should collapse into a single entity
+        assert_eq!(graph.entity_count(), 1);
+        // The canonical name should be "RUST" (last write wins from the acronym form)
+        // and source_chunks should contain all three chunks
+        let (_, entity) = graph.entities.iter().next().unwrap();
+        assert_eq!(entity.source_chunks.len(), 3);
+    }
 
     #[test]
     fn test_graph_merge_and_search() {

@@ -2174,19 +2174,37 @@ impl McpBroker {
         let chunks = engine.chunks().to_vec();
         drop(memories);
 
-        let result = the_one_memory::graph_extractor::extract_and_persist(project_root, &chunks)
-            .await
-            .map_err(CoreError::Embedding)?;
+        let mut result =
+            the_one_memory::graph_extractor::extract_and_persist(project_root, &chunks)
+                .await
+                .map_err(CoreError::Embedding)?;
 
-        // Reload the graph into the memory engine so `Local`/`Global`/`Hybrid`
-        // retrieval modes can immediately use the new entities without a
-        // server restart.
+        // v0.13.1: reload the graph into the memory engine AND upsert
+        // entity/relation descriptions into Qdrant vector collections so
+        // Local/Global/Hybrid retrieval modes can do semantic search.
         let graph_path = project_root.join(".the-one").join("knowledge_graph.json");
         if graph_path.exists() {
             if let Ok(graph) = the_one_memory::graph::KnowledgeGraph::load_from_file(&graph_path) {
+                let entities = graph.all_entities();
+                let relations = graph.all_relations();
+
                 let mut memories = self.memory_by_project.write().await;
                 if let Some(engine) = memories.get_mut(&key) {
                     *engine.graph_mut() = graph;
+                    match engine.upsert_entity_vectors(project_id, &entities).await {
+                        Ok(n) if n > 0 => tracing::info!(
+                            "upserted {n} entity vectors into qdrant for project {project_id}"
+                        ),
+                        Ok(_) => {}
+                        Err(e) => result.errors.push(format!("upsert_entity_vectors: {e}")),
+                    }
+                    match engine.upsert_relation_vectors(project_id, &relations).await {
+                        Ok(n) if n > 0 => tracing::info!(
+                            "upserted {n} relation vectors into qdrant for project {project_id}"
+                        ),
+                        Ok(_) => {}
+                        Err(e) => result.errors.push(format!("upsert_relation_vectors: {e}")),
+                    }
                 }
             }
         }

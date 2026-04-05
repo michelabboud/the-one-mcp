@@ -133,6 +133,11 @@ pub struct MemoryEngine {
     reranker: Option<Box<dyn Reranker>>,
     /// Knowledge graph for entity-relation enhanced retrieval.
     graph: KnowledgeGraph,
+    /// v0.13.1 — project identifier used to scope Qdrant entity/relation
+    /// vector collections. Set via [`MemoryEngine::set_project_id`] after
+    /// construction. When `None`, the semantic graph-search fallback uses
+    /// the in-memory keyword search only.
+    project_id: Option<String>,
     /// Optional sparse embedding provider for BM25-style hybrid search.
     #[cfg(feature = "local-embeddings")]
     sparse_provider: Option<Box<dyn SparseEmbeddingProvider>>,
@@ -166,6 +171,7 @@ impl MemoryEngine {
             hybrid_search_enabled: false,
             hybrid_dense_weight: 0.7,
             hybrid_sparse_weight: 0.3,
+            project_id: None,
         })
     }
 
@@ -194,6 +200,7 @@ impl MemoryEngine {
             hybrid_search_enabled: false,
             hybrid_dense_weight: 0.7,
             hybrid_sparse_weight: 0.3,
+            project_id: None,
         })
     }
 
@@ -222,6 +229,7 @@ impl MemoryEngine {
             hybrid_search_enabled: false,
             hybrid_dense_weight: 0.7,
             hybrid_sparse_weight: 0.3,
+            project_id: None,
         })
     }
 
@@ -256,6 +264,17 @@ impl MemoryEngine {
         &mut self.graph
     }
 
+    /// v0.13.1 — set the project identifier used for Qdrant entity/relation
+    /// vector collections. Called by the broker right after construction.
+    pub fn set_project_id(&mut self, id: String) {
+        self.project_id = Some(id);
+    }
+
+    /// v0.13.1 — read the configured project id, if any.
+    pub fn project_id(&self) -> Option<&str> {
+        self.project_id.as_deref()
+    }
+
     /// Get a reference to the knowledge graph.
     pub fn graph(&self) -> &KnowledgeGraph {
         &self.graph
@@ -265,6 +284,140 @@ impl MemoryEngine {
     /// pipeline (v0.13.0). Returns a slice; callers should not mutate.
     pub fn chunks(&self) -> &[ChunkMeta] {
         &self.chunks
+    }
+
+    // -----------------------------------------------------------------------
+    // Graph RAG entity/relation vector stores (v0.13.1)
+    //
+    // LightRAG-parity feature: after extraction, we embed each entity's
+    // "name + description" and each relation's "source + target + type +
+    // description" into separate Qdrant collections. This enables:
+    //   - Local mode: semantic entity lookup (not substring match)
+    //   - Global mode: semantic relation traversal from themes
+    //   - Hybrid mode: fuse vector + entity/relation hits
+    // -----------------------------------------------------------------------
+
+    /// Embed and upsert entities into the project's entity vector collection.
+    /// Does nothing if Qdrant is not configured.
+    pub async fn upsert_entity_vectors(
+        &self,
+        project_id: &str,
+        entities: &[crate::graph::Entity],
+    ) -> Result<usize, String> {
+        let Some(qdrant) = &self.qdrant else {
+            return Ok(0);
+        };
+        if entities.is_empty() {
+            return Ok(0);
+        }
+        let dims = self.embedding_provider.dimensions();
+        qdrant.create_entity_collection(project_id, dims).await?;
+
+        let texts: Vec<String> = entities
+            .iter()
+            .map(|e| format!("{}\n{}", e.name, e.description))
+            .collect();
+        let vectors = self.embedding_provider.embed_batch(&texts).await?;
+
+        let points: Vec<crate::qdrant::EntityPoint> = entities
+            .iter()
+            .zip(vectors)
+            .map(|(e, vec)| crate::qdrant::EntityPoint {
+                id: e.name.to_lowercase(),
+                vector: vec,
+                name: e.name.clone(),
+                entity_type: e.entity_type.clone(),
+                description: e.description.clone(),
+                source_chunks: e.source_chunks.clone(),
+            })
+            .collect();
+        let count = points.len();
+        qdrant.upsert_entity_points(project_id, points).await?;
+        Ok(count)
+    }
+
+    /// Embed and upsert relations into the project's relation vector collection.
+    pub async fn upsert_relation_vectors(
+        &self,
+        project_id: &str,
+        relations: &[crate::graph::Relation],
+    ) -> Result<usize, String> {
+        let Some(qdrant) = &self.qdrant else {
+            return Ok(0);
+        };
+        if relations.is_empty() {
+            return Ok(0);
+        }
+        let dims = self.embedding_provider.dimensions();
+        qdrant.create_relation_collection(project_id, dims).await?;
+
+        let texts: Vec<String> = relations
+            .iter()
+            .map(|r| {
+                format!(
+                    "{} {} {}\n{}",
+                    r.source, r.relation_type, r.target, r.description
+                )
+            })
+            .collect();
+        let vectors = self.embedding_provider.embed_batch(&texts).await?;
+
+        let points: Vec<crate::qdrant::RelationPoint> = relations
+            .iter()
+            .zip(vectors)
+            .map(|(r, vec)| {
+                // Hash-like key so re-extracting the same relation overwrites.
+                let id = format!(
+                    "{}|{}|{}",
+                    r.source.to_lowercase(),
+                    r.target.to_lowercase(),
+                    r.relation_type.to_lowercase()
+                );
+                crate::qdrant::RelationPoint {
+                    id,
+                    vector: vec,
+                    source: r.source.clone(),
+                    target: r.target.clone(),
+                    relation_type: r.relation_type.clone(),
+                    description: r.description.clone(),
+                    source_chunks: r.source_chunks.clone(),
+                }
+            })
+            .collect();
+        let count = points.len();
+        qdrant.upsert_relation_points(project_id, points).await?;
+        Ok(count)
+    }
+
+    /// Semantic search over the project's entity vector collection.
+    /// Returns `(source_chunk_ids, entity_names)` for the top matches.
+    pub async fn search_entities_semantic(
+        &self,
+        project_id: &str,
+        query: &str,
+        top_k: usize,
+    ) -> Result<Vec<crate::qdrant::EntitySearchResult>, String> {
+        let Some(qdrant) = &self.qdrant else {
+            return Ok(Vec::new());
+        };
+        let vector = self.embedding_provider.embed_single(query).await?;
+        qdrant.search_entities(project_id, vector, top_k, 0.0).await
+    }
+
+    /// Semantic search over the project's relation vector collection.
+    pub async fn search_relations_semantic(
+        &self,
+        project_id: &str,
+        query: &str,
+        top_k: usize,
+    ) -> Result<Vec<crate::qdrant::RelationSearchResult>, String> {
+        let Some(qdrant) = &self.qdrant else {
+            return Ok(Vec::new());
+        };
+        let vector = self.embedding_provider.embed_single(query).await?;
+        qdrant
+            .search_relations(project_id, vector, top_k, 0.0)
+            .await
     }
 
     /// Ingest all `.md` files from a directory tree.
@@ -431,7 +584,7 @@ impl MemoryEngine {
     pub async fn search(&self, request: &MemorySearchRequest) -> Vec<MemorySearchResult> {
         match request.mode {
             RetrievalMode::Naive => self.search_vector(request).await,
-            RetrievalMode::Local | RetrievalMode::Global => self.search_graph(request),
+            RetrievalMode::Local | RetrievalMode::Global => self.search_graph(request).await,
             RetrievalMode::Hybrid => self.search_hybrid_mode(request).await,
         }
     }
@@ -620,7 +773,53 @@ impl MemoryEngine {
 
     /// Graph-based search: find entities matching query terms, then return
     /// chunks associated with those entities and their neighbors.
-    fn search_graph(&self, request: &MemorySearchRequest) -> Vec<MemorySearchResult> {
+    ///
+    /// v0.13.1 upgrade: when a `project_id` is set and Qdrant is configured,
+    /// this routes through [`crate::graph_extractor::extract_query_keywords`]
+    /// + semantic entity/relation vector search instead of substring matching.
+    ///   Falls back to the in-memory `KnowledgeGraph::search` when the LLM
+    ///   endpoint is unavailable or returns empty keywords.
+    async fn search_graph(&self, request: &MemorySearchRequest) -> Vec<MemorySearchResult> {
+        let mut chunk_scores: HashMap<String, f32> = HashMap::new();
+
+        // --- v0.13.1 semantic path -----------------------------------------
+        // Try the LightRAG-style keyword extraction + entity/relation vector
+        // search first. Only available when project_id + Qdrant are set AND
+        // THE_ONE_GRAPH_ENABLED=true (the keyword extractor handles the flag).
+        if let (Some(pid), Some(_)) = (self.project_id.as_deref(), self.qdrant.as_ref()) {
+            let keywords = crate::graph_extractor::extract_query_keywords(&request.query).await;
+            if !keywords.is_empty() {
+                // Local mode: search entity collection for low-level identifiers
+                for keyword in &keywords.low_level {
+                    if let Ok(hits) = self.search_entities_semantic(pid, keyword, 5).await {
+                        for (rank, hit) in hits.iter().enumerate() {
+                            let score = hit.score * (1.0 - rank as f32 * 0.1).max(0.1);
+                            for cid in &hit.source_chunks {
+                                let entry = chunk_scores.entry(cid.clone()).or_insert(0.0);
+                                *entry = entry.max(score);
+                            }
+                        }
+                    }
+                }
+                // Global mode: search relation collection for high-level themes
+                for theme in &keywords.high_level {
+                    if let Ok(hits) = self.search_relations_semantic(pid, theme, 5).await {
+                        for (rank, hit) in hits.iter().enumerate() {
+                            let score = hit.score * (1.0 - rank as f32 * 0.1).max(0.1) * 0.9;
+                            for cid in &hit.source_chunks {
+                                let entry = chunk_scores.entry(cid.clone()).or_insert(0.0);
+                                *entry = entry.max(score);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // --- Fallback keyword path ------------------------------------------
+        // Always run — supplements the semantic path and is the only path when
+        // the LLM endpoint isn't configured. Uses the in-memory graph search
+        // over entity names.
         let terms: Vec<String> = request
             .query
             .split_whitespace()
@@ -628,7 +827,7 @@ impl MemoryEngine {
             .collect();
 
         let graph_results = self.graph.search(&terms, request.top_k);
-        if graph_results.is_empty() {
+        if chunk_scores.is_empty() && graph_results.is_empty() {
             return Vec::new();
         }
 
@@ -686,7 +885,7 @@ impl MemoryEngine {
                 let query_vector = match self.embedding_provider.embed_single(&request.query).await
                 {
                     Ok(v) => v,
-                    Err(_) => return self.search_graph(request),
+                    Err(_) => return self.search_graph(request).await,
                 };
 
                 match qdrant
@@ -713,7 +912,7 @@ impl MemoryEngine {
         };
 
         // Get graph search results
-        let graph_results = self.search_graph(request);
+        let graph_results = self.search_graph(request).await;
 
         // Merge and deduplicate: graph results boost vector results
         let mut merged: HashMap<String, MemorySearchResult> = HashMap::new();

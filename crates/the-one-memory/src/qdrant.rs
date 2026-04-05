@@ -104,6 +104,68 @@ pub struct ImageSearchResult {
 }
 
 // ---------------------------------------------------------------------------
+// Graph RAG entity & relation vector types (v0.13.1)
+//
+// LightRAG's killer feature: embed entity descriptions + relation
+// descriptions into their own vector stores so `Local` mode (entity-focused)
+// and `Global` mode (relation-focused) can use semantic search instead of
+// keyword matching. These types mirror the ImagePoint pattern above.
+// ---------------------------------------------------------------------------
+
+/// A single entity point to upsert into the entity vector collection.
+#[derive(Debug, Clone)]
+pub struct EntityPoint {
+    /// Unique identifier — we use the lowercase canonical name hash so that
+    /// re-extraction of the same entity overwrites rather than duplicates.
+    pub id: String,
+    /// The embedding vector of `"{name}\n{description}"`.
+    pub vector: Vec<f32>,
+    /// Canonical (normalized) entity name.
+    pub name: String,
+    /// Short type label ("person", "technology", etc).
+    pub entity_type: String,
+    /// Full description as stored in the knowledge graph.
+    pub description: String,
+    /// Chunk IDs this entity was extracted from.
+    pub source_chunks: Vec<String>,
+}
+
+/// A single entity search hit returned from `search_entities`.
+#[derive(Debug, Clone)]
+pub struct EntitySearchResult {
+    pub name: String,
+    pub entity_type: String,
+    pub description: String,
+    pub source_chunks: Vec<String>,
+    pub score: f32,
+}
+
+/// A single relation point for the relation vector collection.
+#[derive(Debug, Clone)]
+pub struct RelationPoint {
+    /// Unique identifier — hash of `(normalized_source, normalized_target, relation_type)`.
+    pub id: String,
+    /// Embedding of `"{source} {relation_type} {target}\n{description}"`.
+    pub vector: Vec<f32>,
+    pub source: String,
+    pub target: String,
+    pub relation_type: String,
+    pub description: String,
+    pub source_chunks: Vec<String>,
+}
+
+/// A single relation search hit returned from `search_relations`.
+#[derive(Debug, Clone)]
+pub struct RelationSearchResult {
+    pub source: String,
+    pub target: String,
+    pub relation_type: String,
+    pub description: String,
+    pub source_chunks: Vec<String>,
+    pub score: f32,
+}
+
+// ---------------------------------------------------------------------------
 // Backend
 // ---------------------------------------------------------------------------
 
@@ -825,6 +887,320 @@ impl AsyncQdrantBackend {
 
         let text = resp.text().await.unwrap_or_default();
         Err(format!("delete_image_by_source_path failed: {text}"))
+    }
+
+    // -----------------------------------------------------------------------
+    // Graph RAG — entity collection (v0.13.1)
+    // -----------------------------------------------------------------------
+
+    pub fn entity_collection_name(project_id: &str) -> String {
+        let sanitized: String = project_id
+            .chars()
+            .map(|c| {
+                if c.is_alphanumeric() || c == '_' || c == '-' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        format!("the_one_entities_{sanitized}")
+    }
+
+    pub fn relation_collection_name(project_id: &str) -> String {
+        let sanitized: String = project_id
+            .chars()
+            .map(|c| {
+                if c.is_alphanumeric() || c == '_' || c == '-' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        format!("the_one_relations_{sanitized}")
+    }
+
+    async fn create_graph_collection(&self, name: &str, dims: usize) -> Result<(), String> {
+        let url = format!("{}/collections/{}", self.base_url, name);
+        let body = json!({
+            "vectors": { "size": dims, "distance": "Cosine" },
+            "hnsw_config": { "m": 16, "ef_construct": 100 }
+        });
+        let resp = self
+            .client
+            .put(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("create {name} request failed: {e}"))?;
+        let status = resp.status().as_u16();
+        if status == 409 || (200..300).contains(&status) {
+            return Ok(());
+        }
+        let text = resp.text().await.unwrap_or_default();
+        if text.contains("already exists") {
+            return Ok(());
+        }
+        Err(format!("create {name} failed (HTTP {status}): {text}"))
+    }
+
+    pub async fn create_entity_collection(
+        &self,
+        project_id: &str,
+        dims: usize,
+    ) -> Result<(), String> {
+        let name = Self::entity_collection_name(project_id);
+        self.create_graph_collection(&name, dims).await
+    }
+
+    pub async fn create_relation_collection(
+        &self,
+        project_id: &str,
+        dims: usize,
+    ) -> Result<(), String> {
+        let name = Self::relation_collection_name(project_id);
+        self.create_graph_collection(&name, dims).await
+    }
+
+    pub async fn upsert_entity_points(
+        &self,
+        project_id: &str,
+        points: Vec<EntityPoint>,
+    ) -> Result<(), String> {
+        if points.is_empty() {
+            return Ok(());
+        }
+        let collection = Self::entity_collection_name(project_id);
+        let url = format!("{}/collections/{}/points", self.base_url, collection);
+        let json_points: Vec<serde_json::Value> = points
+            .into_iter()
+            .map(|p| {
+                json!({
+                    "id": hash_to_point_id(&p.id),
+                    "vector": p.vector,
+                    "payload": {
+                        "name": p.name,
+                        "entity_type": p.entity_type,
+                        "description": p.description,
+                        "source_chunks": p.source_chunks,
+                    }
+                })
+            })
+            .collect();
+        let body = json!({ "points": json_points });
+        let resp = self
+            .client
+            .put(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("upsert_entity_points request failed: {e}"))?;
+        if resp.status().is_success() {
+            return Ok(());
+        }
+        let text = resp.text().await.unwrap_or_default();
+        Err(format!("upsert_entity_points failed: {text}"))
+    }
+
+    pub async fn upsert_relation_points(
+        &self,
+        project_id: &str,
+        points: Vec<RelationPoint>,
+    ) -> Result<(), String> {
+        if points.is_empty() {
+            return Ok(());
+        }
+        let collection = Self::relation_collection_name(project_id);
+        let url = format!("{}/collections/{}/points", self.base_url, collection);
+        let json_points: Vec<serde_json::Value> = points
+            .into_iter()
+            .map(|p| {
+                json!({
+                    "id": hash_to_point_id(&p.id),
+                    "vector": p.vector,
+                    "payload": {
+                        "source": p.source,
+                        "target": p.target,
+                        "relation_type": p.relation_type,
+                        "description": p.description,
+                        "source_chunks": p.source_chunks,
+                    }
+                })
+            })
+            .collect();
+        let body = json!({ "points": json_points });
+        let resp = self
+            .client
+            .put(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("upsert_relation_points request failed: {e}"))?;
+        if resp.status().is_success() {
+            return Ok(());
+        }
+        let text = resp.text().await.unwrap_or_default();
+        Err(format!("upsert_relation_points failed: {text}"))
+    }
+
+    pub async fn search_entities(
+        &self,
+        project_id: &str,
+        query_vector: Vec<f32>,
+        top_k: usize,
+        threshold: f32,
+    ) -> Result<Vec<EntitySearchResult>, String> {
+        let collection = Self::entity_collection_name(project_id);
+        let url = format!("{}/collections/{}/points/search", self.base_url, collection);
+        let body = json!({
+            "vector": query_vector,
+            "limit": top_k,
+            "score_threshold": threshold,
+            "with_payload": true,
+        });
+        let resp = self
+            .client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("search_entities request failed: {e}"))?;
+        if !resp.status().is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(format!("search_entities failed: {text}"));
+        }
+        let value: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("search_entities parse error: {e}"))?;
+        let results = value
+            .get("result")
+            .and_then(|v| v.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| {
+                        let payload = item.get("payload")?;
+                        let score = item.get("score")?.as_f64()? as f32;
+                        let name = payload.get("name")?.as_str()?.to_string();
+                        let entity_type = payload
+                            .get("entity_type")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let description = payload
+                            .get("description")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let source_chunks = payload
+                            .get("source_chunks")
+                            .and_then(|v| v.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|c| c.as_str().map(str::to_string))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        Some(EntitySearchResult {
+                            name,
+                            entity_type,
+                            description,
+                            source_chunks,
+                            score,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(results)
+    }
+
+    pub async fn search_relations(
+        &self,
+        project_id: &str,
+        query_vector: Vec<f32>,
+        top_k: usize,
+        threshold: f32,
+    ) -> Result<Vec<RelationSearchResult>, String> {
+        let collection = Self::relation_collection_name(project_id);
+        let url = format!("{}/collections/{}/points/search", self.base_url, collection);
+        let body = json!({
+            "vector": query_vector,
+            "limit": top_k,
+            "score_threshold": threshold,
+            "with_payload": true,
+        });
+        let resp = self
+            .client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("search_relations request failed: {e}"))?;
+        if !resp.status().is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(format!("search_relations failed: {text}"));
+        }
+        let value: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("search_relations parse error: {e}"))?;
+        let results = value
+            .get("result")
+            .and_then(|v| v.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| {
+                        let payload = item.get("payload")?;
+                        let score = item.get("score")?.as_f64()? as f32;
+                        let source = payload.get("source")?.as_str()?.to_string();
+                        let target = payload.get("target")?.as_str()?.to_string();
+                        let relation_type = payload
+                            .get("relation_type")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let description = payload
+                            .get("description")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let source_chunks = payload
+                            .get("source_chunks")
+                            .and_then(|v| v.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|c| c.as_str().map(str::to_string))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        Some(RelationSearchResult {
+                            source,
+                            target,
+                            relation_type,
+                            description,
+                            source_chunks,
+                            score,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(results)
+    }
+
+    pub async fn delete_graph_collections(&self, project_id: &str) -> Result<(), String> {
+        for collection in [
+            Self::entity_collection_name(project_id),
+            Self::relation_collection_name(project_id),
+        ] {
+            let url = format!("{}/collections/{}", self.base_url, collection);
+            let _ = self.client.delete(&url).send().await;
+        }
+        Ok(())
     }
 }
 

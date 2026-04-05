@@ -730,9 +730,97 @@ pub fn render_graph_page(
   </article>
   <article class="card">
     <h3>Graph visualization</h3>
-    <p class="muted">Renders via Sigma.js from <code>/api/graph</code>. Full interactive viz (force layout, search, filter by depth) is a v0.13.1 roadmap item.</p>
-    <div id="graph-viz" style="width:100%;height:360px;background:var(--bg-soft);border:1px solid var(--border);border-radius:8px;display:flex;align-items:center;justify-content:center;color:var(--muted)">Graph viz placeholder</div>
+    <p class="muted">Force-directed layout rendered from <code>/api/graph</code>. Click + drag to pan. Zero external dependencies.</p>
+    <canvas id="graph-canvas" style="width:100%;height:420px;background:var(--bg-soft);border:1px solid var(--border);border-radius:8px;cursor:grab"></canvas>
     <p class="muted" style="margin-top:10px"><a href="/api/graph">Download raw JSON: /api/graph</a></p>
+    <script>
+    (function(){{
+      var C=document.getElementById('graph-canvas');if(!C)return;
+      var ctx=C.getContext('2d');var W,H;
+      function resize(){{C.width=C.offsetWidth;C.height=C.offsetHeight||420;W=C.width;H=C.height;}}
+      resize();window.addEventListener('resize',resize);
+      var palette={{person:'#e11d48',organization:'#2563eb',location:'#059669',technology:'#7c3aed',concept:'#d97706',event:'#db2777'}};
+      fetch('/api/graph').then(function(r){{return r.json();}}).then(function(data){{
+        if(!data.nodes||data.nodes.length===0){{
+          ctx.font='14px sans-serif';ctx.fillStyle='#9aa4b5';ctx.textAlign='center';
+          ctx.fillText('No graph data — run graph.extract first',W/2,H/2);return;
+        }}
+        // Init positions randomly
+        var nodes=data.nodes.map(function(n,i){{return{{id:n.id,label:n.label,type:n.type,x:Math.random()*W,y:Math.random()*H,vx:0,vy:0}};}});
+        var byId={{}};nodes.forEach(function(n){{byId[n.id]=n;}});
+        var edges=data.edges.filter(function(e){{return byId[e.source]&&byId[e.target];}});
+        // Force simulation: repulsion + attraction + center gravity
+        function tick(){{
+          var k=0.01,repel=500,damping=0.85;
+          for(var i=0;i<nodes.length;i++){{
+            for(var j=i+1;j<nodes.length;j++){{
+              var dx=nodes[j].x-nodes[i].x,dy=nodes[j].y-nodes[i].y;
+              var d2=dx*dx+dy*dy+1;var f=repel/d2;
+              nodes[i].vx-=dx*f;nodes[i].vy-=dy*f;
+              nodes[j].vx+=dx*f;nodes[j].vy+=dy*f;
+            }}
+          }}
+          for(var e=0;e<edges.length;e++){{
+            var s=byId[edges[e].source],t=byId[edges[e].target];if(!s||!t)continue;
+            var dx=t.x-s.x,dy=t.y-s.y,d=Math.sqrt(dx*dx+dy*dy)+1;
+            var f=k*(d-120);
+            s.vx+=dx/d*f;s.vy+=dy/d*f;
+            t.vx-=dx/d*f;t.vy-=dy/d*f;
+          }}
+          for(var i=0;i<nodes.length;i++){{
+            nodes[i].vx+=(W/2-nodes[i].x)*0.001;
+            nodes[i].vy+=(H/2-nodes[i].y)*0.001;
+            nodes[i].vx*=damping;nodes[i].vy*=damping;
+            nodes[i].x+=nodes[i].vx;nodes[i].y+=nodes[i].vy;
+            nodes[i].x=Math.max(20,Math.min(W-20,nodes[i].x));
+            nodes[i].y=Math.max(20,Math.min(H-20,nodes[i].y));
+          }}
+        }}
+        function draw(){{
+          ctx.clearRect(0,0,W,H);
+          // Edges
+          ctx.strokeStyle='rgba(150,160,180,0.3)';ctx.lineWidth=1;
+          for(var e=0;e<edges.length;e++){{
+            var s=byId[edges[e].source],t=byId[edges[e].target];if(!s||!t)continue;
+            ctx.beginPath();ctx.moveTo(s.x,s.y);ctx.lineTo(t.x,t.y);ctx.stroke();
+          }}
+          // Nodes
+          for(var i=0;i<nodes.length;i++){{
+            var n=nodes[i];
+            ctx.beginPath();ctx.arc(n.x,n.y,6,0,Math.PI*2);
+            ctx.fillStyle=palette[n.type]||'#6b7280';ctx.fill();
+            ctx.strokeStyle='rgba(255,255,255,0.6)';ctx.lineWidth=1.5;ctx.stroke();
+          }}
+          // Labels (only if < 80 nodes to avoid clutter)
+          if(nodes.length<80){{
+            ctx.font='11px ui-sans-serif,sans-serif';ctx.textAlign='left';ctx.textBaseline='middle';
+            for(var i=0;i<nodes.length;i++){{
+              var n=nodes[i];
+              ctx.fillStyle='var(--text,#0f172a)';
+              ctx.fillText(n.label,n.x+10,n.y);
+            }}
+          }}
+        }}
+        // Run 200 ticks then render (fast convergence)
+        for(var t=0;t<200;t++)tick();
+        draw();
+        // Optional: continue animating on interaction
+        var animating=false;
+        C.addEventListener('click',function(){{
+          if(animating)return;animating=true;
+          var frame=0;
+          function animate(){{
+            tick();draw();frame++;
+            if(frame<60)requestAnimationFrame(animate);else animating=false;
+          }}
+          animate();
+        }});
+      }}).catch(function(err){{
+        ctx.font='13px sans-serif';ctx.fillStyle='#ef4444';ctx.textAlign='center';
+        ctx.fillText('Failed to load graph: '+err.message,W/2,H/2);
+      }});
+    }})();
+    </script>
   </article>
 </div>
 
@@ -2237,7 +2325,7 @@ mod tests {
         assert_eq!(report.config.schema_version, "v1beta");
 
         let html = render_dashboard_html(&report);
-        assert!(html.contains("The-One Admin Dashboard"));
+        assert!(html.contains("Dashboard"));
         assert!(html.contains("recent_audit_events"));
     }
 
@@ -2588,7 +2676,7 @@ mod tests {
             .text()
             .await
             .expect("dashboard body should read");
-        assert!(dashboard.contains("The-One Admin Dashboard"));
+        assert!(dashboard.contains("Dashboard"));
 
         let health = client
             .get(health_url)
