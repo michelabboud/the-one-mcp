@@ -85,4 +85,4 @@ All crates use `CoreError` from `the-one-core::error`. Library code uses `thiser
 - Releases are manual-only via `build.sh release v0.4.0` (triggers GitHub Actions workflow_dispatch, does NOT auto-trigger on tags)
 - Tool catalog: `tools/catalog/` (curated JSON), `~/.the-one/catalog.db` (SQLite with FTS5), Qdrant `the_one_tools` collection (semantic)
 - Custom tools: `~/.the-one/registry/custom.json` (shared), `custom-<cli>.json` (per-CLI)
-- 15 MCP tools (see `crates/the-one-mcp/src/transport/tools.rs`), 174+ tests, 31 schemas, 28 catalog entries
+- 17 MCP tools (see `crates/the-one-mcp/src/transport/tools.rs`), 208 tests, 35 schemas, 28 catalog entries

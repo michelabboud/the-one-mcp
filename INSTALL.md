@@ -22,7 +22,7 @@ This will:
 
 ```bash
 # Install specific version
-bash install.sh --version v0.5.0
+bash install.sh --version v0.6.0
 
 # Install from a local build (after building from source)
 bash install.sh --local ./target/release
@@ -71,7 +71,7 @@ bash scripts/install.sh --local ./target/release
 │   ├── custom-gemini.json       Gemini CLI only
 │   ├── custom-opencode.json     OpenCode only
 │   └── custom-codex.json        Codex only
-├── schemas/                     v1beta JSON schemas (31 files)
+├── schemas/                     v1beta JSON schemas (35 files)
 └── .fastembed_cache/            ONNX embedding model (auto-downloaded on first use)
 ```
 
@@ -98,7 +98,7 @@ opencode mcp add --name the-one-mcp --command ~/.the-one/bin/the-one-mcp --args 
 # Smoke test
 echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' | ~/.the-one/bin/the-one-mcp serve
 
-# List all 15 tools
+# List all 17 tools
 echo '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' | ~/.the-one/bin/the-one-mcp serve
 ```
 
@@ -228,3 +228,4 @@ rm -rf ~/.the-one
 | `remote qdrant requires api key` | Set `qdrant_api_key` in config, or `qdrant_strict_auth: false` |
 | No search results | Run `maintain (action: tool.refresh)` to refresh catalog, or `maintain (action: reindex)` for docs |
 | Installer can't download | Use `--local ./target/release` after building from source |
+| `tesseract not found` error | Image OCR requires tesseract on host: `apt install tesseract-ocr` / `brew install tesseract` / `pacman -S tesseract`. Or disable with `"image_ocr_enabled": false` in config. |

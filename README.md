@@ -52,7 +52,7 @@ Claude Code / Gemini CLI / OpenCode / Codex
     v
 the-one-mcp broker
     |
-    +-- Tool Catalog         15 MCP tools, SQLite + Qdrant semantic search
+    +-- Tool Catalog         17 MCP tools, SQLite + Qdrant semantic search
     +-- Project Lifecycle    Detect languages/frameworks, fingerprint caching
     +-- Knowledge (RAG)      fastembed (384-1024 dim) + Qdrant vector search
     +-- Documents (CRUD)     Managed folder with soft-delete, auto-sync
@@ -61,11 +61,12 @@ the-one-mcp broker
     +-- SQLite               Project state, catalog, approvals, audit trail
 ```
 
-## 15 MCP Tools
+## 17 MCP Tools
 
 | Category | Tools |
 |----------|-------|
 | **Knowledge** | `memory.search`, `memory.fetch_chunk` |
+| **Images** | `memory.search_images`, `memory.ingest_image` |
 | **Documents** | `docs.list`, `docs.get`, `docs.save`, `docs.delete`, `docs.move` |
 | **Tool Discovery** | `tool.find`, `tool.info` |
 | **Tool Lifecycle** | `tool.install`, `tool.run` |
@@ -96,7 +97,21 @@ Contribute tools via [GitHub PR or Issue](CONTRIBUTING.md).
 | `quality` (default) | BGE-large-en-v1.5 | 1024 | **Recommended** |
 | `multilingual` | multilingual-e5-large | 1024 | Non-English projects |
 
-17 local models supported (including quantized variants). Interactive model selection during install. Or use any OpenAI-compatible API (OpenAI, Voyage, Cohere).
+17 local text models supported (including quantized variants). Interactive model selection during install. Or use any OpenAI-compatible API (OpenAI, Voyage, Cohere).
+
+**Image embeddings** are also supported — 5 image models (Nomic Vision default, CLIP ViT-B/32, Resnet50, Unicom ViT-B/16+32) for semantic image search. See [Image Search Guide](docs/guides/image-search.md).
+
+## Image Search
+
+Index diagrams, screenshots, and design assets — then find them by description:
+
+```
+You: "Find the database schema diagram"
+LLM calls: memory.search_images({ query: "database schema tables", limit: 5 })
+Returns: ranked matches with similarity scores, OCR text, thumbnail paths
+```
+
+Enable with `"image_embedding_enabled": true` in config. OCR text extraction available with tesseract. See [Image Search Guide](docs/guides/image-search.md).
 
 ## Documentation
 
@@ -105,6 +120,8 @@ Contribute tools via [GitHub PR or Issue](CONTRIBUTING.md).
 | **[INSTALL.md](INSTALL.md)** | **Complete installation guide** |
 | [Quickstart](docs/guides/quickstart.md) | Shortest path to a working setup |
 | [Complete Guide](docs/guides/the-one-mcp-complete-guide.md) | Full reference (19 sections) |
+| [Image Search Guide](docs/guides/image-search.md) | Semantic image search, OCR, thumbnails |
+| [Reranking Guide](docs/guides/reranking.md) | Cross-encoder reranking for memory.search |
 | [Operator Runbook](docs/ops/operator-runbook.md) | Operations, backup, incident triage |
 | [Tool Ecosystem](docs/plans/tool-ecosystem-architecture.md) | 7-layer tool catalog vision |
 | [Contributing](CONTRIBUTING.md) | Add tools to the catalog |
@@ -133,7 +150,7 @@ bash scripts/build.sh check           # full CI pipeline
 bash scripts/build.sh info            # show build config
 
 # Cross-platform release (triggers GitHub Actions — manual only)
-bash scripts/build.sh release v0.5.0  # build for 6 platforms + create GitHub Release
+bash scripts/build.sh release v0.6.0  # build for 6 platforms + create GitHub Release
 bash scripts/build.sh release --status # check workflow progress
 ```
 
@@ -143,10 +160,10 @@ Releases are **manual only** — tagging does not auto-trigger builds. You decid
 
 | Metric | Count |
 |--------|-------|
-| MCP Tools | 15 |
-| Tests | 183 |
-| Rust LOC | ~12,800 |
-| JSON Schemas | 31 |
+| MCP Tools | 17 |
+| Tests | 208 |
+| Rust LOC | ~16,500 |
+| JSON Schemas | 35 |
 | Catalog Tools | 28 (growing) |
 | Supported Platforms | 6 (Linux/macOS/Windows x86-64 + ARM64) |
 | Supported AI CLIs | 4 (Claude Code, Gemini CLI, OpenCode, Codex) |

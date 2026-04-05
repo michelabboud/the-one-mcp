@@ -1,29 +1,30 @@
 # Progress Report
 
-## Current Version: v0.5.0
+## Current Version: v0.6.0
 
 ## Overall Status
 
-All planned stages complete. Five major releases shipped:
+All planned stages complete. Six major releases shipped:
 - **v0.1.0** — Initial workspace: 8 crates, 14 MCP tools, stub implementations
 - **v0.2.0** — Production overhaul: async broker, real embeddings, 3 transports, 24 tools
 - **v0.3.0** — Tool catalog: SQLite + Qdrant semantic search, tool lifecycle, 31 tools
 - **v0.4.0** — Embedding model registry: TOML-based model registries, quality tier default, interactive installer selection, 33 tools
 - **v0.5.0** — Tool consolidation: 33→15 tools (~52% token savings), multiplexed admin, merged work tools
+- **v0.6.0** — Multimodal: image embeddings, OCR, reranking (fastembed 5.x), 17 tools, 208 tests
 
-Build/test gates: all green. 183 tests, 0 failures.
+Build/test gates: all green. 208 tests, 0 failures.
 
 ## Stats
 
-| Metric | v0.1.0 | v0.2.0 | v0.3.0 | v0.4.0 | v0.5.0 |
-|--------|--------|--------|--------|--------|--------|
-| MCP Tools | 14 | 24 | 31 | 33 | **15** |
-| Tests | 68 | 122 | 135 | 174 | **183** |
-| Rust LOC | 6,400 | ~10,000 | ~12,800 | ~14,000 | **~14,200** |
-| JSON Schemas | 33 | 49 | 63 | 63 | **31** |
-| Catalog Tools | — | — | 28 | 28 | **28** |
-| Platforms | 1 | 1 | 6 | 6 | **6** |
-| AI CLIs | 2 | 2 | 4 | 4 | **4** |
+| Metric | v0.1.0 | v0.2.0 | v0.3.0 | v0.4.0 | v0.5.0 | v0.6.0 |
+|--------|--------|--------|--------|--------|--------|--------|
+| MCP Tools | 14 | 24 | 31 | 33 | 15 | **17** |
+| Tests | 68 | 122 | 135 | 174 | 183 | **208** |
+| Rust LOC | 6,400 | ~10,000 | ~12,800 | ~14,000 | ~14,200 | **~16,500** |
+| JSON Schemas | 33 | 49 | 63 | 63 | 31 | **35** |
+| Catalog Tools | — | — | 28 | 28 | 28 | **28** |
+| Platforms | 1 | 1 | 6 | 6 | 6 | **6** |
+| AI CLIs | 2 | 2 | 4 | 4 | 4 | **4** |
 
 ## Stage Progress (v0.1.0)
 
@@ -128,7 +129,7 @@ All complete: Claude Code + Gemini CLI + OpenCode + Codex auto-detection, tiered
 
 - `cargo fmt --check` — passing
 - `cargo clippy --workspace --all-targets -- -D warnings` — passing
-- `cargo test --workspace` — **183 tests passing**
+- `cargo test --workspace` — **208 tests passing**
 - `cargo build --release -p the-one-mcp --bin the-one-mcp` — passing
 - `bash scripts/release-gate.sh` — passing
 - `bash scripts/build.sh check` — full CI pipeline passing
@@ -149,6 +150,34 @@ All complete: Claude Code + Gemini CLI + OpenCode + Codex auto-detection, tiered
 - `docs.create` + `docs.update` → `docs.save` (upsert)
 - `tool.list` + `tool.suggest` + `tool.search` → `tool.find` with `mode` param
 - Estimated token savings: ~1,836 tokens per session (~52% reduction)
+
+## Multimodal + Reranking (v0.6.0) — 3 Bundles
+
+- Bundle 1: fastembed 4→5.13 migration + reranking infrastructure
+  - fastembed API drift fixed (Arc<Mutex<>> wrappers, &mut self methods)
+  - 6 previously stubbed text model variants now working
+  - Reranker model registry (`models/rerank-models.toml`)
+  - `TextRerank` via fastembed, jina-reranker-v2-base-multilingual default
+  - `reranker_enabled` + `reranker_model` + `rerank_fetch_multiplier` config fields
+  - Reranker integrated into `memory.search` via MemoryEngine
+
+- Bundle 2: Image embedding pipeline
+  - Image model registry (`models/image-models.toml`) — 5 models
+  - `ImageEmbeddingProvider` trait + `FastEmbedImageProvider` implementation
+  - Image ingest module: format validation, size limits, EXIF stripping
+  - Qdrant `the_one_images` collection with per-project isolation
+  - OCR via tesseract wrapper (`image-ocr` feature flag)
+  - Thumbnail generation via `image` crate (`image-embeddings` feature flag)
+  - 2 new MCP tools: `memory.search_images`, `memory.ingest_image`
+  - 3 new maintain actions: `images.rescan`, `images.clear`, `images.delete`
+  - Config fields: `image_embedding_enabled/model`, `image_ocr_enabled/language`, `image_thumbnail_enabled/max_px`
+  - Limits: `max_image_size_bytes`, `max_images_per_project`, `max_image_search_hits`, `image_search_score_threshold`
+  - 4 new JSON schemas (31 → 35), 25 new tests (183 → 208)
+
+- Bundle 3: Documentation + release
+  - New user guides: `docs/guides/image-search.md`, `docs/guides/reranking.md`
+  - All top-level docs updated (README, CHANGELOG, PROGRESS, CLAUDE.md, INSTALL.md, VERSION)
+  - v0.6.0 tagged and cross-platform release triggered
 
 ## What's Next
 

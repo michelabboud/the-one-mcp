@@ -2,6 +2,36 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.0] - 2026-04-05
+
+### Added
+- Cross-encoder reranking for memory.search — jina-reranker-v2-base-multilingual default
+- Image embedding and semantic search via fastembed 5.x ImageEmbedding API
+- 5 image models: Nomic Vision (default, 768d, pairs with Nomic text), CLIP ViT-B/32, Resnet50, Unicom ViT-B/16, Unicom ViT-B/32
+- OCR text extraction from images via tesseract (feature-gated)
+- Thumbnail generation for indexed images
+- 2 new MCP tools: `memory.search_images`, `memory.ingest_image`
+- 3 new `maintain` actions: `images.rescan`, `images.clear`, `images.delete`
+- 6 text model variants previously stubbed now working: BGE-M3, JinaEmbeddingsV2BaseEN, SnowflakeArcticEmbedM, AllMpnetBaseV2, EmbeddingGemma300M, SnowflakeArcticEmbedMQ
+- Image model registry: `models/image-models.toml`
+- Reranker model registry: `models/rerank-models.toml`
+- User guides: `docs/guides/image-search.md`, `docs/guides/reranking.md`
+- Config fields: `image_embedding_enabled`, `image_embedding_model`, `image_ocr_enabled`, `image_ocr_language`, `image_thumbnail_enabled`, `image_thumbnail_max_px`
+- Limits: `max_image_size_bytes`, `max_images_per_project`, `max_image_search_hits`, `image_search_score_threshold`
+- `CoreError::NotEnabled` variant for runtime feature gating
+- Feature flags: `image-embeddings`, `image-ocr`
+
+### Changed
+- **BREAKING (internal):** fastembed bumped from 4 to 5.13 — API drift fixed (Arc<Mutex<>> wrappers for &mut self on embed/rerank)
+- MCP tool count: 15 → 17
+- JSON schema count: 31 → 35
+- Test count: 183 → 208
+
+### Dependencies
+- fastembed 5.13
+- image 0.25 (optional, image-embeddings feature)
+- tesseract 0.15 (optional, image-ocr feature)
+
 ## [0.5.0] - 2026-04-05
 
 ### Changed

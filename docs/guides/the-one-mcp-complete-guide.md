@@ -18,7 +18,7 @@ It provides:
 | Crate | Responsibility |
 |-------|---------------|
 | `the-one-core` | Config layering, SQLite storage (WAL), policy engine, profiler, manifests, docs manager, configurable limits |
-| `the-one-mcp` | Async broker orchestrator, 15 MCP tool API types, JSON-RPC dispatch, transport layer (stdio/SSE/stream), CLI binary |
+| `the-one-mcp` | Async broker orchestrator, 17 MCP tool API types, JSON-RPC dispatch, transport layer (stdio/SSE/stream), CLI binary |
 | `the-one-memory` | Smart markdown chunker, embedding providers (fastembed local + OpenAI-compatible API), async Qdrant HTTP backend |
 | `the-one-router` | Rules-first request classification, OpenAI-compatible nano provider, provider pool with health tracking and 3 routing policies |
 | `the-one-registry` | Capability catalog with risk-tier filtering, visibility modes (core/project/dormant) |
@@ -64,7 +64,7 @@ The installer:
 5. Auto-detects Claude Code, Gemini CLI, OpenCode, Codex and registers the MCP
 6. Validates with a smoke test
 
-Options: `--version v0.5.0`, `--lean` (no swagger), `--local ./target/release`, `--uninstall`
+Options: `--version v0.6.0`, `--lean` (no swagger), `--local ./target/release`, `--uninstall`
 
 ### Build from Source
 
@@ -591,7 +591,7 @@ Releases are **manual only** — tagging does not auto-trigger builds. You decid
 
 ```bash
 # Trigger a release (builds 6 platform binaries on GitHub Actions)
-bash scripts/build.sh release v0.5.0
+bash scripts/build.sh release v0.6.0
 
 # Check release workflow status
 bash scripts/build.sh release --status
