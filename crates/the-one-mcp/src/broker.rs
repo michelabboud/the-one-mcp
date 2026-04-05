@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use tokio::sync::RwLock;
 use tracing::instrument;
@@ -46,7 +47,7 @@ use crate::api::{
 pub struct McpBroker {
     router: Router,
     registry: CapabilityRegistry,
-    memory_by_project: RwLock<HashMap<String, MemoryEngine>>,
+    memory_by_project: Arc<RwLock<HashMap<String, MemoryEngine>>>,
     docs_by_project: RwLock<HashMap<String, DocsManager>>,
     global_registry_path: Option<PathBuf>,
     policy: PolicyEngine,
@@ -103,7 +104,7 @@ impl McpBroker {
         Self {
             router: Router::new(true),
             registry,
-            memory_by_project: RwLock::new(HashMap::new()),
+            memory_by_project: Arc::new(RwLock::new(HashMap::new())),
             docs_by_project: RwLock::new(HashMap::new()),
             global_registry_path,
             policy,
@@ -296,8 +297,10 @@ impl McpBroker {
     /// Spawn a background file watcher task for the given project if
     /// `auto_index_enabled` is true in the project config.
     ///
-    /// The watcher logs events but defers actual re-ingestion to a future
-    /// release. Users can trigger a manual reindex with `maintain:reindex`.
+    /// When an `.md` file changes the engine calls `ingest_single_markdown` to
+    /// re-chunk and re-embed the file in place.  When a file is removed the
+    /// engine calls `remove_by_path`.  Image change events are logged but not
+    /// re-ingested automatically (deferred to v0.8.1).
     fn maybe_spawn_watcher(&self, project_root: &Path, project_id: &str) {
         let config = match AppConfig::load(project_root, RuntimeOverrides::default()) {
             Ok(c) => c,
@@ -320,6 +323,10 @@ impl McpBroker {
         let debounce_ms = config.auto_index_debounce_ms;
         let project_id = project_id.to_string();
 
+        // Clone the Arc so the spawned task can reach the per-project engines
+        let memory_by_project = Arc::clone(&self.memory_by_project);
+        let project_key = Self::project_memory_key(project_root, &project_id);
+
         match the_one_memory::watcher::spawn_watcher(
             vec![docs_path, images_path],
             extensions,
@@ -336,21 +343,62 @@ impl McpBroker {
                         if cancel.is_cancelled() {
                             break;
                         }
-                        match event {
-                            the_one_memory::watcher::WatchEvent::Upserted(path) => {
-                                tracing::info!(
-                                    "auto-index: file changed [{}] — run `maintain:reindex` \
-                                     to update the index",
-                                    path.display()
-                                );
+
+                        let path = match &event {
+                            the_one_memory::watcher::WatchEvent::Upserted(p) => p.clone(),
+                            the_one_memory::watcher::WatchEvent::Removed(p) => p.clone(),
+                        };
+
+                        let is_md = path.extension().and_then(|e| e.to_str()) == Some("md");
+                        let is_image = matches!(
+                            path.extension().and_then(|e| e.to_str()),
+                            Some("png") | Some("jpg") | Some("jpeg") | Some("webp")
+                        );
+
+                        // Acquire write lock on the memory engine for this project
+                        let mut memories = memory_by_project.write().await;
+                        if let Some(engine) = memories.get_mut(&project_key) {
+                            let result = match (&event, is_md, is_image) {
+                                (the_one_memory::watcher::WatchEvent::Upserted(p), true, _) => {
+                                    engine
+                                        .ingest_single_markdown(p)
+                                        .await
+                                        .map(|n| {
+                                            format!(
+                                                "reindexed {n} chunks from {}",
+                                                p.display()
+                                            )
+                                        })
+                                }
+                                (the_one_memory::watcher::WatchEvent::Removed(p), _, _) => {
+                                    engine
+                                        .remove_by_path(p)
+                                        .await
+                                        .map(|n| {
+                                            format!("removed {n} chunks for {}", p.display())
+                                        })
+                                }
+                                (
+                                    the_one_memory::watcher::WatchEvent::Upserted(p),
+                                    _,
+                                    true,
+                                ) => {
+                                    // Image auto-reindex deferred to v0.8.1
+                                    Ok(format!(
+                                        "image change detected (manual reindex needed): {}",
+                                        p.display()
+                                    ))
+                                }
+                                _ => continue,
+                            };
+                            match result {
+                                Ok(msg) => tracing::info!("auto-index: {msg}"),
+                                Err(e) => tracing::warn!("auto-index failed: {e}"),
                             }
-                            the_one_memory::watcher::WatchEvent::Removed(path) => {
-                                tracing::info!(
-                                    "auto-index: file removed [{}] — run `maintain:reindex` \
-                                     to update the index",
-                                    path.display()
-                                );
-                            }
+                        } else {
+                            tracing::debug!(
+                                "auto-index: no engine loaded for project {project_id}, skipping"
+                            );
                         }
                     }
                 });
