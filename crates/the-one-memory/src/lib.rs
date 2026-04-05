@@ -6,6 +6,7 @@ pub mod image_ingest;
 pub mod models_registry;
 pub mod qdrant;
 pub mod reranker;
+pub mod thumbnail;
 
 use std::collections::HashMap;
 use std::fs;
