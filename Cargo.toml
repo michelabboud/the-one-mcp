@@ -31,3 +31,6 @@ toml = "0.8"
 clap = { version = "4", features = ["derive"] }
 image = "0.25"
 tesseract = "0.15"
+notify = "6.1"
+notify-debouncer-mini = "0.4"
+tokio-util = { version = "0.7", features = ["rt"] }

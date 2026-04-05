@@ -22,6 +22,9 @@ tracing.workspace = true
 toml = { workspace = true }
 image = { workspace = true, optional = true }
 tesseract = { workspace = true, optional = true }
+notify = { workspace = true }
+notify-debouncer-mini = { workspace = true }
+tokio-util = { workspace = true }
 
 [dev-dependencies]
 httpmock = "0.7"
