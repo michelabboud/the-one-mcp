@@ -3123,4 +3123,75 @@ mod tests {
         let result = broker.image_search(req).await;
         assert!(result.is_err());
     }
+
+    /// Integration test: watcher detects a file write and auto-reindexes it.
+    ///
+    /// The watcher runs in a background task with a debounce window so this
+    /// test polls the engine state.  Marked `#[ignore]` because it is
+    /// timing-sensitive (inotify debounce) and can be flaky in heavily-loaded
+    /// CI containers.  Run manually with:
+    ///   `cargo test -p the-one-mcp watcher_auto_reindex -- --ignored --nocapture`
+    #[ignore]
+    #[tokio::test]
+    async fn test_watcher_auto_reindex_on_file_change() {
+        // Uses the default embedding model (all-MiniLM-L6-v2 via env or fallback)
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().to_path_buf();
+        let docs_dir = root.join(".the-one").join("docs");
+        fs::create_dir_all(&docs_dir).expect("docs dir");
+
+        // Write config.json enabling auto-indexing with a short debounce
+        let config_path = root.join(".the-one").join("config.json");
+        fs::write(
+            &config_path,
+            r#"{"auto_index_enabled":true,"auto_index_debounce_ms":200}"#,
+        )
+        .expect("config write");
+
+        // Ingest an initial file — this also spawns the watcher
+        let initial_doc = docs_dir.join("notes.md");
+        fs::write(&initial_doc, "# Initial\nOriginal content.").expect("initial doc");
+
+        let broker = McpBroker::new();
+        broker
+            .ingest_docs(&root, "watcher-test", &docs_dir)
+            .await
+            .expect("initial ingest");
+
+        // Confirm initial content is indexed
+        {
+            let memories = broker.memory_by_project.read().await;
+            let key = McpBroker::project_memory_key(&root, "watcher-test");
+            let engine = memories.get(&key).expect("engine should exist");
+            let all: String = engine.docs_list().join("");
+            assert!(all.contains("notes.md"), "notes.md should be indexed");
+        }
+
+        // Overwrite the file with new content — the watcher should pick it up
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        fs::write(&initial_doc, "# Updated\nCompletely new content.").expect("updated doc");
+
+        // Poll for up to 5 seconds until the new content appears
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            let memories = broker.memory_by_project.read().await;
+            let key = McpBroker::project_memory_key(&root, "watcher-test");
+            if let Some(engine) = memories.get(&key) {
+                let all_content: String =
+                    engine.docs_list().iter().flat_map(|p| engine.docs_get(p)).collect();
+                if all_content.contains("Completely new content") {
+                    // Success — also verify old content is gone
+                    assert!(
+                        !all_content.contains("Original content"),
+                        "old content should be replaced"
+                    );
+                    return;
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!("watcher did not re-index the changed file within 5 seconds");
+            }
+        }
+    }
 }
