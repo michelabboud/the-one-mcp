@@ -299,8 +299,9 @@ impl McpBroker {
     ///
     /// When an `.md` file changes the engine calls `ingest_single_markdown` to
     /// re-chunk and re-embed the file in place.  When a file is removed the
-    /// engine calls `remove_by_path`.  Image change events are logged but not
-    /// re-ingested automatically (deferred to v0.8.1).
+    /// engine calls `remove_by_path`.  For image files, the watcher calls the
+    /// standalone image ingest/remove helpers so the Qdrant image collection
+    /// stays in sync as well (v0.8.2).
     fn maybe_spawn_watcher(&self, project_root: &Path, project_id: &str) {
         let config = match AppConfig::load(project_root, RuntimeOverrides::default()) {
             Ok(c) => c,
@@ -322,6 +323,7 @@ impl McpBroker {
             .collect::<Vec<_>>();
         let debounce_ms = config.auto_index_debounce_ms;
         let project_id = project_id.to_string();
+        let project_root_owned = project_root.to_path_buf();
 
         // Clone the Arc so the spawned task can reach the per-project engines
         let memory_by_project = Arc::clone(&self.memory_by_project);
@@ -355,36 +357,85 @@ impl McpBroker {
                             Some("png") | Some("jpg") | Some("jpeg") | Some("webp")
                         );
 
-                        // Acquire write lock on the memory engine for this project
-                        let mut memories = memory_by_project.write().await;
-                        if let Some(engine) = memories.get_mut(&project_key) {
-                            let result = match (&event, is_md, is_image) {
-                                (the_one_memory::watcher::WatchEvent::Upserted(p), true, _) => {
-                                    engine.ingest_single_markdown(p).await.map(|n| {
-                                        format!("reindexed {n} chunks from {}", p.display())
-                                    })
+                        // Markdown events go through the MemoryEngine (write lock on
+                        // memory_by_project). Image events go through the standalone
+                        // helpers and do not touch the text MemoryEngine.
+                        if is_md {
+                            let mut memories = memory_by_project.write().await;
+                            if let Some(engine) = memories.get_mut(&project_key) {
+                                let result = match &event {
+                                    the_one_memory::watcher::WatchEvent::Upserted(p) => {
+                                        engine.ingest_single_markdown(p).await.map(|n| {
+                                            format!("reindexed {n} chunks from {}", p.display())
+                                        })
+                                    }
+                                    the_one_memory::watcher::WatchEvent::Removed(p) => engine
+                                        .remove_by_path(p)
+                                        .await
+                                        .map(|n| format!("removed {n} chunks for {}", p.display())),
+                                };
+                                match result {
+                                    Ok(msg) => tracing::info!("auto-index: {msg}"),
+                                    Err(e) => tracing::warn!("auto-index failed: {e}"),
                                 }
-                                (the_one_memory::watcher::WatchEvent::Removed(p), _, _) => engine
-                                    .remove_by_path(p)
-                                    .await
-                                    .map(|n| format!("removed {n} chunks for {}", p.display())),
-                                (the_one_memory::watcher::WatchEvent::Upserted(p), _, true) => {
-                                    // Image auto-reindex deferred to v0.8.1
-                                    Ok(format!(
-                                        "image change detected (manual reindex needed): {}",
-                                        p.display()
-                                    ))
-                                }
-                                _ => continue,
-                            };
-                            match result {
-                                Ok(msg) => tracing::info!("auto-index: {msg}"),
-                                Err(e) => tracing::warn!("auto-index failed: {e}"),
+                            } else {
+                                tracing::debug!(
+                                    "auto-index: no engine loaded for project {project_id}, skipping"
+                                );
                             }
-                        } else {
-                            tracing::debug!(
-                                "auto-index: no engine loaded for project {project_id}, skipping"
-                            );
+                        } else if is_image {
+                            // Re-load config per event so watcher picks up config edits
+                            let cfg = match AppConfig::load(
+                                &project_root_owned,
+                                RuntimeOverrides::default(),
+                            ) {
+                                Ok(c) => c,
+                                Err(e) => {
+                                    tracing::warn!("auto-index (image): config reload failed: {e}");
+                                    continue;
+                                }
+                            };
+
+                            #[cfg(feature = "image-embeddings")]
+                            {
+                                let result = match &event {
+                                    the_one_memory::watcher::WatchEvent::Upserted(p) => {
+                                        image_ingest_standalone(&project_id, p, None, &cfg)
+                                            .await
+                                            .map(|resp| {
+                                                format!(
+                                                    "reindexed image {} (dims={}, ocr={}, thumb={})",
+                                                    resp.path,
+                                                    resp.dims,
+                                                    resp.ocr_extracted,
+                                                    resp.thumbnail_generated
+                                                )
+                                            })
+                                    }
+                                    the_one_memory::watcher::WatchEvent::Removed(p) => {
+                                        image_remove_standalone(
+                                            &project_id,
+                                            &p.to_string_lossy(),
+                                            &cfg,
+                                        )
+                                        .await
+                                        .map(|()| {
+                                            format!("removed image {}", p.display())
+                                        })
+                                    }
+                                };
+                                match result {
+                                    Ok(msg) => tracing::info!("auto-index: {msg}"),
+                                    Err(e) => tracing::warn!("auto-index (image) failed: {e}"),
+                                }
+                            }
+                            #[cfg(not(feature = "image-embeddings"))]
+                            {
+                                let _ = cfg;
+                                tracing::debug!(
+                                    "auto-index: image event ignored — image-embeddings feature disabled"
+                                );
+                            }
                         }
                     }
                 });
@@ -1879,184 +1930,16 @@ impl McpBroker {
         &self,
         request: crate::api::ImageIngestRequest,
     ) -> Result<crate::api::ImageIngestResponse, CoreError> {
-        use the_one_memory::image_embeddings::{FastEmbedImageProvider, ImageEmbeddingProvider};
-        use the_one_memory::image_ingest::DEFAULT_IMAGE_EXTENSIONS;
-        use the_one_memory::qdrant::{AsyncQdrantBackend, ImagePoint, QdrantOptions};
-
         let project_root = PathBuf::from(&request.project_root);
         let config = AppConfig::load(&project_root, RuntimeOverrides::default())?;
 
-        if !config.image_embedding_enabled {
-            return Err(CoreError::NotEnabled(
-                "image embeddings not enabled".to_string(),
-            ));
-        }
-
-        // Validate path
         let image_path = if std::path::Path::new(&request.path).is_absolute() {
             PathBuf::from(&request.path)
         } else {
             project_root.join(&request.path)
         };
 
-        if !image_path.exists() {
-            return Err(CoreError::InvalidProjectConfig(format!(
-                "image path does not exist: {}",
-                image_path.display()
-            )));
-        }
-
-        // Check extension
-        let ext = image_path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
-        if !DEFAULT_IMAGE_EXTENSIONS.contains(&ext.as_str()) {
-            return Err(CoreError::InvalidProjectConfig(format!(
-                "unsupported image extension: .{ext}"
-            )));
-        }
-
-        // Check file size
-        let metadata = std::fs::metadata(&image_path)?;
-        let file_size = metadata.len();
-        if file_size as usize > config.limits.max_image_size_bytes {
-            return Err(CoreError::InvalidProjectConfig(format!(
-                "image file too large: {} bytes (limit: {})",
-                file_size, config.limits.max_image_size_bytes
-            )));
-        }
-
-        // Compute SHA-256 hash for deduplication id
-        let file_bytes = std::fs::read(&image_path)?;
-        let hash = {
-            use sha2::{Digest, Sha256};
-            let mut hasher = Sha256::new();
-            hasher.update(&file_bytes);
-            let result = hasher.finalize();
-            result
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<String>()
-        };
-
-        let mtime_epoch = metadata
-            .modified()
-            .ok()
-            .and_then(|t| {
-                t.duration_since(std::time::UNIX_EPOCH)
-                    .ok()
-                    .map(|d| d.as_secs() as i64)
-            })
-            .unwrap_or(0);
-
-        // Build image embedding provider
-        let provider = tokio::task::spawn_blocking({
-            let model_name = config.image_embedding_model.clone();
-            move || FastEmbedImageProvider::new(&model_name)
-        })
-        .await
-        .map_err(|e| CoreError::Embedding(format!("join error: {e}")))?
-        .map_err(CoreError::Embedding)?;
-
-        let dims = provider.dimensions();
-        let vector = provider
-            .embed_image(&image_path)
-            .await
-            .map_err(CoreError::Embedding)?;
-
-        // OCR extraction (feature-gated)
-        let ocr_text: Option<String>;
-        #[cfg(feature = "image-ocr")]
-        {
-            ocr_text = if config.image_ocr_enabled {
-                match the_one_memory::ocr::extract_text(&image_path, &config.image_ocr_language) {
-                    Ok(text) if !text.trim().is_empty() => Some(text),
-                    _ => None,
-                }
-            } else {
-                None
-            };
-        }
-        #[cfg(not(feature = "image-ocr"))]
-        {
-            ocr_text = None;
-        }
-        let ocr_extracted = ocr_text.is_some();
-
-        // Thumbnail generation (feature-gated via image-embeddings which pulls in `image` crate)
-        let thumbnail_path: Option<String>;
-        let thumbnail_generated: bool;
-
-        let thumbnails_dir = config.project_state_dir.join("thumbnails");
-        std::fs::create_dir_all(&thumbnails_dir)?;
-        let thumb_file = thumbnails_dir.join(format!("{hash}.webp"));
-
-        if config.image_thumbnail_enabled {
-            match the_one_memory::thumbnail::generate_thumbnail(
-                &image_path,
-                &thumb_file,
-                config.image_thumbnail_max_px,
-            ) {
-                Ok(()) => {
-                    thumbnail_path = Some(thumb_file.to_string_lossy().to_string());
-                    thumbnail_generated = true;
-                }
-                Err(e) => {
-                    tracing::warn!("thumbnail generation failed for {:?}: {e}", image_path);
-                    thumbnail_path = None;
-                    thumbnail_generated = false;
-                }
-            }
-        } else {
-            thumbnail_path = None;
-            thumbnail_generated = false;
-        }
-
-        // Build Qdrant backend and upsert
-        let qdrant = AsyncQdrantBackend::new(
-            &config.qdrant_url,
-            "images",
-            QdrantOptions {
-                api_key: config.qdrant_api_key.clone(),
-                ca_cert_path: config
-                    .qdrant_ca_cert_path
-                    .as_ref()
-                    .map(|p| p.to_string_lossy().to_string()),
-                tls_insecure: config.qdrant_tls_insecure,
-            },
-        )
-        .map_err(CoreError::Embedding)?;
-
-        // Create collection if needed
-        qdrant
-            .create_image_collection(&request.project_id, dims)
-            .await
-            .map_err(CoreError::Embedding)?;
-
-        let point = ImagePoint {
-            id: hash,
-            vector,
-            source_path: image_path.to_string_lossy().to_string(),
-            file_size,
-            mtime_epoch,
-            caption: request.caption,
-            ocr_text,
-            thumbnail_path,
-        };
-
-        qdrant
-            .upsert_image_points(&request.project_id, vec![point])
-            .await
-            .map_err(CoreError::Embedding)?;
-
-        Ok(crate::api::ImageIngestResponse {
-            path: image_path.to_string_lossy().to_string(),
-            dims,
-            ocr_extracted,
-            thumbnail_generated,
-        })
+        image_ingest_standalone(&request.project_id, &image_path, request.caption, &config).await
     }
 
     // -----------------------------------------------------------------------
@@ -2167,26 +2050,7 @@ impl McpBroker {
         source_path: &str,
     ) -> Result<serde_json::Value, CoreError> {
         let config = AppConfig::load(project_root, RuntimeOverrides::default())?;
-
-        let qdrant = the_one_memory::qdrant::AsyncQdrantBackend::new(
-            &config.qdrant_url,
-            "images",
-            the_one_memory::qdrant::QdrantOptions {
-                api_key: config.qdrant_api_key.clone(),
-                ca_cert_path: config
-                    .qdrant_ca_cert_path
-                    .as_ref()
-                    .map(|p| p.to_string_lossy().to_string()),
-                tls_insecure: config.qdrant_tls_insecure,
-            },
-        )
-        .map_err(CoreError::Embedding)?;
-
-        qdrant
-            .delete_image_by_source_path(project_id, source_path)
-            .await
-            .map_err(CoreError::Embedding)?;
-
+        image_remove_standalone(project_id, source_path, &config).await?;
         Ok(serde_json::json!({ "deleted": true, "path": source_path }))
     }
 
@@ -2252,6 +2116,223 @@ impl McpBroker {
             path: path.display().to_string(),
         })
     }
+}
+
+// ---------------------------------------------------------------------------
+// Standalone image ingest / remove helpers
+//
+// These functions are extracted from `McpBroker::_image_ingest_impl` and
+// `McpBroker::image_delete` so they can be called from contexts that don't
+// have a `&McpBroker` — specifically the file-watcher task spawned by
+// `maybe_spawn_watcher`, which only carries owned clones of the data it
+// needs (no `self`).
+//
+// The broker methods now delegate to these helpers so there is a single
+// implementation of the image ingest/remove pipeline.
+// ---------------------------------------------------------------------------
+
+/// Ingest a single image file — embed, OCR (if enabled), thumbnail (if
+/// enabled), and upsert into the project's Qdrant image collection.
+///
+/// This is a free function so it can be called from a spawned tokio task
+/// that doesn't have access to the broker. The caller must provide the
+/// loaded `AppConfig` for the project.
+#[cfg(feature = "image-embeddings")]
+pub(crate) async fn image_ingest_standalone(
+    project_id: &str,
+    image_path: &Path,
+    caption: Option<String>,
+    config: &AppConfig,
+) -> Result<crate::api::ImageIngestResponse, CoreError> {
+    use the_one_memory::image_embeddings::{FastEmbedImageProvider, ImageEmbeddingProvider};
+    use the_one_memory::image_ingest::DEFAULT_IMAGE_EXTENSIONS;
+    use the_one_memory::qdrant::{AsyncQdrantBackend, ImagePoint, QdrantOptions};
+
+    if !config.image_embedding_enabled {
+        return Err(CoreError::NotEnabled(
+            "image embeddings not enabled".to_string(),
+        ));
+    }
+
+    if !image_path.exists() {
+        return Err(CoreError::InvalidProjectConfig(format!(
+            "image path does not exist: {}",
+            image_path.display()
+        )));
+    }
+
+    // Check extension
+    let ext = image_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !DEFAULT_IMAGE_EXTENSIONS.contains(&ext.as_str()) {
+        return Err(CoreError::InvalidProjectConfig(format!(
+            "unsupported image extension: .{ext}"
+        )));
+    }
+
+    // Check file size
+    let metadata = std::fs::metadata(image_path)?;
+    let file_size = metadata.len();
+    if file_size as usize > config.limits.max_image_size_bytes {
+        return Err(CoreError::InvalidProjectConfig(format!(
+            "image file too large: {} bytes (limit: {})",
+            file_size, config.limits.max_image_size_bytes
+        )));
+    }
+
+    // SHA-256 hash for deduplication
+    let file_bytes = std::fs::read(image_path)?;
+    let hash = {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(&file_bytes);
+        let result = hasher.finalize();
+        result
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    };
+
+    let mtime_epoch = metadata
+        .modified()
+        .ok()
+        .and_then(|t| {
+            t.duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .map(|d| d.as_secs() as i64)
+        })
+        .unwrap_or(0);
+
+    // Build image embedding provider (ONNX model load happens here)
+    let provider = tokio::task::spawn_blocking({
+        let model_name = config.image_embedding_model.clone();
+        move || FastEmbedImageProvider::new(&model_name)
+    })
+    .await
+    .map_err(|e| CoreError::Embedding(format!("join error: {e}")))?
+    .map_err(CoreError::Embedding)?;
+
+    let dims = provider.dimensions();
+    let vector = provider
+        .embed_image(image_path)
+        .await
+        .map_err(CoreError::Embedding)?;
+
+    // OCR extraction (feature-gated)
+    let ocr_text: Option<String>;
+    #[cfg(feature = "image-ocr")]
+    {
+        ocr_text = if config.image_ocr_enabled {
+            match the_one_memory::ocr::extract_text(image_path, &config.image_ocr_language) {
+                Ok(text) if !text.trim().is_empty() => Some(text),
+                _ => None,
+            }
+        } else {
+            None
+        };
+    }
+    #[cfg(not(feature = "image-ocr"))]
+    {
+        ocr_text = None;
+    }
+    let ocr_extracted = ocr_text.is_some();
+
+    // Thumbnail generation
+    let thumbnails_dir = config.project_state_dir.join("thumbnails");
+    std::fs::create_dir_all(&thumbnails_dir)?;
+    let thumb_file = thumbnails_dir.join(format!("{hash}.webp"));
+
+    let (thumbnail_path, thumbnail_generated) = if config.image_thumbnail_enabled {
+        match the_one_memory::thumbnail::generate_thumbnail(
+            image_path,
+            &thumb_file,
+            config.image_thumbnail_max_px,
+        ) {
+            Ok(()) => (Some(thumb_file.to_string_lossy().to_string()), true),
+            Err(e) => {
+                tracing::warn!("thumbnail generation failed for {:?}: {e}", image_path);
+                (None, false)
+            }
+        }
+    } else {
+        (None, false)
+    };
+
+    // Qdrant upsert
+    let qdrant = AsyncQdrantBackend::new(
+        &config.qdrant_url,
+        "images",
+        QdrantOptions {
+            api_key: config.qdrant_api_key.clone(),
+            ca_cert_path: config
+                .qdrant_ca_cert_path
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string()),
+            tls_insecure: config.qdrant_tls_insecure,
+        },
+    )
+    .map_err(CoreError::Embedding)?;
+
+    qdrant
+        .create_image_collection(project_id, dims)
+        .await
+        .map_err(CoreError::Embedding)?;
+
+    let point = ImagePoint {
+        id: hash,
+        vector,
+        source_path: image_path.to_string_lossy().to_string(),
+        file_size,
+        mtime_epoch,
+        caption,
+        ocr_text,
+        thumbnail_path,
+    };
+
+    qdrant
+        .upsert_image_points(project_id, vec![point])
+        .await
+        .map_err(CoreError::Embedding)?;
+
+    Ok(crate::api::ImageIngestResponse {
+        path: image_path.to_string_lossy().to_string(),
+        dims,
+        ocr_extracted,
+        thumbnail_generated,
+    })
+}
+
+/// Remove a single image from the project's Qdrant image collection by
+/// its source path. Used by the file watcher on `Removed` events and by
+/// the `image_delete` API.
+pub(crate) async fn image_remove_standalone(
+    project_id: &str,
+    source_path: &str,
+    config: &AppConfig,
+) -> Result<(), CoreError> {
+    let qdrant = the_one_memory::qdrant::AsyncQdrantBackend::new(
+        &config.qdrant_url,
+        "images",
+        the_one_memory::qdrant::QdrantOptions {
+            api_key: config.qdrant_api_key.clone(),
+            ca_cert_path: config
+                .qdrant_ca_cert_path
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string()),
+            tls_insecure: config.qdrant_tls_insecure,
+        },
+    )
+    .map_err(CoreError::Embedding)?;
+
+    qdrant
+        .delete_image_by_source_path(project_id, source_path)
+        .await
+        .map_err(CoreError::Embedding)?;
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -3180,6 +3261,159 @@ mod tests {
             }
             if std::time::Instant::now() >= deadline {
                 panic!("watcher did not re-index the changed file within 5 seconds");
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 1.1 (v0.8.2): Image auto-reindex helpers
+    // -----------------------------------------------------------------------
+
+    /// Unit test: the standalone ingest helper fast-fails with `NotEnabled`
+    /// when `image_embedding_enabled = false` (the default). Exercises the
+    /// extraction without requiring Qdrant or an ONNX model.
+    #[tokio::test]
+    #[cfg(feature = "image-embeddings")]
+    async fn test_image_ingest_standalone_rejects_when_disabled() {
+        use the_one_core::config::{AppConfig, RuntimeOverrides};
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().to_path_buf();
+        fs::create_dir_all(root.join(".the-one")).expect("dotdir");
+        // image_embedding_enabled defaults to false — do not override
+        fs::write(
+            root.join(".the-one").join("config.json"),
+            r#"{"auto_index_enabled":false}"#,
+        )
+        .expect("config write");
+
+        let config = AppConfig::load(&root, RuntimeOverrides::default()).expect("config load");
+        assert!(!config.image_embedding_enabled);
+
+        let fake_image = temp.path().join("nope.png");
+        let result = super::image_ingest_standalone("proj", &fake_image, None, &config).await;
+        assert!(result.is_err(), "expected error when disabled");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.to_lowercase().contains("not enabled")
+                || err.to_lowercase().contains("image embeddings"),
+            "expected NotEnabled error, got: {err}"
+        );
+    }
+
+    /// Unit test: the standalone ingest helper rejects a path that does not
+    /// exist on disk, even when image embeddings are enabled in config.
+    ///
+    /// Uses a config with `image_embedding_enabled = true` so we get past
+    /// the NotEnabled guard and into the existence check.
+    #[tokio::test]
+    #[cfg(feature = "image-embeddings")]
+    async fn test_image_ingest_standalone_rejects_missing_path() {
+        use the_one_core::config::{AppConfig, RuntimeOverrides};
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().to_path_buf();
+        fs::create_dir_all(root.join(".the-one")).expect("dotdir");
+        fs::write(
+            root.join(".the-one").join("config.json"),
+            r#"{"image_embedding_enabled":true}"#,
+        )
+        .expect("config write");
+
+        let config = AppConfig::load(&root, RuntimeOverrides::default()).expect("config load");
+        assert!(config.image_embedding_enabled);
+
+        let missing = temp.path().join("definitely_does_not_exist.png");
+        let result = super::image_ingest_standalone("proj", &missing, None, &config).await;
+        assert!(result.is_err(), "expected error for missing path");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("does not exist") || err.contains("image path"),
+            "expected missing-path error, got: {err}"
+        );
+    }
+
+    /// Integration test: watcher auto-reindexes image file changes.
+    ///
+    /// Like `test_watcher_auto_reindex_on_file_change`, this is marked
+    /// `#[ignore]` because it requires:
+    ///   - A running Qdrant instance at the configured URL
+    ///   - Downloading the image embedding ONNX model (~200MB, first run)
+    ///   - Timing tolerance for inotify debounce
+    ///
+    /// Run manually with:
+    ///   `cargo test -p the-one-mcp watcher_auto_reindex_image -- --ignored --nocapture`
+    #[ignore]
+    #[tokio::test]
+    #[cfg(feature = "image-embeddings")]
+    async fn test_watcher_auto_reindex_image_upsert() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().to_path_buf();
+        let images_dir = root.join(".the-one").join("images");
+        fs::create_dir_all(&images_dir).expect("images dir");
+
+        let config_path = root.join(".the-one").join("config.json");
+        fs::write(
+            &config_path,
+            r#"{"auto_index_enabled":true,"auto_index_debounce_ms":200,"image_embedding_enabled":true,"image_thumbnail_enabled":false}"#,
+        )
+        .expect("config write");
+
+        // Create a minimal valid PNG (1x1 red pixel) so the embedder accepts it.
+        // This is a real 67-byte PNG file header + IHDR + IDAT + IEND.
+        let png_1x1_red: &[u8] = &[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, // signature
+            0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52, // IHDR length + tag
+            0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, // 1x1
+            0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53, 0xDE, // bit depth / color / CRC
+            0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54, // IDAT length + tag
+            0x08, 0x99, 0x63, 0xF8, 0xCF, 0xC0, 0x00, 0x00, 0x00, 0x03, 0x00, 0x01, 0x5C, 0xCD,
+            0xFF, 0x69, // CRC
+            0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82, // IEND
+        ];
+
+        // Ingest an initial markdown file to spawn the watcher via ingest_docs.
+        let docs_dir = root.join(".the-one").join("docs");
+        fs::create_dir_all(&docs_dir).expect("docs dir");
+        fs::write(docs_dir.join("seed.md"), "# Seed\n").expect("seed md");
+
+        let broker = McpBroker::new();
+        broker
+            .ingest_docs(&root, "watcher-img-test", &docs_dir)
+            .await
+            .expect("initial ingest");
+
+        // Give the watcher a moment to spin up, then drop an image into the watched dir.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let img_path = images_dir.join("pixel.png");
+        fs::write(&img_path, png_1x1_red).expect("png write");
+
+        // Poll the Qdrant image collection for up to 30s (first run downloads ONNX).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            // Search the image collection for our path — if present, the
+            // watcher completed the ingest.
+            let search = broker
+                .image_search(crate::api::ImageSearchRequest {
+                    project_root: root.display().to_string(),
+                    project_id: "watcher-img-test".to_string(),
+                    query: Some("red pixel".to_string()),
+                    image_base64: None,
+                    top_k: 5,
+                })
+                .await;
+            if let Ok(resp) = search {
+                if resp
+                    .hits
+                    .iter()
+                    .any(|h| h.source_path.contains("pixel.png"))
+                {
+                    return;
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!("watcher did not re-index the image within 30 seconds");
             }
         }
     }

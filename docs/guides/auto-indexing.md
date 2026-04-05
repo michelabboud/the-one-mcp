@@ -11,13 +11,14 @@ When `auto_index_enabled` is true, the-one-mcp starts a background tokio task at
 
 Whenever a file is created, modified, or deleted in these directories, the watcher detects the event. A configurable debounce timer (default 2000ms) prevents rapid bursts of events from triggering redundant processing — editor save operations often generate multiple filesystem events in quick succession, and debouncing waits until the activity settles.
 
-### Current Scope (v0.8.0)
+### Current Scope (v0.8.2)
 
-In v0.8.0, the watcher **automatically re-ingests changed markdown files** into Qdrant. When a `.md` file is created or modified, the broker runs `ingest_single_markdown` on it. When a `.md` file is deleted, the broker calls `remove_by_path` to remove its chunks from the index.
+As of v0.8.2, the watcher **automatically re-ingests changed markdown files AND changed image files** into Qdrant.
 
-**Image auto-reindex** (`.png`, `.jpg`, `.jpeg`, `.webp`) still logs events only. Automatic image re-ingestion is planned for v0.8.1.
+- **Markdown (`.md`)** — ingested via `ingest_single_markdown` on upsert, removed via `remove_by_path` on delete (shipped in v0.8.0).
+- **Images (`.png`, `.jpg`, `.jpeg`, `.webp`)** — ingested via the standalone image pipeline (embed → optional OCR → optional thumbnail → Qdrant image collection upsert) on upsert, and deleted from the image collection by source path on remove (new in v0.8.2).
 
-**What this means in practice:** changes to your docs are now reflected in search results automatically after the debounce settles. You no longer need to run `maintain (action: reindex)` after every doc edit when auto-indexing is enabled.
+**What this means in practice:** changes to your docs AND your images are now reflected in search results automatically after the debounce settles. You no longer need to run `maintain (action: reindex)` or `maintain (action: images.rescan)` for routine edits when auto-indexing is enabled.
 
 ---
 
@@ -149,20 +150,19 @@ In practice, the watcher has negligible CPU and battery impact during normal dev
 
 ## Current Limitations
 
-- **No image auto-reingestion yet** — image events (`.png`, `.jpg`, `.jpeg`, `.webp`) are detected and logged but not automatically re-ingested into Qdrant. This is planned for v0.8.1.
 - **No recursive directory watching** — only the top-level docs/ and images/ directories are watched. Subdirectory support is planned.
 - **No watch on project source files** — if you want to index your `src/` or other directories, you still need to use `docs.save` or `maintain reindex` manually.
 - **One watcher per active project** — the watcher is started when a project is initialized via `setup (action: init)`. Projects that have not been initialized in the current server session do not have an active watcher.
 
 ---
 
-## Recommended Workflow (v0.8.0)
+## Recommended Workflow (v0.8.2)
 
-With auto-reingestion live for markdown files:
+With auto-reingestion live for both markdown and images:
 
 1. Enable `auto_index_enabled: true` in your config.
 2. Edit or create files in `.the-one/docs/` — the watcher re-ingests them automatically after the debounce settles.
-3. For images, still run `maintain (action: reindex)` manually after adding or changing image files (until v0.8.1).
+3. Drop images into `.the-one/images/` — the watcher embeds them, generates OCR (if enabled) and thumbnails (if enabled), and upserts them into the Qdrant image collection.
 
 ---
 
@@ -197,7 +197,14 @@ Ensure the project was initialized (`setup (action: init)` was called in the cur
 
 ### Image events fire but images are not re-indexed
 
-This is expected in v0.8.0. Image event detection works; automatic image re-ingestion is planned for v0.8.1. Run `maintain (action: images.rescan)` manually to update image search.
+As of v0.8.2, image auto-reindex is live. If the watcher logs show `image change detected` messages but the image is not searchable, check:
+
+1. `image_embedding_enabled: true` is set in the resolved config (`config (action: export)`).
+2. The `image-embeddings` feature was compiled in (default on for full builds, off for lean Intel Mac builds).
+3. The image file extension is one of `.png`, `.jpg`, `.jpeg`, `.webp`.
+4. The image file is under `limits.max_image_size_bytes`.
+
+As a fallback, `maintain (action: images.rescan)` still works for bulk reingestion.
 
 ### High debounce latency during saves
 
@@ -223,4 +230,9 @@ If the watcher background task panics or is dropped, the server continues runnin
 - Watcher task now calls `MemoryEngine::ingest_single_markdown` on `Create`/`Modify` events for `.md` files
 - Watcher task now calls `MemoryEngine::remove_by_path` on `Remove` events for `.md` files
 - `MemoryEngine` HashMap promoted to `Arc<RwLock<...>>` in the broker, allowing the watcher's spawned tokio task to hold its own reference
-- Image auto-reindex still deferred (v0.8.1)
+
+## Changes in v0.8.2
+
+- Watcher task now calls the standalone `image_ingest_standalone` helper on image upsert events, running the full image pipeline (embed → optional OCR → optional thumbnail → Qdrant image collection upsert).
+- Watcher task now calls `image_remove_standalone` on image delete events, removing entries from the image collection by source path.
+- Image ingest/remove code extracted from `McpBroker` methods into free functions so the watcher's spawned tokio task can call them without needing `&self`.

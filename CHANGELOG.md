@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.8.2] - 2026-04-05
+
+### Added
+- **Image auto-reindex** — the file watcher now re-ingests changed image files (PNG/JPG/JPEG/WebP) into the Qdrant image collection, completing the watcher auto-reindex feature that landed for markdown in v0.8.0. Upserted images go through the full pipeline (embed → optional OCR → optional thumbnail → Qdrant upsert); removed images are deleted from the image collection by source path.
+- **Broker standalone helpers** — `image_ingest_standalone` and `image_remove_standalone` free functions in `broker.rs`. These extract the image ingest/remove pipeline from `McpBroker` methods so they can be called from the watcher's spawned tokio task without needing `&self`. The existing `McpBroker::image_ingest` / `McpBroker::image_delete` methods now delegate to these helpers.
+
+### Fixed
+- **Watcher routing** — markdown and image events are no longer processed under the same `memory_by_project` write lock. Image events reload config per-event so the watcher picks up live config edits (e.g., toggling `image_embedding_enabled`).
+
+### Tests
+- +2 unit tests for `image_ingest_standalone` (NotEnabled guard, missing-path guard)
+- +1 `#[ignore]` integration test for the watcher image upsert path
+
+### Dependencies
+- No changes
+
 ## [0.8.1] - 2026-04-05
 
 ### Changed

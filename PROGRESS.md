@@ -1,10 +1,10 @@
 # Progress Report
 
-## Current Version: v0.8.0
+## Current Version: v0.8.2
 
 ## Overall Status
 
-All planned stages complete. Eight major releases shipped:
+All planned stages complete. Nine major releases shipped:
 - **v0.1.0** — Initial workspace: 8 crates, 14 MCP tools, stub implementations
 - **v0.2.0** — Production overhaul: async broker, real embeddings, 3 transports, 24 tools
 - **v0.3.0** — Tool catalog: SQLite + Qdrant semantic search, tool lifecycle, 31 tools
@@ -12,21 +12,23 @@ All planned stages complete. Eight major releases shipped:
 - **v0.5.0** — Tool consolidation: 33→15 tools (~52% token savings), multiplexed admin, merged work tools
 - **v0.6.0** — Multimodal: image embeddings, OCR, reranking (fastembed 5.x), 17 tools, 208 tests
 - **v0.7.0** — Hybrid search (dense+sparse), file watcher, admin UI image gallery, screenshot image search, 234 tests
-- **v0.8.0** — Watcher auto-reindex (real re-ingestion), code-aware chunker (5 languages), extended ChunkMeta, 272 tests
+- **v0.8.0** — Watcher auto-reindex (markdown), code-aware chunker (5 languages), extended ChunkMeta, 272 tests
+- **v0.8.1** — Documentation refresh: all guides + root docs audited for v0.8.0 accuracy
+- **v0.8.2** — Image auto-reindex: watcher now re-ingests image upserts/deletes, standalone helpers, 274 tests (with image-embeddings)
 
-Build/test gates: all green. 272 tests, 0 failures.
+Build/test gates: all green. 272 tests (default), 274 tests (with `image-embeddings` feature), 0 failures.
 
 ## Stats
 
-| Metric | v0.1.0 | v0.2.0 | v0.3.0 | v0.4.0 | v0.5.0 | v0.6.0 | v0.7.0 | v0.8.0 |
-|--------|--------|--------|--------|--------|--------|--------|--------|--------|
-| MCP Tools | 14 | 24 | 31 | 33 | 15 | 17 | **17** | **17** |
-| Tests | 68 | 122 | 135 | 174 | 183 | 208 | **234** | **272** |
-| Rust LOC | 6,400 | ~10,000 | ~12,800 | ~14,000 | ~14,200 | ~16,500 | **~19,000** | **~21,000** |
-| JSON Schemas | 33 | 49 | 63 | 63 | 31 | 35 | **35** | **35** |
-| Catalog Tools | — | — | 28 | 28 | 28 | 28 | **28** | **28** |
-| Platforms | 1 | 1 | 6 | 6 | 6 | 6 | **6** | **6** |
-| AI CLIs | 2 | 2 | 4 | 4 | 4 | 4 | **4** | **4** |
+| Metric | v0.1.0 | v0.2.0 | v0.3.0 | v0.4.0 | v0.5.0 | v0.6.0 | v0.7.0 | v0.8.0 | v0.8.2 |
+|--------|--------|--------|--------|--------|--------|--------|--------|--------|--------|
+| MCP Tools | 14 | 24 | 31 | 33 | 15 | 17 | 17 | 17 | **17** |
+| Tests | 68 | 122 | 135 | 174 | 183 | 208 | 234 | 272 | **272/274** |
+| Rust LOC | 6,400 | ~10,000 | ~12,800 | ~14,000 | ~14,200 | ~16,500 | ~19,000 | ~21,000 | **~21,100** |
+| JSON Schemas | 33 | 49 | 63 | 63 | 31 | 35 | 35 | 35 | **35** |
+| Catalog Tools | — | — | 28 | 28 | 28 | 28 | 28 | 28 | **28** |
+| Platforms | 1 | 1 | 6 | 6 | 6 | 6 | 6 | 6 | **6** |
+| AI CLIs | 2 | 2 | 4 | 4 | 4 | 4 | 4 | 4 | **4** |
 
 ## Stage Progress (v0.1.0)
 
