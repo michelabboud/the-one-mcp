@@ -18,7 +18,7 @@ It provides:
 | Crate | Responsibility |
 |-------|---------------|
 | `the-one-core` | Config layering, SQLite storage (WAL), policy engine, profiler, manifests, docs manager, configurable limits |
-| `the-one-mcp` | Async broker orchestrator, 33 MCP tool API types, JSON-RPC dispatch, transport layer (stdio/SSE/stream), CLI binary |
+| `the-one-mcp` | Async broker orchestrator, 15 MCP tool API types, JSON-RPC dispatch, transport layer (stdio/SSE/stream), CLI binary |
 | `the-one-memory` | Smart markdown chunker, embedding providers (fastembed local + OpenAI-compatible API), async Qdrant HTTP backend |
 | `the-one-router` | Rules-first request classification, OpenAI-compatible nano provider, provider pool with health tracking and 3 routing policies |
 | `the-one-registry` | Capability catalog with risk-tier filtering, visibility modes (core/project/dormant) |
@@ -64,7 +64,7 @@ The installer:
 5. Auto-detects Claude Code, Gemini CLI, OpenCode, Codex and registers the MCP
 6. Validates with a smoke test
 
-Options: `--version v0.4.0`, `--lean` (no swagger), `--local ./target/release`, `--uninstall`
+Options: `--version v0.5.0`, `--lean` (no swagger), `--local ./target/release`, `--uninstall`
 
 ### Build from Source
 
@@ -260,7 +260,7 @@ All limits are configurable via config file, environment variables, or admin UI.
 |-------|---------|-----|-----|-------------|
 | `max_tool_suggestions` | 5 | 1 | 50 | Max tools returned per suggest query |
 | `max_search_hits` | 5 | 1 | 100 | Max RAG results per memory.search |
-| `max_raw_section_bytes` | 24,576 | 1,024 | 1,048,576 | Max bytes for docs.get_section |
+| `max_raw_section_bytes` | 24,576 | 1,024 | 1,048,576 | Max bytes for docs.get (with section param) |
 | `max_enabled_families` | 12 | 1 | 100 | Max tool families enabled per project |
 | `max_doc_size_bytes` | 102,400 | 1,024 | 10,485,760 | Max single managed doc size |
 | `max_managed_docs` | 500 | 10 | 10,000 | Max docs in managed folder |
@@ -370,17 +370,13 @@ The broker manages a docs folder at `<project>/.the-one/docs/`:
 
 | Tool | Description |
 |------|-------------|
-| `docs.create` | Create new `.md` file. Auto-creates subdirectories. Auto-indexes into RAG. |
-| `docs.update` | Overwrite file content. Re-indexes changed chunks. |
-| `docs.delete` | Soft-delete: moves to `.trash/` preserving path. Removes from RAG. |
-| `docs.get` | Return full original markdown as-is. |
-| `docs.get_section` | Return heading section, bounded by `max_raw_section_bytes`. |
+| `docs.save` | Create or update a `.md` file (upsert). Auto-creates subdirectories. Auto-indexes into RAG. |
+| `docs.get` | Return full document, or a specific section when `section` param is provided (bounded by `max_raw_section_bytes`). |
 | `docs.list` | List files with path, size, last modified time. |
+| `docs.delete` | Soft-delete: moves to `.trash/` preserving path. Removes from RAG. |
 | `docs.move` | Rename or move within managed folder. |
-| `docs.trash.list` | List trash contents. |
-| `docs.trash.restore` | Restore from trash. Re-indexes. |
-| `docs.trash.empty` | Permanently delete all trash contents. |
-| `docs.reindex` | Force full re-ingestion into RAG index. |
+| `maintain` (trash) | Actions: `trash.list`, `trash.restore`, `trash.empty` — via the multiplexed maintain tool. |
+| `maintain` (reindex) | Action: `reindex` — force full re-ingestion into RAG index. |
 
 ### Validation Rules
 
@@ -452,7 +448,7 @@ Qdrant: the_one_tools              Semantic search over tool descriptions
 
 ```
 User: "I need QA tools"
-  → LLM calls: tool.suggest({ category: "qa" })
+  → LLM calls: tool.find({ mode: "suggest", query: "qa" })
   → Broker: filter catalog by project languages (Rust) + category (qa)
   → Group by install state:
       ENABLED:     cargo-clippy (active)
@@ -472,16 +468,15 @@ Three-tier fallback:
 
 | Tool | Description |
 |------|-------------|
-| `tool.suggest` | Project-aware recommendations grouped by state |
-| `tool.search` | Semantic or text search across catalog + user tools |
+| `tool.find` | Unified discovery — `mode: "suggest"` (project-aware recommendations), `mode: "search"` (semantic/text search), `mode: "list"` (by state) |
 | `tool.info` | Full metadata for a tool (description, install, run, risk, state) |
-| `tool.list` | List by state: enabled / available / recommended / all |
-| `tool.add` | Add a custom tool locally |
-| `tool.remove` | Remove user-added tool (cannot remove catalog tools) |
-| `tool.enable` | Activate for current CLI/project |
-| `tool.disable` | Deactivate for current CLI/project |
 | `tool.install` | Run install command, update inventory, auto-enable |
-| `tool.update` | Refresh catalog from GitHub + re-scan system inventory |
+| `tool.run` | Execute with policy-gated approval |
+| `config` (tool.add) | Add a custom tool locally (via config action) |
+| `config` (tool.remove) | Remove user-added tool (via config action) |
+| `maintain` (tool.enable) | Activate for current CLI/project (via maintain action) |
+| `maintain` (tool.disable) | Deactivate for current CLI/project (via maintain action) |
+| `maintain` (tool.refresh) | Refresh catalog from GitHub + re-scan inventory (via maintain action) |
 
 ### Custom Tools (Per-CLI)
 
@@ -531,11 +526,11 @@ See [CONTRIBUTING.md](../../CONTRIBUTING.md) — submit via GitHub Issue or PR.
 
 ## 14. Observability
 
-### Metrics (`metrics.snapshot`)
+### Metrics (`observe (action: metrics)`)
 
 `project_init_calls`, `project_refresh_calls`, `memory_search_calls`, `tool_run_calls`, `router_fallback_calls`, `router_provider_error_calls`, `router_decision_latency_ms_total`
 
-### Audit Trail (`audit.events`)
+### Audit Trail (`observe (action: events)`)
 
 All tool executions logged with timestamps and JSON payloads. Max 200 per query.
 
@@ -596,13 +591,13 @@ Releases are **manual only** — tagging does not auto-trigger builds. You decid
 
 ```bash
 # Trigger a release (builds 6 platform binaries on GitHub Actions)
-bash scripts/build.sh release v0.4.0
+bash scripts/build.sh release v0.5.0
 
 # Check release workflow status
 bash scripts/build.sh release --status
 
 # Preview without triggering
-bash scripts/build.sh --dry-run release v0.4.0
+bash scripts/build.sh --dry-run release v0.5.0
 ```
 
 Or via GitHub UI: Actions → release → Run workflow → enter version tag.

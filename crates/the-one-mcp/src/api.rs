@@ -492,7 +492,7 @@ pub struct ToolListResponse {
 #[cfg(test)]
 mod tests {
     use super::{
-        ConfigExportRequest, ConfigExportResponse, DocsSaveRequest, DocsListRequest,
+        ConfigExportRequest, ConfigExportResponse, DocsListRequest, DocsSaveRequest,
         MemoryFetchChunkRequest, MemorySearchRequest, ProjectInitRequest, ToolFindRequest,
         ToolRunRequest,
     };
@@ -592,9 +592,10 @@ mod tests {
         assert_eq!(decoded.tags, Some(vec!["howto".to_string()]));
 
         // tags omitted
-        let no_tags: DocsSaveRequest =
-            serde_json::from_str(r#"{"project_root":"/tmp","project_id":"p","path":"a.md","content":"x"}"#)
-                .expect("deserialize without tags");
+        let no_tags: DocsSaveRequest = serde_json::from_str(
+            r#"{"project_root":"/tmp","project_id":"p","path":"a.md","content":"x"}"#,
+        )
+        .expect("deserialize without tags");
         assert_eq!(no_tags.tags, None);
     }
 

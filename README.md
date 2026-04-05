@@ -20,7 +20,7 @@ Auto-detects your OS, downloads the latest release, sets up config with sensible
 ```
 You: "Check my code for security issues"
                     ↓
-Claude/Gemini/OpenCode calls tool.suggest({ category: "security" })
+Claude/Gemini/OpenCode calls tool.find({ mode: "suggest", query: "security" })
                     ↓
 the-one-mcp: "Your project is Rust + Docker. Here's what I found:"
   ENABLED:     cargo-clippy (running)
@@ -40,7 +40,7 @@ The LLM is the brain. The MCP is the data layer — catalog, filtering, executio
 - **Tool Catalog** — 28+ curated tools (growing), searchable via semantic search or full-text. Knows what's installed on your system, what's available, what to recommend.
 - **Unlimited Memory** — Semantic RAG search over project docs. Ask about code from last week — it finds the relevant chunks without loading entire files.
 - **Managed Knowledge Base** — Create, update, and organize markdown docs that persist across sessions. The LLM writes notes, decisions, architecture docs.
-- **Smart Discovery** — `tool.suggest` filters by project profile (languages, frameworks), groups by install state (enabled / available / recommended). Token-efficient.
+- **Smart Discovery** — `tool.find` filters by project profile (languages, frameworks), groups by install state (enabled / available / recommended). Token-efficient.
 - **Policy-Gated Execution** — Approval scopes (once/session/forever) for high-risk tools. Headless deny-by-default.
 - **Multi-CLI** — Same server works with Claude Code, Gemini CLI, OpenCode, Codex. Per-CLI custom tools via `clientInfo` detection.
 
@@ -52,7 +52,7 @@ Claude Code / Gemini CLI / OpenCode / Codex
     v
 the-one-mcp broker
     |
-    +-- Tool Catalog         33 MCP tools, SQLite + Qdrant semantic search
+    +-- Tool Catalog         15 MCP tools, SQLite + Qdrant semantic search
     +-- Project Lifecycle    Detect languages/frameworks, fingerprint caching
     +-- Knowledge (RAG)      fastembed (384-1024 dim) + Qdrant vector search
     +-- Documents (CRUD)     Managed folder with soft-delete, auto-sync
@@ -61,20 +61,15 @@ the-one-mcp broker
     +-- SQLite               Project state, catalog, approvals, audit trail
 ```
 
-## 33 MCP Tools
+## 15 MCP Tools
 
 | Category | Tools |
 |----------|-------|
-| **Project** | `project.init`, `project.refresh`, `project.profile.get` |
 | **Knowledge** | `memory.search`, `memory.fetch_chunk` |
-| **Documents** | `docs.create`, `docs.update`, `docs.delete`, `docs.get`, `docs.get_section`, `docs.list`, `docs.move` |
-| **Trash** | `docs.trash.list`, `docs.trash.restore`, `docs.trash.empty` |
-| **Re-index** | `docs.reindex` |
-| **Tool Discovery** | `tool.suggest`, `tool.search`, `tool.info`, `tool.list` |
-| **Tool Lifecycle** | `tool.add`, `tool.remove`, `tool.enable`, `tool.disable`, `tool.install`, `tool.run`, `tool.update` |
-| **Config** | `config.export`, `config.update` |
-| **Observability** | `metrics.snapshot`, `audit.events` |
-| **Models** | `models.list`, `models.check_updates` |
+| **Documents** | `docs.list`, `docs.get`, `docs.save`, `docs.delete`, `docs.move` |
+| **Tool Discovery** | `tool.find`, `tool.info` |
+| **Tool Lifecycle** | `tool.install`, `tool.run` |
+| **Admin** | `setup`, `config`, `maintain`, `observe` |
 
 ## Tool Catalog
 
@@ -138,7 +133,7 @@ bash scripts/build.sh check           # full CI pipeline
 bash scripts/build.sh info            # show build config
 
 # Cross-platform release (triggers GitHub Actions — manual only)
-bash scripts/build.sh release v0.4.0  # build for 6 platforms + create GitHub Release
+bash scripts/build.sh release v0.5.0  # build for 6 platforms + create GitHub Release
 bash scripts/build.sh release --status # check workflow progress
 ```
 
@@ -148,10 +143,10 @@ Releases are **manual only** — tagging does not auto-trigger builds. You decid
 
 | Metric | Count |
 |--------|-------|
-| MCP Tools | 33 |
-| Tests | 174 |
+| MCP Tools | 15 |
+| Tests | 183 |
 | Rust LOC | ~12,800 |
-| JSON Schemas | 63 |
+| JSON Schemas | 31 |
 | Catalog Tools | 28 (growing) |
 | Supported Platforms | 6 (Linux/macOS/Windows x86-64 + ARM64) |
 | Supported AI CLIs | 4 (Claude Code, Gemini CLI, OpenCode, Codex) |

@@ -2,6 +2,42 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.5.0] - 2026-04-05
+
+### Changed
+- **BREAKING:** MCP tool surface consolidated from 33 to 15 tools (~52% token reduction per session)
+- `docs.get` now accepts optional `section` parameter (replaces `docs.get_section`)
+- `docs.create` + `docs.update` merged into `docs.save` (upsert semantics)
+- `tool.list` + `tool.suggest` + `tool.search` merged into `tool.find` with `mode` parameter
+- 18 admin tools multiplexed into 4: `setup`, `config`, `maintain`, `observe`
+- JSON schema files reduced from 63 to 31
+
+### Added
+- `docs.save` tool — upsert: creates if missing, updates if exists
+- `tool.find` tool — unified discovery with modes: list, suggest, search
+- `setup` tool — multiplexed: project init, refresh, profile
+- `config` tool — multiplexed: export, update, tool.add, tool.remove, models.list, models.check
+- `maintain` tool — multiplexed: reindex, tool.enable, tool.disable, tool.refresh, trash operations
+- `observe` tool — multiplexed: metrics, audit events
+- 9 new dispatch and API tests (183 total across workspace)
+
+### Removed
+- Individual tool endpoints replaced by consolidated tools: `project.init`, `project.refresh`, `project.profile.get`, `docs.get_section`, `docs.create`, `docs.update`, `docs.reindex`, `docs.trash.list`, `docs.trash.restore`, `docs.trash.empty`, `tool.list`, `tool.suggest`, `tool.search`, `tool.add`, `tool.remove`, `tool.enable`, `tool.disable`, `tool.update`, `config.export`, `config.update`, `metrics.snapshot`, `audit.events`, `models.list`, `models.check_updates`
+
+## [0.4.0] - 2026-04-04
+
+### Added
+- TOML-based embedding model registry (`models/local-models.toml`, `models/api-models.toml`) embedded in binary
+- Interactive embedding model selection during install (7 local models + API option)
+- 2 new MCP tools: `models.list`, `models.check_updates`
+- Model registry maintenance scripts (`update-local-models.sh`, `update-api-models.sh`)
+- API embedding provider support: OpenAI, Voyage AI, Cohere (extensible)
+
+### Changed
+- Default embedding model changed from all-MiniLM-L6-v2 (384d) to BGE-large-en-v1.5 (1024d quality tier)
+- Embedding provider rewritten to use TOML registry with tier resolution
+- 33 total MCP tools, 174 tests
+
 ## [0.3.1] - 2026-04-04
 
 ### Added

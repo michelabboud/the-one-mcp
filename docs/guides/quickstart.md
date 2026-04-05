@@ -32,8 +32,8 @@ bash scripts/install.sh --local ./target/release
    - Indexes your docs into the RAG engine
 4. Now you can:
    - Ask about your code → `memory.search` finds relevant docs
-   - Ask for tool recommendations → `tool.suggest` returns what's available
-   - Save knowledge → `docs.create` persists it across sessions
+   - Ask for tool recommendations → `tool.find` returns what's available
+   - Save knowledge → `docs.save` persists it across sessions
    - Run tools → `tool.run` with policy-gated approval
 
 ## Register Manually (if needed)
@@ -68,10 +68,10 @@ $EDITOR ~/.the-one/config.json
 
 | What you say | What the LLM calls |
 |-------------|-------------------|
-| "Check my code for security issues" | `tool.suggest({ category: "security" })` → `tool.run(...)` |
+| "Check my code for security issues" | `tool.find({ mode: "suggest", query: "security" })` → `tool.run(...)` |
 | "How does our auth system work?" | `memory.search("auth system")` |
-| "Save a note about this decision" | `docs.create("decisions/auth-choice.md", content)` |
-| "What tools do I have?" | `tool.list({ state: "enabled" })` |
+| "Save a note about this decision" | `docs.save("decisions/auth-choice.md", content)` |
+| "What tools do I have?" | `tool.find({ mode: "list", filter: "enabled" })` |
 | "Install cargo-audit" | `tool.install({ tool_id: "cargo-audit" })` |
 
 ## Full Docs

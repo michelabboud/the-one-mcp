@@ -1,28 +1,29 @@
 # Progress Report
 
-## Current Version: v0.4.0
+## Current Version: v0.5.0
 
 ## Overall Status
 
-All planned stages complete. Four major releases shipped:
+All planned stages complete. Five major releases shipped:
 - **v0.1.0** — Initial workspace: 8 crates, 14 MCP tools, stub implementations
 - **v0.2.0** — Production overhaul: async broker, real embeddings, 3 transports, 24 tools
 - **v0.3.0** — Tool catalog: SQLite + Qdrant semantic search, tool lifecycle, 31 tools
 - **v0.4.0** — Embedding model registry: TOML-based model registries, quality tier default, interactive installer selection, 33 tools
+- **v0.5.0** — Tool consolidation: 33→15 tools (~52% token savings), multiplexed admin, merged work tools
 
-Build/test gates: all green. 174 tests, 0 failures.
+Build/test gates: all green. 183 tests, 0 failures.
 
 ## Stats
 
-| Metric | v0.1.0 | v0.2.0 | v0.3.0 | v0.4.0 |
-|--------|--------|--------|--------|--------|
-| MCP Tools | 14 | 24 | 31 | **33** |
-| Tests | 68 | 122 | 135 | **174** |
-| Rust LOC | 6,400 | ~10,000 | ~12,800 | **~14,000** |
-| JSON Schemas | 33 | 49 | 63 | **63** |
-| Catalog Tools | — | — | 28 | **28** |
-| Platforms | 1 | 1 | 6 | **6** |
-| AI CLIs | 2 | 2 | 4 | **4** |
+| Metric | v0.1.0 | v0.2.0 | v0.3.0 | v0.4.0 | v0.5.0 |
+|--------|--------|--------|--------|--------|--------|
+| MCP Tools | 14 | 24 | 31 | 33 | **15** |
+| Tests | 68 | 122 | 135 | 174 | **183** |
+| Rust LOC | 6,400 | ~10,000 | ~12,800 | ~14,000 | **~14,200** |
+| JSON Schemas | 33 | 49 | 63 | 63 | **31** |
+| Catalog Tools | — | — | 28 | 28 | **28** |
+| Platforms | 1 | 1 | 6 | 6 | **6** |
+| AI CLIs | 2 | 2 | 4 | 4 | **4** |
 
 ## Stage Progress (v0.1.0)
 
@@ -127,10 +128,27 @@ All complete: Claude Code + Gemini CLI + OpenCode + Codex auto-detection, tiered
 
 - `cargo fmt --check` — passing
 - `cargo clippy --workspace --all-targets -- -D warnings` — passing
-- `cargo test --workspace` — **174 tests passing**
+- `cargo test --workspace` — **183 tests passing**
 - `cargo build --release -p the-one-mcp --bin the-one-mcp` — passing
 - `bash scripts/release-gate.sh` — passing
 - `bash scripts/build.sh check` — full CI pipeline passing
+
+## Tool Consolidation (v0.5.0) — 6 Tasks
+
+- Task 1: Add DocsSaveRequest and ToolFindRequest API types — complete
+- Task 2: Consolidate 33 tool definitions to 15 — complete
+- Task 3: Rewrite dispatch logic with multiplexed admin — complete
+- Task 4: Update JSON schemas (63→31) — complete
+- Task 5: Update documentation and full validation — complete
+- Task 6: Verify token reduction — complete
+
+### Key Changes
+- 11 work tools always loaded (memory, docs, tool discovery/lifecycle)
+- 4 multiplexed admin tools (setup, config, maintain, observe) with action+params pattern
+- `docs.get` + `docs.get_section` → `docs.get` with optional `section` param
+- `docs.create` + `docs.update` → `docs.save` (upsert)
+- `tool.list` + `tool.suggest` + `tool.search` → `tool.find` with `mode` param
+- Estimated token savings: ~1,836 tokens per session (~52% reduction)
 
 ## What's Next
 
