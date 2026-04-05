@@ -41,6 +41,44 @@ pub struct QdrantSearchResult {
 }
 
 // ---------------------------------------------------------------------------
+// Image types
+// ---------------------------------------------------------------------------
+
+/// A single image point to upsert into the image collection.
+#[derive(Debug, Clone)]
+pub struct ImagePoint {
+    /// Unique identifier for this image (typically its SHA-256 hash).
+    pub id: String,
+    /// The embedding vector produced by the image embedding model.
+    pub vector: Vec<f32>,
+    /// Absolute path to the source image file.
+    pub source_path: String,
+    /// File size in bytes.
+    pub file_size: u64,
+    /// File modification time as Unix epoch seconds.
+    pub mtime_epoch: i64,
+    /// Optional user-provided or auto-generated caption.
+    pub caption: Option<String>,
+    /// Optional OCR-extracted text from the image.
+    pub ocr_text: Option<String>,
+    /// Optional path to the generated thumbnail file.
+    pub thumbnail_path: Option<String>,
+}
+
+/// A single image search result returned from Qdrant.
+#[derive(Debug, Clone)]
+pub struct ImageSearchResult {
+    pub id: String,
+    pub source_path: String,
+    pub score: f32,
+    pub file_size: u64,
+    pub mtime_epoch: i64,
+    pub caption: Option<String>,
+    pub ocr_text: Option<String>,
+    pub thumbnail_path: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // Backend
 // ---------------------------------------------------------------------------
 
@@ -292,6 +330,275 @@ impl AsyncQdrantBackend {
                 ))
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Image collection helpers
+    // -----------------------------------------------------------------------
+
+    /// Build the image collection name for a given project ID.
+    /// The collection name is `the_one_images_<sanitized_project_id>`.
+    pub fn image_collection_name(project_id: &str) -> String {
+        let sanitized: String = project_id
+            .chars()
+            .map(|c| {
+                if c.is_alphanumeric() || c == '_' || c == '-' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        format!("the_one_images_{sanitized}")
+    }
+
+    /// Ensure the image collection exists with the given vector dimensions.
+    /// Creates it if missing; ignores "already exists" errors.
+    pub async fn create_image_collection(
+        &self,
+        project_id: &str,
+        dims: usize,
+    ) -> Result<(), String> {
+        let collection = Self::image_collection_name(project_id);
+        let url = format!("{}/collections/{}", self.base_url, collection);
+        let body = json!({
+            "vectors": {
+                "size": dims,
+                "distance": "Cosine"
+            },
+            "hnsw_config": {
+                "m": 16,
+                "ef_construct": 100
+            }
+        });
+
+        let resp = self
+            .client
+            .put(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("create_image_collection request failed: {e}"))?;
+
+        let status = resp.status().as_u16();
+        if status == 409 || (200..300).contains(&status) {
+            return Ok(());
+        }
+
+        let text = resp.text().await.unwrap_or_default();
+        if text.contains("already exists") {
+            return Ok(());
+        }
+
+        Err(format!(
+            "create_image_collection failed (HTTP {status}): {text}"
+        ))
+    }
+
+    /// Upsert image points into the image collection for `project_id`.
+    pub async fn upsert_image_points(
+        &self,
+        project_id: &str,
+        points: Vec<ImagePoint>,
+    ) -> Result<(), String> {
+        let collection = Self::image_collection_name(project_id);
+        let url = format!("{}/collections/{}/points", self.base_url, collection);
+
+        let json_points: Vec<serde_json::Value> = points
+            .into_iter()
+            .map(|p| {
+                let mut payload = serde_json::json!({
+                    "source_path": p.source_path,
+                    "file_size": p.file_size,
+                    "mtime_epoch": p.mtime_epoch,
+                });
+                if let Some(caption) = p.caption {
+                    payload["caption"] = serde_json::Value::String(caption);
+                }
+                if let Some(ocr_text) = p.ocr_text {
+                    payload["ocr_text"] = serde_json::Value::String(ocr_text);
+                }
+                if let Some(thumbnail_path) = p.thumbnail_path {
+                    payload["thumbnail_path"] = serde_json::Value::String(thumbnail_path);
+                }
+                json!({
+                    "id": hash_to_point_id(&p.id),
+                    "vector": p.vector,
+                    "payload": payload
+                })
+            })
+            .collect();
+
+        let body = json!({ "points": json_points });
+
+        let resp = self
+            .client
+            .put(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("upsert_image_points request failed: {e}"))?;
+
+        if resp.status().is_success() {
+            return Ok(());
+        }
+
+        let text = resp.text().await.unwrap_or_default();
+        Err(format!("upsert_image_points failed: {text}"))
+    }
+
+    /// Semantic search over the image collection for `project_id`.
+    pub async fn search_images(
+        &self,
+        project_id: &str,
+        query_vector: Vec<f32>,
+        top_k: usize,
+        threshold: f32,
+    ) -> Result<Vec<ImageSearchResult>, String> {
+        let collection = Self::image_collection_name(project_id);
+        let url = format!(
+            "{}/collections/{}/points/search",
+            self.base_url, collection
+        );
+
+        let body = json!({
+            "vector": query_vector,
+            "limit": top_k,
+            "score_threshold": threshold,
+            "with_payload": true,
+        });
+
+        let resp = self
+            .client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("search_images request failed: {e}"))?;
+
+        if !resp.status().is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(format!("search_images failed: {text}"));
+        }
+
+        let value: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("search_images response parse error: {e}"))?;
+
+        let results = value
+            .get("result")
+            .and_then(|v| v.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| {
+                        let payload = item.get("payload")?;
+                        let source_path =
+                            payload.get("source_path")?.as_str()?.to_string();
+                        let score = item.get("score")?.as_f64()? as f32;
+                        let file_size = payload
+                            .get("file_size")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        let mtime_epoch = payload
+                            .get("mtime_epoch")
+                            .and_then(|v| v.as_i64())
+                            .unwrap_or(0);
+                        let caption = payload
+                            .get("caption")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string);
+                        let ocr_text = payload
+                            .get("ocr_text")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string);
+                        let thumbnail_path = payload
+                            .get("thumbnail_path")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string);
+
+                        // Recover the original id from the payload source path (use
+                        // source_path as surrogate id — callers can re-hash if needed)
+                        let id = source_path.clone();
+
+                        Some(ImageSearchResult {
+                            id,
+                            source_path,
+                            score,
+                            file_size,
+                            mtime_epoch,
+                            caption,
+                            ocr_text,
+                            thumbnail_path,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        Ok(results)
+    }
+
+    /// Delete the entire image collection for `project_id`.
+    pub async fn delete_image_collection(&self, project_id: &str) -> Result<(), String> {
+        let collection = Self::image_collection_name(project_id);
+        let url = format!("{}/collections/{}", self.base_url, collection);
+
+        let resp = self
+            .client
+            .delete(&url)
+            .send()
+            .await
+            .map_err(|e| format!("delete_image_collection request failed: {e}"))?;
+
+        let status = resp.status().as_u16();
+        // 200/404 are both fine (already deleted)
+        if (200..300).contains(&status) || status == 404 {
+            return Ok(());
+        }
+
+        let text = resp.text().await.unwrap_or_default();
+        Err(format!(
+            "delete_image_collection failed (HTTP {status}): {text}"
+        ))
+    }
+
+    /// Delete a single image point identified by its source path.
+    pub async fn delete_image_by_source_path(
+        &self,
+        project_id: &str,
+        source_path: &str,
+    ) -> Result<(), String> {
+        let collection = Self::image_collection_name(project_id);
+        let url = format!(
+            "{}/collections/{}/points/delete",
+            self.base_url, collection
+        );
+
+        let body = json!({
+            "filter": {
+                "must": [{
+                    "key": "source_path",
+                    "match": { "value": source_path }
+                }]
+            }
+        });
+
+        let resp = self
+            .client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("delete_image_by_source_path request failed: {e}"))?;
+
+        if resp.status().is_success() {
+            return Ok(());
+        }
+
+        let text = resp.text().await.unwrap_or_default();
+        Err(format!("delete_image_by_source_path failed: {text}"))
     }
 }
 
