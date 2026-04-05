@@ -14,7 +14,24 @@ pub struct ConfigurableLimits {
     pub max_nano_retries: u8,
     pub max_nano_providers: usize,
     pub search_score_threshold: f32,
+    /// Maximum image file size in bytes (default 10MB).
+    #[serde(default = "default_max_image_size_bytes")]
+    pub max_image_size_bytes: usize,
+    /// Maximum number of images per project.
+    #[serde(default = "default_max_images_per_project")]
+    pub max_images_per_project: usize,
+    /// Maximum number of image search results.
+    #[serde(default = "default_max_image_search_hits")]
+    pub max_image_search_hits: usize,
+    /// Minimum score threshold for image search results.
+    #[serde(default = "default_image_search_score_threshold")]
+    pub image_search_score_threshold: f32,
 }
+
+fn default_max_image_size_bytes() -> usize { 10_485_760 }
+fn default_max_images_per_project() -> usize { 500 }
+fn default_max_image_search_hits() -> usize { 5 }
+fn default_image_search_score_threshold() -> f32 { 0.25 }
 
 impl Default for ConfigurableLimits {
     fn default() -> Self {
@@ -31,6 +48,10 @@ impl Default for ConfigurableLimits {
             max_nano_retries: 3,
             max_nano_providers: 5,
             search_score_threshold: 0.3,
+            max_image_size_bytes: 10_485_760,  // 10MB
+            max_images_per_project: 500,
+            max_image_search_hits: 5,
+            image_search_score_threshold: 0.25,
         }
     }
 }
@@ -120,6 +141,22 @@ impl ConfigurableLimits {
             0.0,
             1.0,
         );
+        self.max_image_size_bytes = clamp_usize(
+            "max_image_size_bytes",
+            self.max_image_size_bytes,
+            102_400,        // 100 KB min
+            104_857_600,    // 100 MB max
+        );
+        self.max_images_per_project =
+            clamp_usize("max_images_per_project", self.max_images_per_project, 10, 10_000);
+        self.max_image_search_hits =
+            clamp_usize("max_image_search_hits", self.max_image_search_hits, 1, 50);
+        self.image_search_score_threshold = clamp_f32(
+            "image_search_score_threshold",
+            self.image_search_score_threshold,
+            0.0,
+            1.0,
+        );
         self
     }
 }
@@ -160,6 +197,13 @@ mod tests {
             (validated.search_score_threshold - defaults.search_score_threshold).abs()
                 < f32::EPSILON
         );
+        assert_eq!(validated.max_image_size_bytes, defaults.max_image_size_bytes);
+        assert_eq!(validated.max_images_per_project, defaults.max_images_per_project);
+        assert_eq!(validated.max_image_search_hits, defaults.max_image_search_hits);
+        assert!(
+            (validated.image_search_score_threshold - defaults.image_search_score_threshold).abs()
+                < f32::EPSILON
+        );
     }
 
     #[test]
@@ -177,6 +221,10 @@ mod tests {
             max_nano_retries: 0,
             max_nano_providers: 0,
             search_score_threshold: -1.0,
+            max_image_size_bytes: 0,
+            max_images_per_project: 0,
+            max_image_search_hits: 0,
+            image_search_score_threshold: -1.0,
         };
         let clamped = too_low.validated();
 
@@ -192,6 +240,10 @@ mod tests {
         assert_eq!(clamped.max_nano_retries, 0);
         assert_eq!(clamped.max_nano_providers, 1);
         assert!((clamped.search_score_threshold - 0.0).abs() < f32::EPSILON);
+        assert_eq!(clamped.max_image_size_bytes, 102_400);
+        assert_eq!(clamped.max_images_per_project, 10);
+        assert_eq!(clamped.max_image_search_hits, 1);
+        assert!((clamped.image_search_score_threshold - 0.0).abs() < f32::EPSILON);
 
         let too_high = ConfigurableLimits {
             max_tool_suggestions: 999,
@@ -206,6 +258,10 @@ mod tests {
             max_nano_retries: 99,
             max_nano_providers: 99,
             search_score_threshold: 5.0,
+            max_image_size_bytes: 999_999_999,
+            max_images_per_project: 999_999,
+            max_image_search_hits: 999,
+            image_search_score_threshold: 5.0,
         };
         let clamped = too_high.validated();
 
@@ -221,5 +277,9 @@ mod tests {
         assert_eq!(clamped.max_nano_retries, 10);
         assert_eq!(clamped.max_nano_providers, 10);
         assert!((clamped.search_score_threshold - 1.0).abs() < f32::EPSILON);
+        assert_eq!(clamped.max_image_size_bytes, 104_857_600);
+        assert_eq!(clamped.max_images_per_project, 10_000);
+        assert_eq!(clamped.max_image_search_hits, 50);
+        assert!((clamped.image_search_score_threshold - 1.0).abs() < f32::EPSILON);
     }
 }

@@ -18,6 +18,9 @@ const DEFAULT_QDRANT_STRICT_AUTH: bool = true;
 const DEFAULT_EMBEDDING_PROVIDER: &str = "local";
 const DEFAULT_EMBEDDING_MODEL: &str = "BGE-large-en-v1.5";
 const DEFAULT_EMBEDDING_DIMENSIONS: usize = 1024;
+const DEFAULT_IMAGE_EMBEDDING_MODEL: &str = "nomic-embed-vision-v1.5";
+const DEFAULT_IMAGE_OCR_LANGUAGE: &str = "eng";
+const DEFAULT_IMAGE_THUMBNAIL_MAX_PX: u32 = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NanoProviderKind {
@@ -96,6 +99,12 @@ pub struct RuntimeOverrides {
     pub limits: Option<ConfigurableLimits>,
     pub reranker_enabled: Option<bool>,
     pub reranker_model: Option<String>,
+    pub image_embedding_enabled: Option<bool>,
+    pub image_embedding_model: Option<String>,
+    pub image_ocr_enabled: Option<bool>,
+    pub image_ocr_language: Option<String>,
+    pub image_thumbnail_enabled: Option<bool>,
+    pub image_thumbnail_max_px: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -120,6 +129,12 @@ pub struct ProjectConfigUpdate {
     pub limits: Option<ConfigurableLimits>,
     pub reranker_enabled: Option<bool>,
     pub reranker_model: Option<String>,
+    pub image_embedding_enabled: Option<bool>,
+    pub image_embedding_model: Option<String>,
+    pub image_ocr_enabled: Option<bool>,
+    pub image_ocr_language: Option<String>,
+    pub image_thumbnail_enabled: Option<bool>,
+    pub image_thumbnail_max_px: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -149,6 +164,18 @@ pub struct AppConfig {
     pub reranker_enabled: bool,
     /// Reranker model name (e.g. "bge-reranker-base", "bge-reranker-v2-m3").
     pub reranker_model: String,
+    /// Enable image embedding indexing and search.
+    pub image_embedding_enabled: bool,
+    /// Image embedding model name (e.g. "nomic-embed-vision-v1.5").
+    pub image_embedding_model: String,
+    /// Enable OCR text extraction from images.
+    pub image_ocr_enabled: bool,
+    /// Tesseract language code for OCR (e.g. "eng").
+    pub image_ocr_language: String,
+    /// Enable thumbnail generation for indexed images.
+    pub image_thumbnail_enabled: bool,
+    /// Maximum thumbnail dimension in pixels (width or height).
+    pub image_thumbnail_max_px: u32,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -173,6 +200,12 @@ struct FileConfig {
     limits: Option<ConfigurableLimits>,
     reranker_enabled: Option<bool>,
     reranker_model: Option<String>,
+    image_embedding_enabled: Option<bool>,
+    image_embedding_model: Option<String>,
+    image_ocr_enabled: Option<bool>,
+    image_ocr_language: Option<String>,
+    image_thumbnail_enabled: Option<bool>,
+    image_thumbnail_max_px: Option<u32>,
 }
 
 impl AppConfig {
@@ -202,6 +235,12 @@ impl AppConfig {
             limits: None,
             reranker_enabled: Some(false),
             reranker_model: Some("bge-reranker-base".to_string()),
+            image_embedding_enabled: Some(false),
+            image_embedding_model: Some(DEFAULT_IMAGE_EMBEDDING_MODEL.to_string()),
+            image_ocr_enabled: Some(false),
+            image_ocr_language: Some(DEFAULT_IMAGE_OCR_LANGUAGE.to_string()),
+            image_thumbnail_enabled: Some(true),
+            image_thumbnail_max_px: Some(DEFAULT_IMAGE_THUMBNAIL_MAX_PX),
         };
 
         apply_file_layer(&global_state_dir.join("config.json"), &mut merged)?;
@@ -258,6 +297,18 @@ impl AppConfig {
             reranker_model: merged
                 .reranker_model
                 .unwrap_or_else(|| "bge-reranker-base".to_string()),
+            image_embedding_enabled: merged.image_embedding_enabled.unwrap_or(false),
+            image_embedding_model: merged
+                .image_embedding_model
+                .unwrap_or_else(|| DEFAULT_IMAGE_EMBEDDING_MODEL.to_string()),
+            image_ocr_enabled: merged.image_ocr_enabled.unwrap_or(false),
+            image_ocr_language: merged
+                .image_ocr_language
+                .unwrap_or_else(|| DEFAULT_IMAGE_OCR_LANGUAGE.to_string()),
+            image_thumbnail_enabled: merged.image_thumbnail_enabled.unwrap_or(true),
+            image_thumbnail_max_px: merged
+                .image_thumbnail_max_px
+                .unwrap_or(DEFAULT_IMAGE_THUMBNAIL_MAX_PX),
         })
     }
 }
@@ -337,6 +388,24 @@ pub fn update_project_config(
     }
     if update.reranker_model.is_some() {
         merged.reranker_model = update.reranker_model;
+    }
+    if update.image_embedding_enabled.is_some() {
+        merged.image_embedding_enabled = update.image_embedding_enabled;
+    }
+    if update.image_embedding_model.is_some() {
+        merged.image_embedding_model = update.image_embedding_model;
+    }
+    if update.image_ocr_enabled.is_some() {
+        merged.image_ocr_enabled = update.image_ocr_enabled;
+    }
+    if update.image_ocr_language.is_some() {
+        merged.image_ocr_language = update.image_ocr_language;
+    }
+    if update.image_thumbnail_enabled.is_some() {
+        merged.image_thumbnail_enabled = update.image_thumbnail_enabled;
+    }
+    if update.image_thumbnail_max_px.is_some() {
+        merged.image_thumbnail_max_px = update.image_thumbnail_max_px;
     }
 
     let tmp_path = project_state_dir.join("config.json.tmp");
@@ -464,6 +533,26 @@ fn apply_env_layer(merged: &mut FileConfig) {
     if let Ok(v) = env::var("THE_ONE_RERANKER_MODEL") {
         merged.reranker_model = Some(v);
     }
+    if let Ok(v) = env::var("THE_ONE_IMAGE_EMBEDDING_ENABLED") {
+        merged.image_embedding_enabled = parse_bool_env(&v);
+    }
+    if let Ok(v) = env::var("THE_ONE_IMAGE_EMBEDDING_MODEL") {
+        merged.image_embedding_model = Some(v);
+    }
+    if let Ok(v) = env::var("THE_ONE_IMAGE_OCR_ENABLED") {
+        merged.image_ocr_enabled = parse_bool_env(&v);
+    }
+    if let Ok(v) = env::var("THE_ONE_IMAGE_OCR_LANGUAGE") {
+        merged.image_ocr_language = Some(v);
+    }
+    if let Ok(v) = env::var("THE_ONE_IMAGE_THUMBNAIL_ENABLED") {
+        merged.image_thumbnail_enabled = parse_bool_env(&v);
+    }
+    if let Ok(v) = env::var("THE_ONE_IMAGE_THUMBNAIL_MAX_PX") {
+        if let Ok(n) = v.parse::<u32>() {
+            merged.image_thumbnail_max_px = Some(n);
+        }
+    }
     // Limit env vars
     apply_limit_env_vars(merged);
 }
@@ -544,6 +633,30 @@ fn apply_limit_env_vars(merged: &mut FileConfig) {
             any_set = true;
         }
     }
+    if let Ok(v) = env::var("THE_ONE_LIMIT_MAX_IMAGE_SIZE_BYTES") {
+        if let Ok(n) = v.parse::<usize>() {
+            limits.max_image_size_bytes = n;
+            any_set = true;
+        }
+    }
+    if let Ok(v) = env::var("THE_ONE_LIMIT_MAX_IMAGES_PER_PROJECT") {
+        if let Ok(n) = v.parse::<usize>() {
+            limits.max_images_per_project = n;
+            any_set = true;
+        }
+    }
+    if let Ok(v) = env::var("THE_ONE_LIMIT_MAX_IMAGE_SEARCH_HITS") {
+        if let Ok(n) = v.parse::<usize>() {
+            limits.max_image_search_hits = n;
+            any_set = true;
+        }
+    }
+    if let Ok(v) = env::var("THE_ONE_LIMIT_IMAGE_SEARCH_SCORE_THRESHOLD") {
+        if let Ok(n) = v.parse::<f32>() {
+            limits.image_search_score_threshold = n;
+            any_set = true;
+        }
+    }
 
     if any_set {
         merged.limits = Some(limits);
@@ -611,6 +724,24 @@ fn apply_runtime_layer(runtime: RuntimeOverrides, merged: &mut FileConfig) {
     if runtime.reranker_model.is_some() {
         merged.reranker_model = runtime.reranker_model;
     }
+    if runtime.image_embedding_enabled.is_some() {
+        merged.image_embedding_enabled = runtime.image_embedding_enabled;
+    }
+    if runtime.image_embedding_model.is_some() {
+        merged.image_embedding_model = runtime.image_embedding_model;
+    }
+    if runtime.image_ocr_enabled.is_some() {
+        merged.image_ocr_enabled = runtime.image_ocr_enabled;
+    }
+    if runtime.image_ocr_language.is_some() {
+        merged.image_ocr_language = runtime.image_ocr_language;
+    }
+    if runtime.image_thumbnail_enabled.is_some() {
+        merged.image_thumbnail_enabled = runtime.image_thumbnail_enabled;
+    }
+    if runtime.image_thumbnail_max_px.is_some() {
+        merged.image_thumbnail_max_px = runtime.image_thumbnail_max_px;
+    }
 }
 
 fn merge(base: &mut FileConfig, overlay: FileConfig) {
@@ -673,6 +804,24 @@ fn merge(base: &mut FileConfig, overlay: FileConfig) {
     }
     if overlay.reranker_model.is_some() {
         base.reranker_model = overlay.reranker_model;
+    }
+    if overlay.image_embedding_enabled.is_some() {
+        base.image_embedding_enabled = overlay.image_embedding_enabled;
+    }
+    if overlay.image_embedding_model.is_some() {
+        base.image_embedding_model = overlay.image_embedding_model;
+    }
+    if overlay.image_ocr_enabled.is_some() {
+        base.image_ocr_enabled = overlay.image_ocr_enabled;
+    }
+    if overlay.image_ocr_language.is_some() {
+        base.image_ocr_language = overlay.image_ocr_language;
+    }
+    if overlay.image_thumbnail_enabled.is_some() {
+        base.image_thumbnail_enabled = overlay.image_thumbnail_enabled;
+    }
+    if overlay.image_thumbnail_max_px.is_some() {
+        base.image_thumbnail_max_px = overlay.image_thumbnail_max_px;
     }
 }
 
