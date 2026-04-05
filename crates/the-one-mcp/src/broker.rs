@@ -241,6 +241,34 @@ impl McpBroker {
             }
         }
 
+        // Attach sparse provider for hybrid (BM25 + dense) search if enabled
+        if config.hybrid_search_enabled {
+            #[cfg(feature = "local-embeddings")]
+            match the_one_memory::sparse_embeddings::FastEmbedSparseProvider::new(
+                &config.sparse_model,
+            ) {
+                Ok(sparse) => {
+                    tracing::info!(
+                        "hybrid search enabled: sparse model '{}', dense_weight={}, sparse_weight={}",
+                        config.sparse_model,
+                        config.hybrid_dense_weight,
+                        config.hybrid_sparse_weight,
+                    );
+                    engine.set_sparse_provider(
+                        Box::new(sparse),
+                        config.hybrid_dense_weight,
+                        config.hybrid_sparse_weight,
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "failed to init sparse provider ({}), continuing without hybrid search: {e}",
+                        config.sparse_model
+                    );
+                }
+            }
+        }
+
         // Load knowledge graph if it exists
         let graph_path = config.project_state_dir.join("knowledge_graph.json");
         match the_one_memory::graph::KnowledgeGraph::load_from_file(&graph_path) {
