@@ -70,6 +70,7 @@ jobs:
             name: macos-x86_64
             cross: false
             ext: ""
+            no_local_embeddings: true
           - target: aarch64-apple-darwin
             os: macos-latest
             name: macos-aarch64
@@ -187,6 +188,14 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Configure git
+        run: |
+          git config user.email "github-actions@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
 
       - name: Create tag if needed
         env:
