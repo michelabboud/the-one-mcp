@@ -101,3 +101,13 @@ cargo test --workspace
 2. Make changes with tests
 3. Run `bash scripts/build.sh check`
 4. Open PR with description of what and why
+
+### PR Checklist
+
+- [ ] `cargo fmt --check` passes
+- [ ] `cargo clippy --workspace --all-targets -- -D warnings` passes
+- [ ] `cargo test --workspace` passes (208+ tests)
+- [ ] If touching `the-one-memory`: confirm `image-embeddings` feature still compiles (`cargo check -p the-one-memory --features image-embeddings`)
+- [ ] If touching image ingest or OCR: add tests covering path traversal rejection and file size limits
+- [ ] If touching reranker: add unit tests for score ordering and empty-input edge case
+- [ ] Schema changes: update corresponding file in `schemas/mcp/v1beta/` (35 schemas total)

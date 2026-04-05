@@ -1,6 +1,6 @@
 # AGENTS.md - The-One MCP Development Guide
 
-Rust MCP broker system (v0.4.0). All agents should follow these guidelines.
+Rust MCP broker system (v0.6.0). All agents should follow these guidelines.
 
 ## Build Commands
 
@@ -28,7 +28,7 @@ cargo test -p the-one-mcp
 bash scripts/release-gate.sh
 
 # Trigger cross-platform release (manual only — does NOT auto-trigger on tags)
-bash scripts/build.sh release v0.4.0
+bash scripts/build.sh release v0.6.0
 bash scripts/build.sh release --status
 ```
 
@@ -53,26 +53,30 @@ the-one-mcp/
 │   │       └── telemetry.rs   # Structured logging setup
 │   ├── the-one-mcp/           # Async broker + transport + CLI
 │   │   └── src/
-│   │       ├── broker.rs      # McpBroker (async, 26 tool methods)
+│   │       ├── broker.rs      # McpBroker (async, 17 MCP tools)
 │   │       ├── api.rs         # Request/response types
 │   │       ├── adapter_core.rs # Shared adapter logic
 │   │       ├── swagger.rs     # OpenAPI embedding
 │   │       ├── transport/
 │   │       │   ├── jsonrpc.rs # JSON-RPC 2.0 dispatch
-│   │       │   ├── tools.rs   # 33 MCP tool definitions
+│   │       │   ├── tools.rs   # 17 MCP tool definitions (13 work + 4 admin)
 │   │       │   ├── stdio.rs   # Stdio transport
 │   │       │   ├── sse.rs     # SSE HTTP transport
 │   │       │   └── stream.rs  # Streamable HTTP transport
 │   │       └── bin/
 │   │           └── the-one-mcp.rs  # CLI binary (clap)
-│   ├── the-one-memory/        # RAG: chunker + embeddings + Qdrant
+│   ├── the-one-memory/        # RAG: chunker + embeddings + Qdrant + images
 │   │   └── src/
 │   │       ├── lib.rs         # Async MemoryEngine
 │   │       ├── chunker.rs     # Heading-aware markdown chunker
-│   │       ├── embeddings.rs  # fastembed (ONNX) + API provider
+│   │       ├── embeddings.rs  # fastembed 5.x (ONNX) + API provider
 │   │       ├── models_registry.rs # TOML model registry parser
 │   │       ├── reranker.rs    # Cross-encoder reranker
-│   │       └── graph.rs       # LightRAG knowledge graph
+│   │       ├── image_embeddings.rs # CLIP-based image embedding (feature: image-embeddings)
+│   │       ├── image_ingest.rs    # Image indexing pipeline
+│   │       ├── thumbnail.rs       # Thumbnail generation
+│   │       ├── ocr.rs             # Tesseract OCR extraction (feature: image-ocr)
+│   │       ├── graph.rs       # LightRAG knowledge graph
 │   │       └── qdrant.rs      # Async Qdrant HTTP backend
 │   ├── the-one-router/        # Routing + provider pool
 │   │   └── src/
@@ -84,7 +88,7 @@ the-one-mcp/
 │   ├── the-one-claude/        # Claude Code adapter
 │   ├── the-one-codex/         # Codex adapter
 │   └── the-one-ui/            # Embedded admin UI
-├── schemas/mcp/v1beta/        # 63 JSON Schema files
+├── schemas/mcp/v1beta/        # 35 JSON Schema files
 ├── models/                        # Embedding model registries (TOML)
 │   ├── local-models.toml          # 17 fastembed models (embedded in binary)
 │   └── api-models.toml            # API providers: OpenAI, Voyage, Cohere
@@ -93,58 +97,34 @@ the-one-mcp/
 └── .github/workflows/ci.yml   # CI pipeline
 ```
 
-## MCP Tool Surface (33 tools)
+## MCP Tool Surface (17 tools)
 
-### Project Lifecycle
-- `project.init` — detect project, create state, bootstrap catalog
-- `project.refresh` — re-fingerprint, sync docs, refresh profile
-- `project.profile.get` — return cached project profile
+### Work Tools (13)
 
-### Knowledge (RAG)
-- `memory.search` — semantic search across indexed docs
+#### Knowledge (RAG)
+- `memory.search` — semantic search across indexed doc chunks
 - `memory.fetch_chunk` — fetch specific chunk by ID
+- `memory.search_images` — semantic search over indexed images (screenshots, diagrams, mockups)
+- `memory.ingest_image` — manually index an image file (OCR + thumbnail)
 
-### Documents (Managed CRUD)
-- `docs.create` — create markdown in managed folder
-- `docs.update` — update existing markdown
-- `docs.delete` — soft-delete to .trash/
-- `docs.get` — return full original file
-- `docs.get_section` — return bounded heading section
+#### Documents (Managed CRUD)
 - `docs.list` — folder tree listing
+- `docs.get` — return full document or a named section (optional `section` param)
+- `docs.save` — create or update a managed document (upsert)
+- `docs.delete` — soft-delete to .trash/
 - `docs.move` — rename/move within managed folder
 
-### Trash
-- `docs.trash.list` — list trash contents
-- `docs.trash.restore` — restore from trash
-- `docs.trash.empty` — permanently empty trash
-
-### Re-index
-- `docs.reindex` — force full re-indexing
-
-### Tool Discovery
-- `tool.suggest` — project-aware recommendations grouped by state (enabled/available/recommended)
-- `tool.search` — semantic search (Qdrant) → FTS5 → registry fallback
+#### Tool Discovery & Execution
+- `tool.find` — unified discovery: modes `list`, `suggest`, `search`
 - `tool.info` — full metadata for a specific tool
-- `tool.list` — list by state: enabled, available, recommended, all
-
-### Tool Lifecycle
-- `tool.add` — add custom tool locally (user source)
-- `tool.remove` — remove user-added tool (cannot remove catalog tools)
-- `tool.enable` — activate for current CLI/project
-- `tool.disable` — deactivate for current CLI/project
 - `tool.install` — run install command, update inventory, auto-enable
-- `tool.run` — execute tool with approval gate
-- `tool.update` — refresh catalog from source + re-scan system
+- `tool.run` — execute tool with policy-gated approval
 
-### Config & Observability
-- `config.export` — full config with limits
-- `config.update` — update project config
-- `metrics.snapshot` — broker + provider metrics
-- `audit.events` — query audit trail
-
-### Models
-- `models.list` — list all available embedding models (local + API) with metadata
-- `models.check_updates` — check for new model versions from upstream registries
+### Admin Tools (4 multiplexed)
+- `setup` — project init (`project`), re-scan (`refresh`), profile (`profile`)
+- `config` — export config, update config, add/remove custom tools, list/check embedding models
+- `maintain` — reindex, tool enable/disable/refresh, trash management, image rescan/clear/delete
+- `observe` — broker metrics (`metrics`), audit log (`events`)
 
 ## Code Style
 
@@ -189,9 +169,13 @@ Tiered selection via config `"embedding_model"`:
 ## Key Decisions
 
 - All broker methods are async (tokio)
-- Embeddings: tiered fastembed (384-1024 dim ONNX) local, OpenAI-compatible API optional
+- Embeddings: tiered fastembed 5.x (384-1024 dim ONNX) local, OpenAI-compatible API optional
+- Image embeddings: CLIP-based, enabled by default via `image-embeddings` feature
+- OCR: Tesseract-based, optional via `image-ocr` feature
+- Reranking: cross-encoder reranker in `the-one-memory`
 - Provider pool: up to 5 OpenAI-compatible endpoints with health checks
-- Docs: managed folder with soft-delete to .trash/
+- Docs: managed folder with soft-delete to .trash/; `docs.save` is upsert, `docs.get` supports optional section
+- Tool discovery consolidated into `tool.find` (modes: list/suggest/search)
 - Limits: 12 configurable parameters with validation bounds
 - Transports: stdio (default), SSE, streamable HTTP
 - Per-CLI custom tools via `clientInfo` detection

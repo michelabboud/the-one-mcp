@@ -40,6 +40,14 @@ We will respond within 48 hours and work with you on a fix.
 - **Count limits**: Managed folder bounded by `max_managed_docs` (default 500)
 - **Safe characters**: Only alphanumeric, hyphens, underscores, dots, forward slashes in paths
 
+### Image Ingestion Security
+
+- **Path traversal prevention**: Image paths go through the same validation as doc paths — `../` sequences rejected
+- **File size caps**: Images are bounded before loading into the embedding pipeline to prevent memory exhaustion
+- **Format validation**: Only recognized image MIME types (PNG, JPEG, GIF, WebP, etc.) are accepted; arbitrary binary files are rejected
+- **OCR is optional**: Tesseract OCR (`image-ocr` feature) is opt-in; disabled by default in the binary distribution — reducing the attack surface for malformed image inputs
+- **Thumbnail scope**: Generated thumbnails are stored under the project's `.the-one/` directory, never outside the project boundary
+
 ### Catalog Security
 
 - **Trust levels**: Every tool entry has a trust level: `verified`, `community`, `unverified`, `deprecated`, `warning`
@@ -57,8 +65,9 @@ We will respond within 48 hours and work with you on a fix.
 
 | Version | Supported |
 |---------|-----------|
-| v0.3.x | Current — active development |
-| < v0.3.0 | Not supported |
+| v0.6.x | Current — active development |
+| v0.5.x | Security fixes only |
+| < v0.5.0 | Not supported |
 
 ## Dependencies
 
@@ -67,15 +76,19 @@ Key dependencies and their security posture:
 | Dependency | Purpose | Notes |
 |-----------|---------|-------|
 | `rusqlite` (bundled) | SQLite storage | Bundled SQLite, no system dependency |
-| `fastembed` / `ort` | ONNX embeddings | Downloads model from Hugging Face on first use |
+| `fastembed` 5.x / `ort` | ONNX text embeddings | Downloads model from Hugging Face on first use |
+| `image` (optional) | Image processing | Required by `image-embeddings` feature (default on) |
+| `tesseract` (optional) | OCR text extraction | Required by `image-ocr` feature; system `tesseract` binary must be present |
 | `reqwest` | HTTP client | Used for Qdrant, nano providers, API embeddings |
 | `axum` | HTTP server | Used for SSE/stream transports and admin UI |
 | `tokio` | Async runtime | Standard Rust async |
 
 ### Model Downloads
 
-The `fastembed` provider downloads ONNX models from Hugging Face Hub on first use. Models are cached in `~/.the-one/.fastembed_cache/`. To avoid runtime downloads in restricted environments:
+The `fastembed` 5.x provider downloads ONNX models from Hugging Face Hub on first use. Models are cached in `~/.the-one/.fastembed_cache/`. To avoid runtime downloads in restricted environments:
 
 1. Pre-download the model on a trusted machine
 2. Copy `.fastembed_cache/` to the target machine
 3. Or use `embedding_provider: "api"` to skip local models entirely
+
+Image embedding models (CLIP-based) are downloaded separately and cached alongside text models.
