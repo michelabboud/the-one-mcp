@@ -4,6 +4,134 @@
 
 ---
 
+## Upgrading to v0.12.0 (from v0.10.x or earlier)
+
+### New features (non-breaking)
+
+- **Intel Mac `local-embeddings-dynamic` feature flag:** Intel Mac users can
+  now get local embeddings by installing `libonnxruntime` via Homebrew and
+  building with the new feature flag. Default Intel Mac binaries still ship
+  lean — no behaviour change unless you opt in. See [INSTALL.md](../../INSTALL.md#intel-mac-local-embeddings-v0110).
+- **Observability deep dive:** `observe: action: metrics` now returns 8
+  additional counters plus a derived `memory_search_latency_avg_ms`. All
+  new fields are `#[serde(default)]` so existing deserializers keep working.
+  See the new [Observability Guide](observability.md).
+- **Backup / restore via `maintain: backup` and `maintain: restore`:**
+  gzipped tar of your project state, catalog, and registry. See the new
+  [Backup & Restore Guide](backup-restore.md).
+
+### Required action
+
+- **None.** v0.12.0 adds features; nothing is removed or renamed.
+
+### Optional actions
+
+- **Run `observe: metrics` after a day of normal use** to see the new
+  counters populate. Use the [Observability Guide](observability.md) to
+  interpret the numbers.
+- **Take your first backup:** ask your AI CLI _"Back up this project to
+  ~/Desktop/my-project.tar.gz"_ to exercise the new `maintain: backup`
+  flow.
+
+### No breaking changes
+
+- Tool count unchanged at 17
+- Existing `maintain` actions unchanged; only two new ones added (`backup`, `restore`)
+- Existing `MetricsSnapshotResponse` fields unchanged; new fields are additive
+
+---
+
+## Upgrading to v0.10.0 (from v0.9.x)
+
+### New features (non-breaking)
+
+- **MCP Resources API:** the `initialize` handshake now advertises a
+  `resources` capability and new `resources/list` / `resources/read`
+  JSON-RPC methods are available. See the new [MCP Resources Guide](mcp-resources.md).
+- **`the-one://` URI scheme:** three resource types — `docs/<path>`,
+  `project/profile`, `catalog/enabled`.
+- **Catalog expansion:** 117 → 184 tools across 10 languages (added
+  Kotlin, Ruby, PHP, Swift, C++ language files; expanded Python and
+  JavaScript).
+- **Landing page scaffold** under `docs-site/` — ready for GitHub Pages
+  enablement.
+
+### Required action
+
+- **None.** MCP clients that don't know about resources simply ignore the
+  capability flag in `initialize`.
+
+### Optional actions
+
+- **Claude Code users:** your client will automatically pick up the new
+  resources and surface indexed docs in its `@`-picker.
+- **To enable GitHub Pages for the landing page:** go to Settings → Pages,
+  set source to `main` branch / `/docs-site` folder. See
+  `docs-site/README.md`.
+
+### No breaking changes
+
+- Tool count unchanged at 17
+- Resources are a separate JSON-RPC surface and do not affect `tools/*`
+- Config schema unchanged
+
+---
+
+## Upgrading to v0.9.0 (from v0.8.x)
+
+### New features (non-breaking)
+
+- **Tree-sitter AST chunker:** the 5 original languages (Rust, Python,
+  TypeScript/TSX, JavaScript, Go) now use tree-sitter as their primary
+  chunker with transparent regex fallback on parse failure. 8 new
+  languages added: C, C++, Java, Kotlin, PHP, Ruby, Swift, Zig. See the
+  updated [Code Chunking Guide](code-chunking.md).
+- **Retrieval benchmark suite:** new `retrieval_bench.rs` example
+  measures 4 retrieval configurations against 3 query sets. Not part of
+  CI — run manually against a local Qdrant. See `benchmarks/README.md`.
+- **New feature flag `tree-sitter-chunker`** (default on). Lean builds
+  can disable for a smaller binary at the cost of only getting the
+  v0.8.0 regex chunkers for 5 languages.
+
+### Required action
+
+- **None.** All changes are additive. The dispatcher transparently falls
+  back to regex on tree-sitter parse failure for the 5 original languages.
+
+### Optional actions
+
+- **Re-index code-heavy projects** with `setup: action: refresh` to get
+  tree-sitter-parsed chunks with richer symbol metadata.
+
+### No breaking changes
+
+- Tool count unchanged at 17
+- Config schema unchanged
+- Existing ChunkMeta consumers unaffected
+
+---
+
+## Upgrading to v0.8.2 (from v0.8.0 / v0.8.1)
+
+### New features (non-breaking)
+
+- **Image auto-reindex:** the file watcher now re-ingests changed image
+  files (PNG/JPG/JPEG/WebP) into the Qdrant image collection in addition
+  to markdown files. No config change needed — if you had
+  `auto_index_enabled: true` and `image_embedding_enabled: true`, image
+  changes are now picked up automatically.
+
+### Required action
+
+- **None.**
+
+### No breaking changes
+
+- API surface unchanged
+- Config schema unchanged
+
+---
+
 ## Upgrading to v0.8.0 (from v0.7.x)
 
 ### New features (non-breaking)

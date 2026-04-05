@@ -1,10 +1,14 @@
 # The-One MCP API Reference
 
-> Complete reference for all 17 MCP tools exposed by the-one-mcp v0.8.0.
+> Complete reference for all 17 MCP tools + 3 MCP resource types exposed by the-one-mcp v0.12.0.
 >
 > Tools are invoked via JSON-RPC 2.0 over stdio/SSE/stream. Every tool call uses
 > `method: "tools/call"` with `params.name` and `params.arguments`. Results are
 > returned as MCP content blocks with `type: "text"` containing pretty-printed JSON.
+>
+> **Resources** (new in v0.10.0) are invoked via `resources/list` and
+> `resources/read` methods directly — not wrapped in `tools/call`. See the
+> [Resources section](#mcp-resources) below.
 
 ---
 
@@ -2012,6 +2016,216 @@ broker operation with its payload and timestamp.
 - Events are stored in the project's SQLite database and persist across restarts.
 - Older events are not automatically pruned; use `maintain trash.empty` patterns
   or direct DB management to limit growth.
+
+---
+
+## MCP Resources
+
+v0.10.0 added first-class support for the MCP `resources/list` and
+`resources/read` primitives alongside the existing `tools/*`. Resources are
+invoked directly on the JSON-RPC envelope — they do NOT go through `tools/call`.
+
+See the dedicated [MCP Resources Guide](mcp-resources.md) for the full URI
+scheme, security model, and client integration patterns.
+
+### Resource types (v0.12.0)
+
+| URI | MIME type | Content |
+|-----|-----------|---------|
+| `the-one://docs/<relative-path>` | `text/markdown` | A managed doc under `.the-one/docs/` |
+| `the-one://project/profile` | `application/json` | Project profile (languages, frameworks, commands) |
+| `the-one://catalog/enabled` | `application/json` | Enabled tools list (currently empty array — wiring deferred to a follow-up) |
+
+### resources/list
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "resources/list",
+  "params": {
+    "project_root": "/abs/path",
+    "project_id": "my-project"
+  }
+}
+```
+
+Response:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "resources": [
+      { "uri": "the-one://docs/README.md", "name": "README.md", "description": "Managed doc: README.md", "mimeType": "text/markdown" },
+      { "uri": "the-one://project/profile", "name": "Project profile", "description": "Profile metadata for this project", "mimeType": "application/json" },
+      { "uri": "the-one://catalog/enabled", "name": "Enabled tools", "description": "Tools from the global catalog that are enabled for this project", "mimeType": "application/json" }
+    ]
+  }
+}
+```
+
+### resources/read
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "resources/read",
+  "params": {
+    "project_root": "/abs/path",
+    "project_id": "my-project",
+    "uri": "the-one://docs/architecture.md"
+  }
+}
+```
+
+Response:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "result": {
+    "contents": [
+      { "uri": "the-one://docs/architecture.md", "mimeType": "text/markdown", "text": "# Architecture\n..." }
+    ]
+  }
+}
+```
+
+### Initialize handshake capability
+
+v0.10.0+ advertises the resources capability during `initialize`:
+
+```json
+{
+  "capabilities": {
+    "tools": {},
+    "resources": { "subscribe": false, "listChanged": false }
+  }
+}
+```
+
+**Security:** `docs` identifiers containing `..`, absolute paths, NUL bytes,
+tilde prefixes, or non-Normal path components are rejected before the
+filesystem is touched.
+
+---
+
+## maintain: backup and restore (v0.12.0)
+
+The `maintain` multiplexed tool gained two new actions in v0.12.0 for moving
+project state between machines. Full guide: [Backup & Restore](backup-restore.md).
+
+### maintain (action: backup)
+
+Request:
+
+```json
+{
+  "name": "maintain",
+  "arguments": {
+    "action": "backup",
+    "params": {
+      "project_root": "/abs/path",
+      "project_id": "my-project",
+      "output_path": "/abs/path/to/backup.tar.gz",
+      "include_images": true,
+      "include_qdrant_local": false
+    }
+  }
+}
+```
+
+Response:
+
+```json
+{
+  "output_path": "/abs/path/to/backup.tar.gz",
+  "size_bytes": 2345678,
+  "file_count": 142,
+  "manifest_version": "1"
+}
+```
+
+| Param | Required | Default | Meaning |
+|-------|----------|---------|---------|
+| `project_root` | yes | — | Absolute project path |
+| `project_id` | yes | — | Project identifier |
+| `output_path` | yes | — | Where to write the tarball (parent dirs auto-created) |
+| `include_images` | no | `true` | Include indexed images + thumbnails |
+| `include_qdrant_local` | no | `false` | Include local Qdrant storage (can be large) |
+
+The archive contains `<project>/.the-one/` tree, `~/.the-one/catalog.db`,
+`~/.the-one/registry/`, and a `backup-manifest.json` at the root. Excludes
+`.fastembed_cache/`, Qdrant wal/raft state, `.DS_Store`.
+
+### maintain (action: restore)
+
+Request:
+
+```json
+{
+  "name": "maintain",
+  "arguments": {
+    "action": "restore",
+    "params": {
+      "backup_path": "/abs/path/to/backup.tar.gz",
+      "target_project_root": "/abs/path/to/new-location",
+      "target_project_id": "my-project",
+      "overwrite_existing": false
+    }
+  }
+}
+```
+
+Response:
+
+```json
+{
+  "restored_files": 142,
+  "warnings": []
+}
+```
+
+Refuses to overwrite existing `.the-one/` state unless `overwrite_existing: true`.
+Rejects unsafe archive paths (absolute, `..`, non-Normal components). Validates
+the manifest version before unpacking.
+
+---
+
+## observe: metrics (v0.12.0 fields)
+
+`observe: action: metrics` returns the in-memory counter snapshot. v0.12.0
+added 8 new fields plus a derived average latency. All new fields are
+`#[serde(default)]` so older clients don't break.
+
+Full response schema:
+
+```json
+{
+  "project_init_calls": 0,
+  "project_refresh_calls": 0,
+  "memory_search_calls": 0,
+  "tool_run_calls": 0,
+  "router_fallback_calls": 0,
+  "router_decision_latency_ms_total": 0,
+  "router_provider_error_calls": 0,
+  "memory_search_latency_ms_total": 0,
+  "memory_search_latency_avg_ms": 0,
+  "image_search_calls": 0,
+  "image_ingest_calls": 0,
+  "resources_list_calls": 0,
+  "resources_read_calls": 0,
+  "watcher_events_processed": 0,
+  "watcher_events_failed": 0,
+  "qdrant_errors": 0
+}
+```
+
+See the [Observability Guide](observability.md) for how to use these for debugging.
 
 ---
 

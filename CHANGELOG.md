@@ -2,6 +2,34 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.12.1] - 2026-04-06
+
+### Documentation
+
+- **Three new guides** for Phase 2 / Phase 3 features:
+  - `docs/guides/mcp-resources.md` — full coverage of the `the-one://` URI scheme, `resources/list` / `resources/read` JSON-RPC, security model, client integration patterns, and future extensions.
+  - `docs/guides/backup-restore.md` — when to back up, what's included/excluded, the `maintain: backup` + `maintain: restore` workflow, move-to-new-machine flow, safety properties, troubleshooting.
+  - `docs/guides/observability.md` — the 15 metrics counters (7 existing + 8 v0.12.0 additions), debugging playbooks for slow search / watcher health / Qdrant errors, audit events vs counters, Prometheus export notes.
+
+- **Root docs refreshed for v0.12.0**:
+  - `README.md` — Key Features list updated (184 catalog tools, 13 chunker languages, MCP resources, backup/restore, observability); architecture diagram refreshed; documentation index expanded; Stats table bumped (17 tools, 3 resource types, 300 tests, ~24,000 LOC, 184 catalog tools).
+  - `CLAUDE.md` — landmark bullets updated to mention tree-sitter chunker feature flag, MCP resources module, backup module, Arc<BrokerMetrics>, retrieval benchmark example, Intel Mac `local-embeddings-dynamic`.
+  - `PROGRESS.md` — stats table and current version bumped in v0.12.0 commit (no changes in v0.12.1).
+
+- **Guide updates for v0.10.0/v0.12.0**:
+  - `docs/guides/api-reference.md` — new "MCP Resources" section with URI scheme, `resources/list` / `resources/read` schema, initialize handshake capability. New `maintain: backup` and `maintain: restore` documentation with parameter tables and response shapes. New `observe: metrics` v0.12.0 field documentation.
+  - `docs/guides/tool-catalog.md` — v0.10.0 expansion note (28 → 184 tools), per-file counts in the layout diagram, new language files called out.
+  - `docs/guides/upgrade-guide.md` — new sections for v0.8.2, v0.9.0, v0.10.0, v0.12.0 migration notes. Each section covers new features, required actions (always "none"), optional actions, and no-breaking-changes confirmation.
+  - `docs/guides/troubleshooting.md` — new "Backup & Restore Issues" section (7 symptoms) and new "Observability & Metrics Debugging" section (6 symptoms) with cross-links to the dedicated guides.
+
+### Dependencies
+
+- No changes (docs-only release).
+
+### No code changes
+
+This is a patch release for docs only. All 300 tests still pass, no behaviour changes.
+
 ## [0.12.0] - 2026-04-06
 
 Phase 3 of the v0.8.2 → v0.12.0 roadmap: Intel Mac prep, observability deep dive, and backup / restore. All three tasks bundled into one release because the code paths are orthogonal but small individually.

@@ -37,14 +37,17 @@ The LLM is the brain. The MCP is the data layer — catalog, filtering, executio
 
 ## Key Features
 
-- **Tool Catalog** — 28+ curated tools (growing), searchable via semantic search or full-text. Knows what's installed on your system, what's available, what to recommend.
+- **Tool Catalog** — 184+ curated tools across 10 languages (Rust, Python, JS/TS, Go, Java, Kotlin, Ruby, PHP, Swift, C/C++), searchable via semantic search or full-text. Knows what's installed on your system, what's available, what to recommend.
 - **Unlimited Memory** — Semantic RAG search over project docs. Ask about code from last week — it finds the relevant chunks without loading entire files.
 - **Hybrid Search** — Combine dense cosine similarity with sparse lexical matching (SPLADE++) for stronger exact-match retrieval. Opt-in. Great for code repos with function names, error strings, and crate identifiers.
 - **Managed Knowledge Base** — Create, update, and organize markdown docs that persist across sessions. The LLM writes notes, decisions, architecture docs.
+- **MCP Resources API** — Expose indexed docs, project profile, and tool catalog as native MCP resources addressable via `the-one://` URIs. Claude Code and other MCP clients can `@`-reference them directly. See [MCP Resources Guide](docs/guides/mcp-resources.md).
 - **Smart Discovery** — `tool.find` filters by project profile (languages, frameworks), groups by install state (enabled / available / recommended). Token-efficient.
 - **Policy-Gated Execution** — Approval scopes (once/session/forever) for high-risk tools. Headless deny-by-default.
-- **Auto-Indexing** — Background file watcher on `.the-one/docs/`. Detects file changes and automatically re-ingests updated markdown into the search index. Opt-in via `auto_index_enabled: true`.
-- **Code-Aware Chunking** — Language-aware chunking for Rust, Python, TypeScript, JavaScript, and Go. Search results include function/class names, signatures, and line ranges as structured metadata. See [Code Chunking Guide](docs/guides/code-chunking.md).
+- **Auto-Indexing** — Background file watcher on `.the-one/docs/` and `.the-one/images/`. Detects file changes and automatically re-ingests updated markdown AND images into the search index. Opt-in via `auto_index_enabled: true`.
+- **Tree-Sitter Code Chunker** — AST-based language-aware chunking for **13 languages** (Rust, Python, TypeScript, JavaScript, Go, C, C++, Java, Kotlin, PHP, Ruby, Swift, Zig). Search results include function/class names, signatures, and line ranges as structured metadata. See [Code Chunking Guide](docs/guides/code-chunking.md).
+- **Backup / Restore** — `maintain: backup` creates a gzipped tarball of your entire project state (docs, images, config, catalog, enabled tools) for moving to a new machine or off-site archival. See [Backup & Restore Guide](docs/guides/backup-restore.md).
+- **Observability** — Built-in metrics surface with per-operation latency tracking, watcher event counts, Qdrant error counters, and MCP resource usage via the `observe` tool. See [Observability Guide](docs/guides/observability.md).
 - **Multi-CLI** — Same server works with Claude Code, Gemini CLI, OpenCode, Codex. Per-CLI custom tools via `clientInfo` detection.
 
 ## Architecture
@@ -55,12 +58,17 @@ Claude Code / Gemini CLI / OpenCode / Codex
     v
 the-one-mcp broker
     |
-    +-- Tool Catalog         17 MCP tools, SQLite + Qdrant semantic search
+    +-- MCP Primitives       17 tools + 3 resource types (docs/project/catalog)
+    +-- Tool Catalog         184+ curated tools, SQLite + Qdrant semantic search
     +-- Project Lifecycle    Detect languages/frameworks, fingerprint caching
-    +-- Knowledge (RAG)      fastembed (384-1024 dim) + Qdrant vector search
+    +-- Knowledge (RAG)      fastembed (384-1024 dim) + Qdrant hybrid search
+    +-- Code Chunker         Tree-sitter AST chunking for 13 languages
     +-- Documents (CRUD)     Managed folder with soft-delete, auto-sync
+    +-- Auto-Reindex         File watcher for markdown + images
     +-- LLM Routing          Provider pool: Ollama/LiteLLM/OpenAI, 3 policies
     +-- Policy Engine        Configurable limits + risk-tier approval gates
+    +-- Backup / Restore     Gzipped tar of project state + catalog + registry
+    +-- Observability        Metrics counters + audit events via `observe`
     +-- SQLite               Project state, catalog, approvals, audit trail
 ```
 
@@ -122,16 +130,21 @@ Enable with `"image_embedding_enabled": true` in config. OCR text extraction ava
 |----------|-------------|
 | **[INSTALL.md](INSTALL.md)** | **Complete installation guide** |
 | [Quickstart](docs/guides/quickstart.md) | Shortest path to a working setup |
-| [Complete Guide](docs/guides/the-one-mcp-complete-guide.md) | Full reference (19 sections) |
-| [Image Search Guide](docs/guides/image-search.md) | Semantic image search, OCR, thumbnails, screenshot search |
-| [Reranking Guide](docs/guides/reranking.md) | Cross-encoder reranking for memory.search |
+| [Complete Guide](docs/guides/the-one-mcp-complete-guide.md) | Full reference |
+| [API Reference](docs/guides/api-reference.md) | All 17 tools + MCP resources schema |
+| [MCP Resources Guide](docs/guides/mcp-resources.md) | `resources/list`, `resources/read`, `the-one://` URI scheme |
+| [Code Chunking Guide](docs/guides/code-chunking.md) | Tree-sitter AST chunking for 13 languages |
 | [Hybrid Search Guide](docs/guides/hybrid-search.md) | Dense + sparse search for exact-match retrieval |
+| [Reranking Guide](docs/guides/reranking.md) | Cross-encoder reranking for memory.search |
+| [Image Search Guide](docs/guides/image-search.md) | Semantic image search, OCR, thumbnails, screenshot search |
 | [Auto-Indexing Guide](docs/guides/auto-indexing.md) | Background file watcher with automatic re-ingestion |
-| [Code Chunking Guide](docs/guides/code-chunking.md) | Language-aware chunking for Rust, Python, TypeScript, JavaScript, Go |
-| [Operator Runbook](docs/ops/operator-runbook.md) | Operations, backup, incident triage |
-| [Tool Ecosystem](docs/plans/tool-ecosystem-architecture.md) | 7-layer tool catalog vision |
+| [Tool Catalog Guide](docs/guides/tool-catalog.md) | 184+ curated tools across 10 languages |
+| [Backup & Restore Guide](docs/guides/backup-restore.md) | `maintain: backup` / `restore` for moving between machines |
+| [Observability Guide](docs/guides/observability.md) | Metrics counters, audit events, debugging with `observe` |
+| [Configuration Guide](docs/guides/configuration.md) | All config fields across 5 layers |
+| [Troubleshooting](docs/guides/troubleshooting.md) | Symptom-based debugging |
+| [Upgrade Guide](docs/guides/upgrade-guide.md) | Version-to-version migration notes |
 | [Contributing](CONTRIBUTING.md) | Add tools to the catalog |
-| [Architecture](docs/plans/the-one-mcp-architecture-prompt.md) | Design rationale |
 
 ## Workspace Crates
 
@@ -162,15 +175,19 @@ bash scripts/build.sh release --status # check workflow progress
 
 Releases are **manual only** — tagging does not auto-trigger builds. You decide when to build artifacts.
 
-## Stats
+## Stats (v0.12.0)
 
 | Metric | Count |
 |--------|-------|
 | MCP Tools | 17 |
-| Tests | 272 |
-| Rust LOC | ~21,000 |
+| MCP Resource Types | 3 (`docs`, `project`, `catalog`) |
+| Tests | 300 |
+| Rust LOC | ~24,000 |
 | JSON Schemas | 35 |
-| Catalog Tools | 28 (growing) |
+| Catalog Tools | 184 across 10 languages |
+| Supported Code Languages (chunker) | 13 |
+| `maintain` actions | 14 |
+| Metrics counters | 15 |
 | Supported Platforms | 6 (Linux/macOS/Windows x86-64 + ARM64) |
 | Supported AI CLIs | 4 (Claude Code, Gemini CLI, OpenCode, Codex) |
 

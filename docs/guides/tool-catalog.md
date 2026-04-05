@@ -3,6 +3,12 @@
 > The tool catalog is the central registry of developer tools, LSPs, and MCP servers managed
 > by the-one-mcp. It helps you discover, install, and run the right tools for your project
 > without drowning in noise.
+>
+> **v0.10.0 update:** catalog expanded from 28 tools to **184 tools** across
+> 10 languages (Rust, Python, JavaScript/TypeScript, Go, Java, Kotlin, Ruby,
+> PHP, Swift, C/C++). New language files: `kotlin.json`, `ruby.json`,
+> `php.json`, `swift.json`. Existing files (`python.json`, `javascript.json`,
+> `cpp.json`) substantially expanded.
 
 ## What Is the Tool Catalog?
 
@@ -34,13 +40,17 @@ tools/catalog/
 ├── _schema.json           # JSON Schema for all entries
 ├── _index.json            # Catalog metadata and version
 ├── _changelog.json        # Change history
-├── languages/             # Language-specific tools
-│   ├── rust.json
-│   ├── python.json
-│   ├── javascript.json
-│   ├── go.json
-│   ├── java.json
-│   └── cpp.json
+├── languages/             # Language-specific tools (10 files, 184 total)
+│   ├── rust.json          # 16 tools
+│   ├── python.json        # 40 tools
+│   ├── javascript.json    # 38 tools (covers TypeScript too)
+│   ├── go.json            # 15 tools
+│   ├── java.json          # 16 tools
+│   ├── kotlin.json        # 7 tools (new in v0.10.0)
+│   ├── ruby.json          # 8 tools (new in v0.10.0)
+│   ├── php.json           # 7 tools (new in v0.10.0)
+│   ├── swift.json         # 5 tools (new in v0.10.0)
+│   └── cpp.json           # 9 tools (populated in v0.10.0, covers C too)
 ├── categories/            # Cross-language category tools
 │   ├── security.json
 │   ├── testing.json

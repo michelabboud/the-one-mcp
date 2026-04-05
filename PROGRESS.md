@@ -1,10 +1,10 @@
 # Progress Report
 
-## Current Version: v0.12.0
+## Current Version: v0.12.1
 
 ## Overall Status
 
-All planned stages complete. Twelve major releases shipped:
+All planned stages complete. Thirteen major releases shipped:
 - **v0.1.0** — Initial workspace: 8 crates, 14 MCP tools, stub implementations
 - **v0.2.0** — Production overhaul: async broker, real embeddings, 3 transports, 24 tools
 - **v0.3.0** — Tool catalog: SQLite + Qdrant semantic search, tool lifecycle, 31 tools
@@ -18,6 +18,7 @@ All planned stages complete. Twelve major releases shipped:
 - **v0.9.0** — Tree-sitter AST chunker for 13 languages (5 existing + C/C++/Java/Kotlin/PHP/Ruby/Swift/Zig), retrieval benchmark suite, 283 tests
 - **v0.10.0** — MCP Resources API (`resources/list`, `resources/read`, `the-one://` URI scheme), catalog expansion (117 → 184 tools across 10 languages), landing page scaffold, 296 tests
 - **v0.12.0** — Phase 3 bundled: Intel Mac `local-embeddings-dynamic` feature flag, observability deep dive (+8 metric counters + per-operation latency + Arc<BrokerMetrics>), backup/restore via `maintain: backup` and `maintain: restore` with tar+gzip, 300 tests
+- **v0.12.1** — Docs refresh: 3 new guides (mcp-resources, backup-restore, observability) + README/CLAUDE.md/api-reference/tool-catalog/upgrade-guide/troubleshooting updated for v0.12.0 feature surface
 
 Build/test gates: all green. 300 tests (default), 0 failures.
 

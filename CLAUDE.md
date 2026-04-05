@@ -85,9 +85,14 @@ All crates use `CoreError` from `the-one-core::error`. Library code uses `thiser
 - Releases are manual-only via `build.sh release v0.8.0` (triggers GitHub Actions workflow_dispatch, does NOT auto-trigger on tags)
 - Tool catalog: `tools/catalog/` (curated JSON), `~/.the-one/catalog.db` (SQLite with FTS5), Qdrant `the_one_tools` collection (semantic)
 - Custom tools: `~/.the-one/registry/custom.json` (shared), `custom-<cli>.json` (per-CLI)
-- 17 MCP tools (see `crates/the-one-mcp/src/transport/tools.rs`), 272 tests, 35 schemas, 28 catalog entries
+- 17 MCP tools (see `crates/the-one-mcp/src/transport/tools.rs`) + 3 MCP resource types (`docs`, `project`, `catalog` via `the-one://` URI scheme, v0.10.0+), 300 tests, 35 schemas, 184 catalog entries across 10 languages
 - Hybrid search: `hybrid_search_enabled`, `hybrid_dense_weight`, `hybrid_sparse_weight`, `sparse_model` config fields; requires reindex after enabling
-- File watcher: `auto_index_enabled`, `auto_index_debounce_ms` config fields; background tokio task with real auto-reingestion for markdown (v0.8.0); image auto-reindex deferred to v0.8.1
+- File watcher: `auto_index_enabled`, `auto_index_debounce_ms` config fields; background tokio task with auto-reingestion for markdown (v0.8.0) AND images (v0.8.2) via `image_ingest_standalone`/`image_remove_standalone` free functions
 - Admin UI image gallery: `/images` route, `/images/thumbnail/<hash>`, `/api/images` JSON endpoint
 - Screenshot search: `memory.search_images` accepts optional `image_base64` OR `query` (exactly one required)
-- Code-aware chunker: `chunk_file(path, content, max_tokens)` dispatcher in `the-one-memory/src/chunker.rs`; language chunkers for Rust/Python/TypeScript/JavaScript/Go; `ChunkMeta` extended with `language`, `symbol`, `signature`, `line_range` fields
+- Tree-sitter chunker (v0.9.0): `chunk_file(path, content, max_tokens)` dispatcher in `the-one-memory/src/chunker.rs`; 13 languages via tree-sitter (Rust/Python/TS/JS/Go with regex fallback + C/C++/Java/Kotlin/PHP/Ruby/Swift/Zig tree-sitter-only) behind `tree-sitter-chunker` feature (default on); shared walker in `chunker_ts_impl::chunk_with_tree_sitter`; `tree-sitter-kotlin-ng` (not `tree-sitter-kotlin`, which is pinned to tree-sitter 0.20)
+- MCP Resources API (v0.10.0): `resources_list`/`resources_read` broker methods in `crates/the-one-mcp/src/resources.rs`; JSON-RPC `resources/list` + `resources/read` handlers in `transport/jsonrpc.rs`; `is_safe_doc_identifier` guards path traversal
+- Backup/restore (v0.12.0): `maintain: backup` and `maintain: restore` actions backed by `crates/the-one-mcp/src/backup.rs`; uses `tar 0.4` + `flate2 1`; excludes `.fastembed_cache/` and Qdrant wal/raft; manifest version "1"
+- Observability (v0.12.0): `BrokerMetrics` wrapped in `Arc<BrokerMetrics>` so watcher task can clone; 15 metric counters total (7 original + 8 new); `MetricsSnapshotResponse` fields added with `#[serde(default)]`
+- Retrieval benchmark (v0.9.0): `crates/the-one-memory/examples/retrieval_bench.rs`; requires running Qdrant; NOT in CI; run manually with `cargo run --release --example retrieval_bench -p the-one-memory --features tree-sitter-chunker`
+- Intel Mac (v0.11.0 flag in v0.12.0 release): `local-embeddings-dynamic` feature resolves libonnxruntime at runtime via `brew install onnxruntime`; mutually exclusive with `local-embeddings` (ort-download-binaries)

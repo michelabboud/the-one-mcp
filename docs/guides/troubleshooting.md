@@ -1056,3 +1056,73 @@ Both fields are optional in JSON but exactly one must be present. Ensure the LLM
 ### Image search via base64 returns wrong results
 
 The base64 image is embedded using the same image model as the indexed images. If you indexed with `nomic-vision` but pass a base64 image from a very different domain (e.g., a photo vs. a diagram), the embedding space match may be weak. This is expected — image→image similarity works best within the same visual domain.
+
+---
+
+## Backup & Restore Issues (v0.12.0+)
+
+### `project state directory does not exist`
+
+Backup was pointed at a project that hasn't been initialized. Run `setup (action: init)` first to create `.the-one/`, or check that `project_root` is the correct absolute path.
+
+### `target already has .the-one/ state; pass overwrite_existing=true to replace`
+
+Restore refused because the target directory already has a populated project state. Either:
+
+- Move the existing `.the-one/` aside: `mv .the-one .the-one.backup` and retry
+- Pass `overwrite_existing: true` if you're sure you want to clobber
+
+### `backup manifest version X is not supported by this binary`
+
+You're trying to restore a newer backup format on an older binary. Upgrade the-one-mcp to the version that created the backup (or newer).
+
+### `unsafe path in backup archive`
+
+The tarball has entries with `..` or absolute paths. This should never happen for backups produced by the-one-mcp itself. If it does, someone produced a malicious or corrupted archive — don't restore it.
+
+### First search is very slow after restore
+
+Expected: the embedding model is downloading for the first time after restore. A ~130MB download is typical for the `quality` tier. Cached for all subsequent queries. `.fastembed_cache/` is excluded from backups to keep them small.
+
+### Docs visible but searches return empty after restore
+
+If the project used a local Qdrant fallback and you restored without `include_qdrant_local: true`, the Qdrant collection on the new machine is empty. Run `maintain (action: reindex)` to rebuild the vector index from the restored `docs/` directory.
+
+See the full [Backup & Restore Guide](backup-restore.md) for the end-to-end move-to-new-machine flow.
+
+---
+
+## Observability & Metrics Debugging (v0.12.0+)
+
+### How to read metrics
+
+Call `observe: action: metrics` from any AI CLI connected to the-one-mcp. The returned `MetricsSnapshotResponse` has 16 fields covering call counts, latencies, and error counters. See the [Observability Guide](observability.md) for the full schema and debugging playbooks.
+
+### `memory_search_latency_avg_ms` is unexpectedly high
+
+- **Under 50ms** — healthy
+- **50–200ms** — typical for hybrid search or reranking enabled
+- **200–1000ms** — Qdrant is likely remote, or reranker runs on every result
+- **Over 1s** — embedding model re-loading every call (check fastembed cache), or Qdrant unreachable and searches fall through to keyword match
+
+Check `qdrant_errors` at the same time — if it's growing, Qdrant connectivity is the root cause.
+
+### `watcher_events_failed` is non-zero
+
+The watcher tried to re-ingest a file but hit an error. Check server logs at WARN level for per-file messages. Common causes:
+
+- Malformed markdown frontmatter
+- File path contains non-UTF-8 bytes
+- File changed mid-read
+- Qdrant unreachable (also surfaces in `qdrant_errors`)
+
+### `resources_list_calls` and `resources_read_calls` stay at 0
+
+No MCP client connected to your broker is using the v0.10.0 resources API. Either:
+
+- Your client (e.g., an older Claude Code) doesn't know about resources yet — upgrade the client
+- Your client only uses the tools path — that's fine, resources are additive
+
+### Counters reset after server restart
+
+Expected. `BrokerMetrics` is in-memory only. If you need persistent history, use the audit event log (`observe: action: events`) which is written to the project's SQLite `state.db` and survives restarts.
