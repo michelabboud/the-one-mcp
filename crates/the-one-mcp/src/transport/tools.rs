@@ -30,6 +30,26 @@ pub fn tool_definitions() -> Vec<Value> {
             },
             "required": ["project_root", "project_id", "id"]
         })),
+        tool_def("memory.search_images", "Semantic search over indexed project images. Finds screenshots, diagrams, photos, and mockups matching a natural-language query.", json!({
+            "type": "object",
+            "properties": {
+                "project_root": { "type": "string", "description": "Absolute path to the project root" },
+                "project_id": { "type": "string", "description": "Unique project identifier" },
+                "query": { "type": "string", "description": "Natural-language search query" },
+                "top_k": { "type": "integer", "description": "Maximum number of results (default 5)", "default": 5 }
+            },
+            "required": ["project_root", "project_id", "query"]
+        })),
+        tool_def("memory.ingest_image", "Manually index an image file. Extracts OCR text (if enabled) and generates a thumbnail.", json!({
+            "type": "object",
+            "properties": {
+                "project_root": { "type": "string", "description": "Absolute path to the project root" },
+                "project_id": { "type": "string", "description": "Unique project identifier" },
+                "path": { "type": "string", "description": "Absolute or project-relative path to the image" },
+                "caption": { "type": "string", "description": "Optional user-provided caption" }
+            },
+            "required": ["project_root", "project_id", "path"]
+        })),
         tool_def("docs.list", "List all indexed documentation paths for a project.", json!({
             "type": "object",
             "properties": {
@@ -148,13 +168,13 @@ pub fn tool_definitions() -> Vec<Value> {
             },
             "required": ["action"]
         })),
-        tool_def("maintain", "Housekeeping: re-indexing, tool enable/disable, catalog refresh, trash management. Actions: 'reindex', 'tool.enable', 'tool.disable', 'tool.refresh', 'trash.list', 'trash.restore', 'trash.empty'.", json!({
+        tool_def("maintain", "Housekeeping: re-indexing, tool enable/disable, catalog refresh, trash management, image management. Actions: 'reindex', 'tool.enable', 'tool.disable', 'tool.refresh', 'trash.list', 'trash.restore', 'trash.empty', 'images.rescan', 'images.clear', 'images.delete'.", json!({
             "type": "object",
             "properties": {
-                "action": { "type": "string", "description": "Operation to perform", "enum": ["reindex", "tool.enable", "tool.disable", "tool.refresh", "trash.list", "trash.restore", "trash.empty"] },
+                "action": { "type": "string", "description": "Operation to perform", "enum": ["reindex", "tool.enable", "tool.disable", "tool.refresh", "trash.list", "trash.restore", "trash.empty", "images.rescan", "images.clear", "images.delete"] },
                 "params": {
                     "type": "object",
-                    "description": "Action-specific parameters. Most actions need {project_root, project_id}. 'tool.enable': {project_root, family}. 'tool.disable': {tool_id, project_root, project_id}. 'trash.restore': {project_root, project_id, path}."
+                    "description": "Action-specific parameters. Most actions need {project_root, project_id}. 'tool.enable': {project_root, family}. 'tool.disable': {tool_id, project_root, project_id}. 'trash.restore': {project_root, project_id, path}. 'images.delete': {project_root, project_id, path}."
                 }
             },
             "required": ["action"]
@@ -180,7 +200,7 @@ mod tests {
     #[test]
     fn test_tool_definitions_count() {
         let tools = tool_definitions();
-        assert_eq!(tools.len(), 15); // 11 work + 4 admin (setup, config, maintain, observe)
+        assert_eq!(tools.len(), 17); // 13 work + 4 admin (setup, config, maintain, observe)
     }
 
     #[test]

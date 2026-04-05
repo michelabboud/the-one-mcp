@@ -382,6 +382,42 @@ async fn dispatch_tool(broker: &McpBroker, tool_name: &str, args: Value) -> Resu
                 .map_err(|e| e.to_string())?;
             serde_json::to_value(result).map_err(|e| e.to_string())
         }
+        "memory.search_images" => {
+            let project_root = args["project_root"]
+                .as_str()
+                .ok_or("missing project_root")?;
+            let project_id = args["project_id"].as_str().ok_or("missing project_id")?;
+            let query = args["query"].as_str().ok_or("missing query")?;
+            let top_k = args["top_k"].as_u64().unwrap_or(5) as usize;
+            let result = broker
+                .image_search(ImageSearchRequest {
+                    project_root: project_root.to_string(),
+                    project_id: project_id.to_string(),
+                    query: query.to_string(),
+                    top_k,
+                })
+                .await
+                .map_err(|e| e.to_string())?;
+            serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+        "memory.ingest_image" => {
+            let project_root = args["project_root"]
+                .as_str()
+                .ok_or("missing project_root")?;
+            let project_id = args["project_id"].as_str().ok_or("missing project_id")?;
+            let path = args["path"].as_str().ok_or("missing path")?;
+            let caption = args.get("caption").and_then(|v| v.as_str()).map(String::from);
+            let result = broker
+                .image_ingest(ImageIngestRequest {
+                    project_root: project_root.to_string(),
+                    project_id: project_id.to_string(),
+                    path: path.to_string(),
+                    caption,
+                })
+                .await
+                .map_err(|e| e.to_string())?;
+            serde_json::to_value(result).map_err(|e| e.to_string())
+        }
 
         // ── Multiplexed admin tools ─────────────────────────────
         "setup" => dispatch_setup(broker, args).await,
@@ -669,7 +705,7 @@ mod tests {
         let response = dispatch(&broker, request).await;
         assert!(response.error.is_none());
         let tools = response.result.unwrap()["tools"].as_array().unwrap().len();
-        assert_eq!(tools, 15);
+        assert_eq!(tools, 17);
     }
 
     #[tokio::test]
