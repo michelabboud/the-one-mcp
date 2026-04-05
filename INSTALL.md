@@ -22,7 +22,7 @@ This will:
 
 ```bash
 # Install specific version
-bash install.sh --version v0.6.0
+bash install.sh --version v0.7.0
 
 # Install from a local build (after building from source)
 bash install.sh --local ./target/release
@@ -98,7 +98,7 @@ opencode mcp add --name the-one-mcp --command ~/.the-one/bin/the-one-mcp --args 
 # Smoke test
 echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' | ~/.the-one/bin/the-one-mcp serve
 
-# List all 17 tools
+# List all 17 tools (v0.7.0)
 echo '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' | ~/.the-one/bin/the-one-mcp serve
 ```
 

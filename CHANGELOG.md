@@ -2,6 +2,34 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.7.0] - 2026-04-05
+
+### Added
+- **Hybrid search (dense + sparse)** — combine cosine similarity with lexical/sparse matching for better exact-match retrieval. Opt-in via `hybrid_search_enabled: true`. Default weights: 70% dense, 30% sparse.
+- **File watcher for incremental indexing** — background tokio task watches `.the-one/docs/` and `.the-one/images/` and logs file changes. Opt-in via `auto_index_enabled: true`. Auto re-ingestion deferred to v0.7.1.
+- **Screenshot-based image search** — `memory.search_images` now accepts optional `image_base64` field in addition to `query`. Exactly one must be provided. Enables image→image similarity via Nomic Vision dual-encoder.
+- **Admin UI image gallery** — new `/images` route with thumbnail grid, `/images/thumbnail/<hash>` serving with security validation, `/api/images` JSON endpoint.
+- 2 new user guides: `docs/guides/hybrid-search.md`, `docs/guides/auto-indexing.md`
+- `fastembed::SparseTextEmbedding` integration (SPLADE++ as "bm25" alias since fastembed 5.13 lacks classical BM25)
+- `notify` + `notify-debouncer-mini` dependencies
+- `base64` + `tempfile` (regular deps in the-one-mcp)
+- `CoreError::InvalidRequest(String)` variant
+
+### Changed
+- `ImageSearchRequest.query` is now `Option<String>` (was required) — either `query` or `image_base64` must be set
+- `memory.search_images` tool schema updated: query no longer required, image_base64 added
+- MCP tool count unchanged at 17 (extensions, not additions)
+
+### Fixed
+- **CI release workflow:** fetch-tags in release job checkout, git config identity set before tag creation
+- **macOS x86_64 build:** now uses `no_local_embeddings: true` since fastembed 5.13's ort-sys dropped Intel Mac prebuilts
+
+### Dependencies
+- notify 6.1
+- notify-debouncer-mini 0.4
+- base64 0.22
+- tempfile 3.x
+
 ## [0.6.0] - 2026-04-05
 
 ### Added

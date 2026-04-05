@@ -1,30 +1,31 @@
 # Progress Report
 
-## Current Version: v0.6.0
+## Current Version: v0.7.0
 
 ## Overall Status
 
-All planned stages complete. Six major releases shipped:
+All planned stages complete. Seven major releases shipped:
 - **v0.1.0** — Initial workspace: 8 crates, 14 MCP tools, stub implementations
 - **v0.2.0** — Production overhaul: async broker, real embeddings, 3 transports, 24 tools
 - **v0.3.0** — Tool catalog: SQLite + Qdrant semantic search, tool lifecycle, 31 tools
 - **v0.4.0** — Embedding model registry: TOML-based model registries, quality tier default, interactive installer selection, 33 tools
 - **v0.5.0** — Tool consolidation: 33→15 tools (~52% token savings), multiplexed admin, merged work tools
 - **v0.6.0** — Multimodal: image embeddings, OCR, reranking (fastembed 5.x), 17 tools, 208 tests
+- **v0.7.0** — Hybrid search (dense+sparse), file watcher, admin UI image gallery, screenshot image search, 234 tests
 
-Build/test gates: all green. 208 tests, 0 failures.
+Build/test gates: all green. 234 tests, 0 failures.
 
 ## Stats
 
-| Metric | v0.1.0 | v0.2.0 | v0.3.0 | v0.4.0 | v0.5.0 | v0.6.0 |
-|--------|--------|--------|--------|--------|--------|--------|
-| MCP Tools | 14 | 24 | 31 | 33 | 15 | **17** |
-| Tests | 68 | 122 | 135 | 174 | 183 | **208** |
-| Rust LOC | 6,400 | ~10,000 | ~12,800 | ~14,000 | ~14,200 | **~16,500** |
-| JSON Schemas | 33 | 49 | 63 | 63 | 31 | **35** |
-| Catalog Tools | — | — | 28 | 28 | 28 | **28** |
-| Platforms | 1 | 1 | 6 | 6 | 6 | **6** |
-| AI CLIs | 2 | 2 | 4 | 4 | 4 | **4** |
+| Metric | v0.1.0 | v0.2.0 | v0.3.0 | v0.4.0 | v0.5.0 | v0.6.0 | v0.7.0 |
+|--------|--------|--------|--------|--------|--------|--------|--------|
+| MCP Tools | 14 | 24 | 31 | 33 | 15 | 17 | **17** |
+| Tests | 68 | 122 | 135 | 174 | 183 | 208 | **234** |
+| Rust LOC | 6,400 | ~10,000 | ~12,800 | ~14,000 | ~14,200 | ~16,500 | **~19,000** |
+| JSON Schemas | 33 | 49 | 63 | 63 | 31 | 35 | **35** |
+| Catalog Tools | — | — | 28 | 28 | 28 | 28 | **28** |
+| Platforms | 1 | 1 | 6 | 6 | 6 | 6 | **6** |
+| AI CLIs | 2 | 2 | 4 | 4 | 4 | 4 | **4** |
 
 ## Stage Progress (v0.1.0)
 
@@ -178,6 +179,43 @@ All complete: Claude Code + Gemini CLI + OpenCode + Codex auto-detection, tiered
   - New user guides: `docs/guides/image-search.md`, `docs/guides/reranking.md`
   - All top-level docs updated (README, CHANGELOG, PROGRESS, CLAUDE.md, INSTALL.md, VERSION)
   - v0.6.0 tagged and cross-platform release triggered
+
+## Hybrid Search + Watcher + UI Gallery (v0.7.0) — 5 Phases
+
+- Phase A: Sparse embeddings trait + BM25/SPLADE
+  - `SparseEmbeddingProvider` trait in `the-one-memory`
+  - `FastEmbedSparseProvider` using `fastembed::SparseTextEmbedding` with `SPLADEPPV1`
+  - Note: fastembed 5.13 calls this "bm25" alias but the model is SPLADE++Ensemble Distil
+
+- Phase B-D: Qdrant hybrid collection + MemoryEngine integration + config
+  - `HybridQdrantCollection` with named dense + sparse vector support
+  - `MemoryEngine::search_hybrid` fusing both signals with configurable weights
+  - Config fields: `hybrid_search_enabled`, `hybrid_dense_weight`, `hybrid_sparse_weight`, `sparse_model`
+  - Score normalization: saturation function for sparse scores
+
+- Phase E-F: File watcher + broker wiring
+  - `notify 6.1` + `notify-debouncer-mini 0.4` dependencies
+  - `crates/the-one-mcp/src/watcher.rs` — background tokio task per project
+  - Config fields: `auto_index_enabled`, `auto_index_debounce_ms` (default 2000ms)
+  - Watches `.the-one/docs/` (*.md) and `.the-one/images/` (*.png/jpg/jpeg/webp)
+  - Events logged; auto-reingestion deferred to v0.7.1
+
+- Phase G: Screenshot image search
+  - `ImageSearchRequest.query` changed to `Option<String>`
+  - New optional `image_base64` field — base64-encoded image for image→image similarity
+  - Mutual exclusion enforced: exactly one of query or image_base64 must be set
+  - Decodes base64 → tempfile → embedding → Qdrant query
+  - `CoreError::InvalidRequest(String)` added to error enum
+
+- Phase H: Admin UI image gallery
+  - `/images` route: thumbnail grid of all indexed images for active project
+  - `/images/thumbnail/<hash>` serving with regex security validation on hash
+  - `/api/images` JSON endpoint returning image metadata
+
+- Phase I-J (this release): Documentation + release
+  - New guides: `docs/guides/hybrid-search.md`, `docs/guides/auto-indexing.md`
+  - All top-level docs updated (README, CHANGELOG, PROGRESS, CLAUDE.md, INSTALL.md, VERSION)
+  - v0.7.0 tagged and cross-platform release triggered
 
 ## What's Next
 

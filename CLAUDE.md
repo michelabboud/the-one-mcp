@@ -82,7 +82,11 @@ All crates use `CoreError` from `the-one-core::error`. Library code uses `thiser
 - `scripts/install.sh` handles full installation: download, config, CLI registration (Claude/Gemini/OpenCode/Codex)
 - `scripts/update-local-models.sh` and `scripts/update-api-models.sh` check for new embedding model versions
 - `scripts/build.sh` is the build + release manager: `build`, `build --lean`, `dev`, `test`, `check`, `package`, `install`, `release`
-- Releases are manual-only via `build.sh release v0.4.0` (triggers GitHub Actions workflow_dispatch, does NOT auto-trigger on tags)
+- Releases are manual-only via `build.sh release v0.7.0` (triggers GitHub Actions workflow_dispatch, does NOT auto-trigger on tags)
 - Tool catalog: `tools/catalog/` (curated JSON), `~/.the-one/catalog.db` (SQLite with FTS5), Qdrant `the_one_tools` collection (semantic)
 - Custom tools: `~/.the-one/registry/custom.json` (shared), `custom-<cli>.json` (per-CLI)
-- 17 MCP tools (see `crates/the-one-mcp/src/transport/tools.rs`), 208 tests, 35 schemas, 28 catalog entries
+- 17 MCP tools (see `crates/the-one-mcp/src/transport/tools.rs`), 234 tests, 35 schemas, 28 catalog entries
+- Hybrid search: `hybrid_search_enabled`, `hybrid_dense_weight`, `hybrid_sparse_weight`, `sparse_model` config fields; requires reindex after enabling
+- File watcher: `auto_index_enabled`, `auto_index_debounce_ms` config fields; background tokio task, events logged only (v0.7.0)
+- Admin UI image gallery: `/images` route, `/images/thumbnail/<hash>`, `/api/images` JSON endpoint
+- Screenshot search: `memory.search_images` accepts optional `image_base64` OR `query` (exactly one required)
