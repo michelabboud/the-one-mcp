@@ -1,10 +1,10 @@
 # Progress Report
 
-## Current Version: v0.13.1
+## Current Version: v0.14.0
 
 ## Overall Status
 
-All planned stages complete. Fifteen major releases shipped:
+All planned stages complete. Sixteen releases shipped:
 - **v0.1.0** — Initial workspace: 8 crates, 14 MCP tools, stub implementations
 - **v0.2.0** — Production overhaul: async broker, real embeddings, 3 transports, 24 tools
 - **v0.3.0** — Tool catalog: SQLite + Qdrant semantic search, tool lifecycle, 31 tools
@@ -21,8 +21,9 @@ All planned stages complete. Fifteen major releases shipped:
 - **v0.12.1** — Docs refresh: 3 new guides (mcp-resources, backup-restore, observability) + README/CLAUDE.md/api-reference/tool-catalog/upgrade-guide/troubleshooting updated for v0.12.0 feature surface
 - **v0.13.0** — Major UI overhaul (landing page, /ingest, /graph, v2 dashboard, top nav with project switcher, shared page shell, dark-mode-aware) + Graph RAG end-to-end wiring (extraction pipeline, `maintain: graph.extract`/`graph.stats`, LightRAG-inspired research) + graph-rag.md guide, 302 tests
 - **v0.13.1** — Full LightRAG parity: entity name normalization, entity/relation description vector store (3 Qdrant collections), description summarization, query keyword extraction, gleaning/continue-extraction pass, canvas force-directed graph visualization, 308 tests
+- **v0.14.0** — Catalog expansion to 365 tools (+248 new from baseline 117). All 10 language files + all 8 category files populated. Closes the deferred Task 5 from the 9-item roadmap.
 
-Build/test gates: all green. 308 tests (default), 0 failures.
+Build/test gates: all green. 308 tests (default), 0 failures. 365 catalog tools.
 
 ## Stats
 
@@ -36,7 +37,7 @@ Build/test gates: all green. 308 tests (default), 0 failures.
 | maintain actions | — | — | — | — | 10 | 11 | 12 | 12 | 12 | 12 | 12 | **14** |
 | Rust LOC | 6,400 | ~10,000 | ~12,800 | ~14,000 | ~14,200 | ~16,500 | ~19,000 | ~21,000 | ~21,100 | ~22,500 | ~23,200 | **~24,000** |
 | JSON Schemas | 33 | 49 | 63 | 63 | 31 | 35 | 35 | 35 | 35 | 35 | 35 | **35** |
-| Catalog Tools | — | — | 28 | 28 | 28 | 28 | 28 | 28 | 28 | 28 | 184 | **184** |
+| Catalog Tools | — | — | 28 | 28 | 28 | 28 | 28 | 28 | 28 | 28 | 184 | **365** |
 | Platforms | 1 | 1 | 6 | 6 | 6 | 6 | 6 | 6 | 6 | 6 | 6 | **6** |
 | AI CLIs | 2 | 2 | 4 | 4 | 4 | 4 | 4 | 4 | 4 | 4 | 4 | **4** |
 

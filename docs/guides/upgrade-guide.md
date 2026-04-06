@@ -4,6 +4,24 @@
 
 ---
 
+## Upgrading to v0.14.0 (from v0.13.x)
+
+### New features (non-breaking)
+
+- **Catalog expansion to 365 tools** — all 10 language files and all 8
+  category files are now fully populated. +248 new entries from the baseline
+  117. Covers Rust, Python, JS/TS, Go, Java, Kotlin, Ruby, PHP, Swift, C/C++
+  plus cross-language categories: security, CI/CD, testing, databases, cloud,
+  docs, monitoring, automation.
+- Run `maintain (action: tool.refresh)` to import the new entries into your
+  local `catalog.db` so `tool.find` can discover them.
+
+### Required action
+
+- **None.** The catalog JSON ships in the binary; `tool.refresh` imports it.
+
+---
+
 ## Upgrading to v0.13.1 (from v0.13.0)
 
 ### New features (non-breaking)

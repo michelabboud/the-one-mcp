@@ -2,6 +2,25 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.14.1] - 2026-04-06
+
+### Documentation
+
+- All docs refreshed for v0.14.0 catalog expansion (184→365 tools):
+  README stats, CLAUDE.md counts, PROGRESS.md version + release entry,
+  tool-catalog.md per-file counts, upgrade-guide.md v0.14.0 section,
+  landing page tool count, CHANGELOG v0.14.0 entry.
+
+## [0.14.0] - 2026-04-06
+
+### Added
+
+- **Catalog expansion to 365 tools** (+248 new entries from baseline 117).
+  Closes the deferred Task 5 from the 9-item roadmap (Phase 2, Task 2.2).
+  Every language file and every category file is now populated with curated,
+  schema-validated entries. See the v0.14.0 commit message for per-file
+  breakdown.
+
 ## [0.13.1] - 2026-04-06
 
 Full LightRAG parity — all six features from the v0.13.0 comparison matrix that were marked ❌ are now ✅.

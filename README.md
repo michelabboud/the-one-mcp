@@ -37,7 +37,7 @@ The LLM is the brain. The MCP is the data layer — catalog, filtering, executio
 
 ## Key Features
 
-- **Tool Catalog** — 184+ curated tools across 10 languages (Rust, Python, JS/TS, Go, Java, Kotlin, Ruby, PHP, Swift, C/C++), searchable via semantic search or full-text. Knows what's installed on your system, what's available, what to recommend.
+- **Tool Catalog** — 365 curated tools across 10 languages (Rust, Python, JS/TS, Go, Java, Kotlin, Ruby, PHP, Swift, C/C++), searchable via semantic search or full-text. Knows what's installed on your system, what's available, what to recommend.
 - **Unlimited Memory** — Semantic RAG search over project docs. Ask about code from last week — it finds the relevant chunks without loading entire files.
 - **Hybrid Search** — Combine dense cosine similarity with sparse lexical matching (SPLADE++) for stronger exact-match retrieval. Opt-in. Great for code repos with function names, error strings, and crate identifiers.
 - **Managed Knowledge Base** — Create, update, and organize markdown docs that persist across sessions. The LLM writes notes, decisions, architecture docs.
@@ -59,7 +59,7 @@ Claude Code / Gemini CLI / OpenCode / Codex
 the-one-mcp broker
     |
     +-- MCP Primitives       17 tools + 3 resource types (docs/project/catalog)
-    +-- Tool Catalog         184+ curated tools, SQLite + Qdrant semantic search
+    +-- Tool Catalog         365 curated tools, SQLite + Qdrant semantic search
     +-- Project Lifecycle    Detect languages/frameworks, fingerprint caching
     +-- Knowledge (RAG)      fastembed (384-1024 dim) + Qdrant hybrid search
     +-- Code Chunker         Tree-sitter AST chunking for 13 languages
@@ -138,7 +138,7 @@ Enable with `"image_embedding_enabled": true` in config. OCR text extraction ava
 | [Reranking Guide](docs/guides/reranking.md) | Cross-encoder reranking for memory.search |
 | [Image Search Guide](docs/guides/image-search.md) | Semantic image search, OCR, thumbnails, screenshot search |
 | [Auto-Indexing Guide](docs/guides/auto-indexing.md) | Background file watcher with automatic re-ingestion |
-| [Tool Catalog Guide](docs/guides/tool-catalog.md) | 184+ curated tools across 10 languages |
+| [Tool Catalog Guide](docs/guides/tool-catalog.md) | 365 curated tools across 10 languages |
 | [Backup & Restore Guide](docs/guides/backup-restore.md) | `maintain: backup` / `restore` for moving between machines |
 | [Observability Guide](docs/guides/observability.md) | Metrics counters, audit events, debugging with `observe` |
 | [Configuration Guide](docs/guides/configuration.md) | All config fields across 5 layers |
@@ -175,7 +175,7 @@ bash scripts/build.sh release --status # check workflow progress
 
 Releases are **manual only** — tagging does not auto-trigger builds. You decide when to build artifacts.
 
-## Stats (v0.13.1)
+## Stats (v0.14.0)
 
 | Metric | Count |
 |--------|-------|
@@ -185,7 +185,7 @@ Releases are **manual only** — tagging does not auto-trigger builds. You decid
 | Tests | 308 |
 | Rust LOC | ~26,500 |
 | JSON Schemas | 35 |
-| Catalog Tools | 184 across 10 languages |
+| Catalog Tools | 365 across 10 languages + 8 categories |
 | Supported Code Languages (chunker) | 13 |
 | `maintain` actions | 14 |
 | Metrics counters | 15 |
