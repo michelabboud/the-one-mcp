@@ -39,7 +39,9 @@ The LLM is the brain. The MCP is the data layer — catalog, filtering, executio
 
 - **Tool Catalog** — 365 curated tools across 10 languages (Rust, Python, JS/TS, Go, Java, Kotlin, Ruby, PHP, Swift, C/C++), searchable via semantic search or full-text. Knows what's installed on your system, what's available, what to recommend.
 - **Unlimited Memory** — Semantic RAG search over project docs. Ask about code from last week — it finds the relevant chunks without loading entire files.
+- **Conversation Memory** — Import transcript exports with `memory.ingest_conversation`, tag them with palace metadata (`wing`, `hall`, `room`), search them with `memory.search`, build compact resume packs with `memory.wake_up`, and optionally capture `stop`/`precompact` hooks with `maintain: memory.capture_hook`.
 - **Hybrid Search** — Combine dense cosine similarity with sparse lexical matching (SPLADE++) for stronger exact-match retrieval. Opt-in. Great for code repos with function names, error strings, and crate identifiers.
+- **Redis Vector Backend** — Optional Redis/RediSearch vector storage with durable index naming and persistence enforcement (`redis_persistence_required`) for teams that operate Redis-first infrastructure.
 - **Managed Knowledge Base** — Create, update, and organize markdown docs that persist across sessions. The LLM writes notes, decisions, architecture docs.
 - **MCP Resources API** — Expose indexed docs, project profile, and tool catalog as native MCP resources addressable via `the-one://` URIs. Claude Code and other MCP clients can `@`-reference them directly. See [MCP Resources Guide](docs/guides/mcp-resources.md).
 - **Smart Discovery** — `tool.find` filters by project profile (languages, frameworks), groups by install state (enabled / available / recommended). Token-efficient.
@@ -58,10 +60,10 @@ Claude Code / Gemini CLI / OpenCode / Codex
     v
 the-one-mcp broker
     |
-    +-- MCP Primitives       17 tools + 3 resource types (docs/project/catalog)
+    +-- MCP Primitives       19 tools + 3 resource types (docs/project/catalog)
     +-- Tool Catalog         365 curated tools, SQLite + Qdrant semantic search
     +-- Project Lifecycle    Detect languages/frameworks, fingerprint caching
-    +-- Knowledge (RAG)      fastembed (384-1024 dim) + Qdrant hybrid search
+    +-- Knowledge (RAG)      fastembed (384-1024 dim) + Qdrant or Redis/RediSearch
     +-- Code Chunker         Tree-sitter AST chunking for 13 languages
     +-- Documents (CRUD)     Managed folder with soft-delete, auto-sync
     +-- Auto-Reindex         File watcher for markdown + images
@@ -72,11 +74,11 @@ the-one-mcp broker
     +-- SQLite               Project state, catalog, approvals, audit trail
 ```
 
-## 17 MCP Tools
+## 19 MCP Tools
 
 | Category | Tools |
 |----------|-------|
-| **Knowledge** | `memory.search`, `memory.fetch_chunk` |
+| **Knowledge** | `memory.search`, `memory.fetch_chunk`, `memory.ingest_conversation`, `memory.wake_up` |
 | **Images** | `memory.search_images`, `memory.ingest_image` |
 | **Documents** | `docs.list`, `docs.get`, `docs.save`, `docs.delete`, `docs.move` |
 | **Tool Discovery** | `tool.find`, `tool.info` |
@@ -131,7 +133,10 @@ Enable with `"image_embedding_enabled": true` in config. OCR text extraction ava
 | **[INSTALL.md](INSTALL.md)** | **Complete installation guide** |
 | [Quickstart](docs/guides/quickstart.md) | Shortest path to a working setup |
 | [Complete Guide](docs/guides/the-one-mcp-complete-guide.md) | Full reference |
-| [API Reference](docs/guides/api-reference.md) | All 17 tools + MCP resources schema |
+| [API Reference](docs/guides/api-reference.md) | All 19 tools + MCP resources schema |
+| [Conversation Memory Guide](docs/guides/conversation-memory.md) | Import transcripts, use palace metadata filters, build wake-up packs |
+| [Redis Vector Backend](docs/guides/redis-vector-backend.md) | Optional Redis/RediSearch backend settings and persistence expectations |
+| [Conversation Memory Benchmarking](docs/benchmarks/conversation-memory-benchmark.md) | Repro checklist for long-memory evaluation runs |
 | [MCP Resources Guide](docs/guides/mcp-resources.md) | `resources/list`, `resources/read`, `the-one://` URI scheme |
 | [Code Chunking Guide](docs/guides/code-chunking.md) | Tree-sitter AST chunking for 13 languages |
 | [Hybrid Search Guide](docs/guides/hybrid-search.md) | Dense + sparse search for exact-match retrieval |
@@ -175,19 +180,19 @@ bash scripts/build.sh release --status # check workflow progress
 
 Releases are **manual only** — tagging does not auto-trigger builds. You decide when to build artifacts.
 
-## Stats (v0.14.0)
+## Stats (v0.14.3)
 
 | Metric | Count |
 |--------|-------|
-| MCP Tools | 17 |
+| MCP Tools | 19 |
 | MCP Resource Types | 3 (`docs`, `project`, `catalog`) |
 | Admin UI Pages | 8 (home, dashboard, ingest, graph, images, config, audit, swagger) |
-| Tests | 308 |
+| Tests | 340 passing (+1 ignored) |
 | Rust LOC | ~26,500 |
 | JSON Schemas | 35 |
 | Catalog Tools | 365 across 10 languages + 8 categories |
 | Supported Code Languages (chunker) | 13 |
-| `maintain` actions | 14 |
+| `maintain` actions | 15 |
 | Metrics counters | 15 |
 | Supported Platforms | 6 (Linux/macOS/Windows x86-64 + ARM64) |
 | Supported AI CLIs | 4 (Claude Code, Gemini CLI, OpenCode, Codex) |

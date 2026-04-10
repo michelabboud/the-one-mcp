@@ -31,6 +31,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use the_one_core::error::CoreError;
+use the_one_core::tool_catalog::ToolCatalog;
 
 /// The URI scheme prefix for all the-one-mcp resources.
 pub const RESOURCE_SCHEME: &str = "the-one://";
@@ -266,7 +267,7 @@ fn read_project_resource(
 }
 
 fn read_catalog_resource(
-    _project_root: &Path,
+    project_root: &Path,
     identifier: &str,
     uri: &str,
 ) -> Result<ResourcesReadResponse, CoreError> {
@@ -275,13 +276,33 @@ fn read_catalog_resource(
             "unknown catalog resource: {identifier}"
         )));
     }
-    // For now return an empty JSON array. A future version will query the
-    // SQLite enabled_tools table for this project's client.
+    let catalog_dir = project_root.join(".the-one").join("catalog");
+    let catalog = ToolCatalog::open(&catalog_dir)?;
+    let canonical_root = project_root
+        .canonicalize()
+        .unwrap_or_else(|_| project_root.to_path_buf())
+        .display()
+        .to_string();
+    let literal_root = project_root.display().to_string();
+    let mut enabled = catalog.list_enabled_tools_for_project(&canonical_root)?;
+    if canonical_root != literal_root {
+        for tool_id in catalog.list_enabled_tools_for_project(&literal_root)? {
+            if !enabled.iter().any(|existing| existing == &tool_id) {
+                enabled.push(tool_id);
+            }
+        }
+        enabled.sort();
+    }
+
     Ok(ResourcesReadResponse {
         contents: vec![ResourceContent {
             uri: uri.to_string(),
             mime_type: "application/json".to_string(),
-            text: "[]".to_string(),
+            text: serde_json::to_string(&enabled).map_err(|err| {
+                CoreError::InvalidProjectConfig(format!(
+                    "failed to serialize enabled tool list: {err}"
+                ))
+            })?,
         }],
     })
 }
@@ -401,5 +422,22 @@ mod tests {
         let root = temp.path().to_path_buf();
         let resp = read_resource(&root, "the-one://catalog/enabled").expect("read");
         assert_eq!(resp.contents[0].text, "[]");
+    }
+
+    #[test]
+    fn test_read_resource_catalog_enabled_returns_enabled_tools() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().to_path_buf();
+        let catalog_dir = root.join(".the-one").join("catalog");
+        let catalog = ToolCatalog::open(&catalog_dir).expect("catalog");
+        catalog
+            .enable_tool("cargo-audit", "codex", &root.display().to_string())
+            .expect("enable tool");
+
+        let resp = read_resource(&root, "the-one://catalog/enabled").expect("read");
+        assert!(
+            resp.contents[0].text.contains("cargo-audit"),
+            "enabled tools response should include persisted tool ids"
+        );
     }
 }

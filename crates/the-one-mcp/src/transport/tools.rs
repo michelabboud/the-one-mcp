@@ -17,7 +17,10 @@ pub fn tool_definitions() -> Vec<Value> {
                 "project_root": { "type": "string", "description": "Absolute path to the project root" },
                 "project_id": { "type": "string", "description": "Unique project identifier" },
                 "query": { "type": "string", "description": "Natural-language search query" },
-                "top_k": { "type": "integer", "description": "Maximum number of results to return (default 5)", "default": 5 }
+                "top_k": { "type": "integer", "description": "Maximum number of results to return (default 5)", "default": 5 },
+                "wing": { "type": "string", "description": "Optional palace wing filter for conversation memory" },
+                "hall": { "type": "string", "description": "Optional palace hall filter for conversation memory" },
+                "room": { "type": "string", "description": "Optional palace room filter for conversation memory" }
             },
             "required": ["project_root", "project_id", "query"]
         })),
@@ -50,6 +53,31 @@ pub fn tool_definitions() -> Vec<Value> {
                 "caption": { "type": "string", "description": "Optional user-provided caption" }
             },
             "required": ["project_root", "project_id", "path"]
+        })),
+        tool_def("memory.ingest_conversation", "Import a conversation export and index it as verbatim memory with optional palace metadata.", json!({
+            "type": "object",
+            "properties": {
+                "project_root": { "type": "string", "description": "Absolute path to the project root" },
+                "project_id": { "type": "string", "description": "Unique project identifier" },
+                "path": { "type": "string", "description": "Absolute or project-relative path to the transcript export" },
+                "format": { "type": "string", "description": "Transcript format", "enum": ["openai_messages", "claude_transcript", "generic_jsonl"] },
+                "wing": { "type": "string", "description": "Optional palace wing" },
+                "hall": { "type": "string", "description": "Optional palace hall" },
+                "room": { "type": "string", "description": "Optional palace room" }
+            },
+            "required": ["project_root", "project_id", "path", "format"]
+        })),
+        tool_def("memory.wake_up", "Build a compact context pack from recent high-signal conversation memory.", json!({
+            "type": "object",
+            "properties": {
+                "project_root": { "type": "string", "description": "Absolute path to the project root" },
+                "project_id": { "type": "string", "description": "Unique project identifier" },
+                "wing": { "type": "string", "description": "Optional palace wing filter" },
+                "hall": { "type": "string", "description": "Optional palace hall filter" },
+                "room": { "type": "string", "description": "Optional palace room filter" },
+                "max_items": { "type": "integer", "description": "Maximum items to include (default 12)", "default": 12 }
+            },
+            "required": ["project_root", "project_id"]
         })),
         tool_def("docs.list", "List all indexed documentation paths for a project.", json!({
             "type": "object",
@@ -169,13 +197,13 @@ pub fn tool_definitions() -> Vec<Value> {
             },
             "required": ["action"]
         })),
-        tool_def("maintain", "Housekeeping: re-indexing, tool enable/disable, catalog refresh, trash management, image management. Actions: 'reindex', 'tool.enable', 'tool.disable', 'tool.refresh', 'trash.list', 'trash.restore', 'trash.empty', 'images.rescan', 'images.clear', 'images.delete'.", json!({
+        tool_def("maintain", "Housekeeping: re-indexing, tool enable/disable, catalog refresh, trash management, image management, and hook-based memory capture. Actions: 'reindex', 'tool.enable', 'tool.disable', 'tool.refresh', 'trash.list', 'trash.restore', 'trash.empty', 'images.rescan', 'images.clear', 'images.delete', 'memory.capture_hook'.", json!({
             "type": "object",
             "properties": {
-                "action": { "type": "string", "description": "Operation to perform", "enum": ["reindex", "tool.enable", "tool.disable", "tool.refresh", "trash.list", "trash.restore", "trash.empty", "images.rescan", "images.clear", "images.delete"] },
+                "action": { "type": "string", "description": "Operation to perform", "enum": ["reindex", "tool.enable", "tool.disable", "tool.refresh", "trash.list", "trash.restore", "trash.empty", "images.rescan", "images.clear", "images.delete", "memory.capture_hook"] },
                 "params": {
                     "type": "object",
-                    "description": "Action-specific parameters. Most actions need {project_root, project_id}. 'tool.enable': {project_root, family}. 'tool.disable': {tool_id, project_root, project_id}. 'trash.restore': {project_root, project_id, path}. 'images.delete': {project_root, project_id, path}."
+                    "description": "Action-specific parameters. Most actions need {project_root, project_id}. 'tool.enable': {project_root, family}. 'tool.disable': {tool_id, project_root, project_id}. 'trash.restore': {project_root, project_id, path}. 'images.delete': {project_root, project_id, path}. 'memory.capture_hook': {project_root, project_id, path, format, event, wing?, hall?, room?} where event is 'stop' or 'precompact'."
                 }
             },
             "required": ["action"]
@@ -199,9 +227,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn tool_definitions_include_conversation_memory_tools() {
+        let tools = tool_definitions();
+        let names: Vec<String> = tools
+            .into_iter()
+            .map(|tool| tool["name"].as_str().unwrap().to_string())
+            .collect();
+
+        assert!(names.contains(&"memory.ingest_conversation".to_string()));
+        assert!(names.contains(&"memory.wake_up".to_string()));
+    }
+
+    #[test]
+    fn memory_search_tool_definition_exposes_palace_filters() {
+        let memory_search = tool_definitions()
+            .into_iter()
+            .find(|tool| tool["name"] == "memory.search")
+            .expect("memory.search tool should exist");
+        let properties = &memory_search["inputSchema"]["properties"];
+
+        assert!(properties["wing"].is_object());
+        assert!(properties["hall"].is_object());
+        assert!(properties["room"].is_object());
+    }
+
+    #[test]
     fn test_tool_definitions_count() {
         let tools = tool_definitions();
-        assert_eq!(tools.len(), 17); // 13 work + 4 admin (setup, config, maintain, observe)
+        assert_eq!(tools.len(), 19); // 15 work + 4 admin (setup, config, maintain, observe)
     }
 
     #[test]

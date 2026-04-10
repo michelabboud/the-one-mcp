@@ -11,6 +11,7 @@ use crate::limits::ConfigurableLimits;
 const DEFAULT_PROVIDER: &str = "local";
 const DEFAULT_LOG_LEVEL: &str = "info";
 const DEFAULT_QDRANT_URL: &str = "http://127.0.0.1:6334";
+const DEFAULT_VECTOR_BACKEND: &str = "qdrant";
 const DEFAULT_NANO_PROVIDER: &str = "rules";
 const DEFAULT_NANO_MODEL: &str = "none";
 const DEFAULT_QDRANT_TLS_INSECURE: bool = false;
@@ -29,6 +30,8 @@ const DEFAULT_SPARSE_MODEL: &str = "bm25";
 // Auto-index (file watcher) defaults
 const DEFAULT_AUTO_INDEX_ENABLED: bool = false;
 const DEFAULT_AUTO_INDEX_DEBOUNCE_MS: u64 = 2000;
+const DEFAULT_MEMORY_PALACE_ENABLED: bool = true;
+const DEFAULT_MEMORY_PALACE_HOOKS_ENABLED: bool = false;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NanoProviderKind {
@@ -90,6 +93,10 @@ pub struct RuntimeOverrides {
     pub provider: Option<String>,
     pub log_level: Option<String>,
     pub qdrant_url: Option<String>,
+    pub vector_backend: Option<String>,
+    pub redis_url: Option<String>,
+    pub redis_index_name: Option<String>,
+    pub redis_persistence_required: Option<bool>,
     pub nano_provider: Option<String>,
     pub nano_model: Option<String>,
     pub qdrant_api_key: Option<String>,
@@ -119,6 +126,8 @@ pub struct RuntimeOverrides {
     pub sparse_model: Option<String>,
     pub auto_index_enabled: Option<bool>,
     pub auto_index_debounce_ms: Option<u64>,
+    pub memory_palace_enabled: Option<bool>,
+    pub memory_palace_hooks_enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -126,6 +135,10 @@ pub struct ProjectConfigUpdate {
     pub provider: Option<String>,
     pub log_level: Option<String>,
     pub qdrant_url: Option<String>,
+    pub vector_backend: Option<String>,
+    pub redis_url: Option<String>,
+    pub redis_index_name: Option<String>,
+    pub redis_persistence_required: Option<bool>,
     pub nano_provider: Option<String>,
     pub nano_model: Option<String>,
     pub qdrant_api_key: Option<String>,
@@ -155,6 +168,8 @@ pub struct ProjectConfigUpdate {
     pub sparse_model: Option<String>,
     pub auto_index_enabled: Option<bool>,
     pub auto_index_debounce_ms: Option<u64>,
+    pub memory_palace_enabled: Option<bool>,
+    pub memory_palace_hooks_enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -165,6 +180,10 @@ pub struct AppConfig {
     pub provider: String,
     pub log_level: String,
     pub qdrant_url: String,
+    pub vector_backend: String,
+    pub redis_url: Option<String>,
+    pub redis_index_name: Option<String>,
+    pub redis_persistence_required: bool,
     pub qdrant_api_key: Option<String>,
     pub qdrant_ca_cert_path: Option<PathBuf>,
     pub qdrant_tls_insecure: bool,
@@ -208,6 +227,10 @@ pub struct AppConfig {
     pub auto_index_enabled: bool,
     /// Debounce window in milliseconds for the file watcher.
     pub auto_index_debounce_ms: u64,
+    /// Enable MemPalace-style conversation memory features.
+    pub memory_palace_enabled: bool,
+    /// Enable first-class hook capture flow (`stop` / `precompact`) for MemPalace.
+    pub memory_palace_hooks_enabled: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -215,6 +238,10 @@ struct FileConfig {
     provider: Option<String>,
     log_level: Option<String>,
     qdrant_url: Option<String>,
+    vector_backend: Option<String>,
+    redis_url: Option<String>,
+    redis_index_name: Option<String>,
+    redis_persistence_required: Option<bool>,
     qdrant_api_key: Option<String>,
     qdrant_ca_cert_path: Option<String>,
     qdrant_tls_insecure: Option<bool>,
@@ -244,6 +271,8 @@ struct FileConfig {
     sparse_model: Option<String>,
     auto_index_enabled: Option<bool>,
     auto_index_debounce_ms: Option<u64>,
+    memory_palace_enabled: Option<bool>,
+    memory_palace_hooks_enabled: Option<bool>,
 }
 
 impl AppConfig {
@@ -256,6 +285,10 @@ impl AppConfig {
             provider: Some(DEFAULT_PROVIDER.to_string()),
             log_level: Some(DEFAULT_LOG_LEVEL.to_string()),
             qdrant_url: Some(DEFAULT_QDRANT_URL.to_string()),
+            vector_backend: Some(DEFAULT_VECTOR_BACKEND.to_string()),
+            redis_url: None,
+            redis_index_name: None,
+            redis_persistence_required: Some(false),
             qdrant_api_key: None,
             qdrant_ca_cert_path: None,
             qdrant_tls_insecure: Some(DEFAULT_QDRANT_TLS_INSECURE),
@@ -285,6 +318,8 @@ impl AppConfig {
             sparse_model: Some(DEFAULT_SPARSE_MODEL.to_string()),
             auto_index_enabled: Some(DEFAULT_AUTO_INDEX_ENABLED),
             auto_index_debounce_ms: Some(DEFAULT_AUTO_INDEX_DEBOUNCE_MS),
+            memory_palace_enabled: Some(DEFAULT_MEMORY_PALACE_ENABLED),
+            memory_palace_hooks_enabled: Some(DEFAULT_MEMORY_PALACE_HOOKS_ENABLED),
         };
 
         apply_file_layer(&global_state_dir.join("config.json"), &mut merged)?;
@@ -305,6 +340,12 @@ impl AppConfig {
             qdrant_url: merged
                 .qdrant_url
                 .unwrap_or_else(|| DEFAULT_QDRANT_URL.to_string()),
+            vector_backend: merged
+                .vector_backend
+                .unwrap_or_else(|| DEFAULT_VECTOR_BACKEND.to_string()),
+            redis_url: merged.redis_url,
+            redis_index_name: merged.redis_index_name,
+            redis_persistence_required: merged.redis_persistence_required.unwrap_or(false),
             qdrant_api_key: merged.qdrant_api_key,
             qdrant_ca_cert_path: merged.qdrant_ca_cert_path.map(PathBuf::from),
             qdrant_tls_insecure: merged
@@ -371,6 +412,12 @@ impl AppConfig {
             auto_index_debounce_ms: merged
                 .auto_index_debounce_ms
                 .unwrap_or(DEFAULT_AUTO_INDEX_DEBOUNCE_MS),
+            memory_palace_enabled: merged
+                .memory_palace_enabled
+                .unwrap_or(DEFAULT_MEMORY_PALACE_ENABLED),
+            memory_palace_hooks_enabled: merged
+                .memory_palace_hooks_enabled
+                .unwrap_or(DEFAULT_MEMORY_PALACE_HOOKS_ENABLED),
         })
     }
 }
@@ -399,6 +446,18 @@ pub fn update_project_config(
     }
     if update.qdrant_url.is_some() {
         merged.qdrant_url = update.qdrant_url;
+    }
+    if update.vector_backend.is_some() {
+        merged.vector_backend = update.vector_backend;
+    }
+    if update.redis_url.is_some() {
+        merged.redis_url = update.redis_url;
+    }
+    if update.redis_index_name.is_some() {
+        merged.redis_index_name = update.redis_index_name;
+    }
+    if update.redis_persistence_required.is_some() {
+        merged.redis_persistence_required = update.redis_persistence_required;
     }
     if update.qdrant_api_key.is_some() {
         merged.qdrant_api_key = update.qdrant_api_key;
@@ -487,6 +546,12 @@ pub fn update_project_config(
     if update.auto_index_debounce_ms.is_some() {
         merged.auto_index_debounce_ms = update.auto_index_debounce_ms;
     }
+    if update.memory_palace_enabled.is_some() {
+        merged.memory_palace_enabled = update.memory_palace_enabled;
+    }
+    if update.memory_palace_hooks_enabled.is_some() {
+        merged.memory_palace_hooks_enabled = update.memory_palace_hooks_enabled;
+    }
 
     let tmp_path = project_state_dir.join("config.json.tmp");
     let payload = serde_json::to_vec_pretty(&merged)?;
@@ -568,6 +633,18 @@ fn apply_env_layer(merged: &mut FileConfig) {
     }
     if let Ok(qdrant_url) = env::var("THE_ONE_QDRANT_URL") {
         merged.qdrant_url = Some(qdrant_url);
+    }
+    if let Ok(vector_backend) = env::var("THE_ONE_VECTOR_BACKEND") {
+        merged.vector_backend = Some(vector_backend);
+    }
+    if let Ok(redis_url) = env::var("THE_ONE_REDIS_URL") {
+        merged.redis_url = Some(redis_url);
+    }
+    if let Ok(redis_index_name) = env::var("THE_ONE_REDIS_INDEX_NAME") {
+        merged.redis_index_name = Some(redis_index_name);
+    }
+    if let Ok(redis_persistence_required) = env::var("THE_ONE_REDIS_PERSISTENCE_REQUIRED") {
+        merged.redis_persistence_required = parse_bool_env(&redis_persistence_required);
     }
     if let Ok(qdrant_api_key) = env::var("THE_ONE_QDRANT_API_KEY") {
         merged.qdrant_api_key = Some(qdrant_api_key);
@@ -656,6 +733,12 @@ fn apply_env_layer(merged: &mut FileConfig) {
         if let Ok(n) = v.parse::<u64>() {
             merged.auto_index_debounce_ms = Some(n);
         }
+    }
+    if let Ok(v) = env::var("THE_ONE_MEMORY_PALACE_ENABLED") {
+        merged.memory_palace_enabled = parse_bool_env(&v);
+    }
+    if let Ok(v) = env::var("THE_ONE_MEMORY_PALACE_HOOKS_ENABLED") {
+        merged.memory_palace_hooks_enabled = parse_bool_env(&v);
     }
     // Limit env vars
     apply_limit_env_vars(merged);
@@ -777,6 +860,18 @@ fn apply_runtime_layer(runtime: RuntimeOverrides, merged: &mut FileConfig) {
     if runtime.qdrant_url.is_some() {
         merged.qdrant_url = runtime.qdrant_url;
     }
+    if runtime.vector_backend.is_some() {
+        merged.vector_backend = runtime.vector_backend;
+    }
+    if runtime.redis_url.is_some() {
+        merged.redis_url = runtime.redis_url;
+    }
+    if runtime.redis_index_name.is_some() {
+        merged.redis_index_name = runtime.redis_index_name;
+    }
+    if runtime.redis_persistence_required.is_some() {
+        merged.redis_persistence_required = runtime.redis_persistence_required;
+    }
     if runtime.qdrant_api_key.is_some() {
         merged.qdrant_api_key = runtime.qdrant_api_key;
     }
@@ -864,6 +959,12 @@ fn apply_runtime_layer(runtime: RuntimeOverrides, merged: &mut FileConfig) {
     if runtime.auto_index_debounce_ms.is_some() {
         merged.auto_index_debounce_ms = runtime.auto_index_debounce_ms;
     }
+    if runtime.memory_palace_enabled.is_some() {
+        merged.memory_palace_enabled = runtime.memory_palace_enabled;
+    }
+    if runtime.memory_palace_hooks_enabled.is_some() {
+        merged.memory_palace_hooks_enabled = runtime.memory_palace_hooks_enabled;
+    }
 }
 
 fn merge(base: &mut FileConfig, overlay: FileConfig) {
@@ -875,6 +976,18 @@ fn merge(base: &mut FileConfig, overlay: FileConfig) {
     }
     if overlay.qdrant_url.is_some() {
         base.qdrant_url = overlay.qdrant_url;
+    }
+    if overlay.vector_backend.is_some() {
+        base.vector_backend = overlay.vector_backend;
+    }
+    if overlay.redis_url.is_some() {
+        base.redis_url = overlay.redis_url;
+    }
+    if overlay.redis_index_name.is_some() {
+        base.redis_index_name = overlay.redis_index_name;
+    }
+    if overlay.redis_persistence_required.is_some() {
+        base.redis_persistence_required = overlay.redis_persistence_required;
     }
     if overlay.qdrant_api_key.is_some() {
         base.qdrant_api_key = overlay.qdrant_api_key;
@@ -962,6 +1075,12 @@ fn merge(base: &mut FileConfig, overlay: FileConfig) {
     }
     if overlay.auto_index_debounce_ms.is_some() {
         base.auto_index_debounce_ms = overlay.auto_index_debounce_ms;
+    }
+    if overlay.memory_palace_enabled.is_some() {
+        base.memory_palace_enabled = overlay.memory_palace_enabled;
+    }
+    if overlay.memory_palace_hooks_enabled.is_some() {
+        base.memory_palace_hooks_enabled = overlay.memory_palace_hooks_enabled;
     }
 }
 
@@ -1261,5 +1380,104 @@ mod tests {
                 assert_eq!(config.sparse_model, "splade");
             },
         );
+    }
+
+    #[test]
+    fn config_parses_redis_vector_backend_settings() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let project_root = temp.path().join("repo");
+        let project_state_dir = project_root.join(".the-one");
+        let global_state_dir = temp.path().join("global");
+
+        fs::create_dir_all(&project_state_dir).expect("project state dir should exist");
+        fs::create_dir_all(&global_state_dir).expect("global state dir should exist");
+
+        fs::write(
+            project_state_dir.join("config.json"),
+            r#"{
+                "vector_backend": "redis",
+                "redis_url": "redis://127.0.0.1:6379",
+                "redis_index_name": "the_one_memories",
+                "redis_persistence_required": true
+            }"#,
+        )
+        .expect("project config write should succeed");
+
+        let global_home = global_state_dir.display().to_string();
+        temp_env::with_vars([("THE_ONE_HOME", Some(global_home.as_str()))], || {
+            let cfg =
+                AppConfig::load(&project_root, RuntimeOverrides::default()).expect("config load");
+            assert_eq!(cfg.vector_backend, "redis");
+            assert_eq!(cfg.redis_url.as_deref(), Some("redis://127.0.0.1:6379"));
+            assert_eq!(cfg.redis_index_name.as_deref(), Some("the_one_memories"));
+            assert!(cfg.redis_persistence_required);
+        });
+    }
+
+    #[test]
+    fn config_defaults_and_env_overrides_memory_palace_flags() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let project_root = temp.path().join("repo");
+        let global_state_dir = temp.path().join("global");
+
+        fs::create_dir_all(&project_root).expect("project root should exist");
+        fs::create_dir_all(&global_state_dir).expect("global state dir should exist");
+        let global_home = global_state_dir.display().to_string();
+
+        temp_env::with_vars(
+            [
+                ("THE_ONE_HOME", Some(global_home.as_str())),
+                ("THE_ONE_MEMORY_PALACE_ENABLED", None),
+                ("THE_ONE_MEMORY_PALACE_HOOKS_ENABLED", None),
+            ],
+            || {
+                let defaults = AppConfig::load(&project_root, RuntimeOverrides::default())
+                    .expect("config should load");
+                assert!(defaults.memory_palace_enabled);
+                assert!(!defaults.memory_palace_hooks_enabled);
+            },
+        );
+
+        temp_env::with_vars(
+            [
+                ("THE_ONE_HOME", Some(global_home.as_str())),
+                ("THE_ONE_MEMORY_PALACE_ENABLED", Some("false")),
+                ("THE_ONE_MEMORY_PALACE_HOOKS_ENABLED", Some("true")),
+            ],
+            || {
+                let overridden = AppConfig::load(&project_root, RuntimeOverrides::default())
+                    .expect("config should load");
+                assert!(!overridden.memory_palace_enabled);
+                assert!(overridden.memory_palace_hooks_enabled);
+            },
+        );
+    }
+
+    #[test]
+    fn update_project_config_persists_memory_palace_flags() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let project_root = temp.path().join("repo");
+        let global_state_dir = temp.path().join("global");
+
+        fs::create_dir_all(&project_root).expect("project root should exist");
+        fs::create_dir_all(&global_state_dir).expect("global state dir should exist");
+        let global_home = global_state_dir.display().to_string();
+
+        temp_env::with_vars([("THE_ONE_HOME", Some(global_home.as_str()))], || {
+            update_project_config(
+                &project_root,
+                ProjectConfigUpdate {
+                    memory_palace_enabled: Some(false),
+                    memory_palace_hooks_enabled: Some(true),
+                    ..ProjectConfigUpdate::default()
+                },
+            )
+            .expect("update should succeed");
+
+            let config =
+                AppConfig::load(&project_root, RuntimeOverrides::default()).expect("config load");
+            assert!(!config.memory_palace_enabled);
+            assert!(config.memory_palace_hooks_enabled);
+        });
     }
 }

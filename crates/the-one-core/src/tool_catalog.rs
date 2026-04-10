@@ -549,6 +549,26 @@ impl ToolCatalog {
         Ok(exists)
     }
 
+    /// List unique enabled tool IDs for a project across all CLI clients.
+    pub fn list_enabled_tools_for_project(
+        &self,
+        project_root: &str,
+    ) -> Result<Vec<String>, CoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT tool_id
+             FROM enabled_tools
+             WHERE project_root = ?1
+             ORDER BY tool_id ASC",
+        )?;
+
+        let mut rows = stmt.query(params![project_root])?;
+        let mut tool_ids = Vec::new();
+        while let Some(row) = rows.next()? {
+            tool_ids.push(row.get::<_, String>(0)?);
+        }
+        Ok(tool_ids)
+    }
+
     // -- User tools -----------------------------------------------------------
 
     /// Returns (tool_id, text_to_embed) for all tools.
@@ -829,6 +849,27 @@ mod tests {
         assert!(cat.is_enabled("cargo-audit", "claude", "/proj").unwrap());
         cat.disable_tool("cargo-audit", "claude", "/proj").unwrap();
         assert!(!cat.is_enabled("cargo-audit", "claude", "/proj").unwrap());
+    }
+
+    #[test]
+    fn test_list_enabled_tools_for_project() {
+        let tmp = TempDir::new().unwrap();
+        let cat = ToolCatalog::open(tmp.path()).unwrap();
+        let entries = vec![
+            sample_entry("cargo-audit", "Cargo Audit", vec!["rust"], vec!["security"]),
+            sample_entry("prettier", "Prettier", vec!["javascript"], vec!["format"]),
+        ];
+        cat.import_tools(&entries, "catalog").unwrap();
+
+        cat.enable_tool("cargo-audit", "claude", "/proj").unwrap();
+        cat.enable_tool("cargo-audit", "codex", "/proj").unwrap();
+        cat.enable_tool("prettier", "codex", "/proj").unwrap();
+
+        let enabled = cat.list_enabled_tools_for_project("/proj").unwrap();
+        assert_eq!(
+            enabled,
+            vec!["cargo-audit".to_string(), "prettier".to_string()]
+        );
     }
 
     #[test]

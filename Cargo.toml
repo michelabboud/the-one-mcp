@@ -34,6 +34,7 @@ tesseract = "0.15"
 notify = "6.1"
 notify-debouncer-mini = "0.4"
 tokio-util = { version = "0.7", features = ["rt"] }
+fred = { version = "10", features = ["subscriber-client", "i-redisearch"] }
 # Tree-sitter parsing infrastructure for code-aware chunking (Task 1.2 / v0.9.0).
 # Each language grammar is a separate crate pulled in via features on the
 # `the-one-memory` crate so lean builds can opt out.

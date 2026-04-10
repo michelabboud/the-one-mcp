@@ -2,6 +2,75 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.14.3] - 2026-04-10
+
+### Added
+
+- **MemPalace feature toggles** across config/env/runtime:
+  - `memory_palace_enabled` (default: `true`)
+  - `memory_palace_hooks_enabled` (default: `false`)
+  - env vars: `THE_ONE_MEMORY_PALACE_ENABLED`, `THE_ONE_MEMORY_PALACE_HOOKS_ENABLED`
+- **First-class hook capture flow** via `maintain`:
+  - action: `memory.capture_hook`
+  - events: `stop`, `precompact`
+  - deterministic default palace metadata when omitted:
+    - `wing = project_id`
+    - `hall = hook:<event>`
+    - `room = event:<event>`
+
+### Changed
+
+- **Production gating for MemPalace features**:
+  - `memory.ingest_conversation` and `memory.wake_up` now return `NotEnabled`
+    when `memory_palace_enabled = false`.
+  - `memory.search` continues to work for docs, and ignores palace filters when
+    MemPalace is disabled.
+- **`config.update` support expanded** for:
+  - `memory_palace_enabled`
+  - `memory_palace_hooks_enabled`
+- **Tool schema + JSON-RPC dispatch** updated for `maintain: memory.capture_hook`.
+
+### Verification
+
+- `cargo fmt --check` ✅
+- `cargo clippy --workspace --all-targets -- -D warnings` ✅
+- `cargo test --workspace` ✅ (`340` passed, `1` ignored)
+
+## [0.14.2] - 2026-04-10
+
+### Added
+
+- **Redis backend runtime path completed** — `vector_backend: "redis"` now builds a real Redis-backed `MemoryEngine` end-to-end for local embeddings.
+- **Redis persistence enforcement at runtime** — when `redis_persistence_required` is enabled, Redis-backed ingest/search operations verify persistence state and fail fast on misconfiguration.
+- **Wake-up palace filtering parity** — `memory.wake_up` now supports full `wing` + `hall` + `room` filtering, aligned with transcript ingest/search metadata.
+
+### Changed
+
+- **`models.check` hardening** — replaced stub behavior with script-backed checks using:
+  - `scripts/update-local-models.sh`
+  - `scripts/update-api-models.sh`
+  The response now returns structured status (`up_to_date` / `updates_available` / `degraded`), per-source check details, and next actions.
+- **MCP resource `the-one://catalog/enabled`** now returns actual enabled tool IDs from the catalog database instead of a placeholder empty array.
+- **Embedded UI top nav** no longer exposes a non-functional project-switch control; it now shows authoritative current-project context only.
+
+### Fixed
+
+- **Graph extractor test determinism** — added environment lock/cleanup to prevent parallel test races around `THE_ONE_GRAPH_*` vars.
+- **OCR feature-disabled path wording** — removed stub-oriented phrasing; behavior remains explicit and production-safe.
+
+### Documentation
+
+- Updated: `README.md`, `PROGRESS.md`, Redis backend guide, MCP resources guide, conversation memory guide.
+- Added:
+  - `docs/reviews/2026-04-10-production-hardening-verification.md`
+  - `docs/reviews/2026-04-10-feature-update-report.md`
+
+### Verification
+
+- `cargo fmt --check` ✅
+- `cargo clippy --workspace --all-targets -- -D warnings` ✅
+- `cargo test --workspace` ✅ (`334` passed, `1` ignored)
+
 ## [0.14.1] - 2026-04-06
 
 ### Documentation

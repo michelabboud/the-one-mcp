@@ -86,11 +86,18 @@ The RAG layer. Async throughout.
 Key modules:
 - `lib.rs` — `MemoryEngine`: the top-level async struct. Owns an `EmbeddingProvider`
   and a Qdrant client.
+- `conversation.rs` — normalizes transcript exports into canonical conversation
+  messages before chunking.
+- `palace.rs` — palace metadata helper (`wing`, `hall`, `room`) used by
+  conversation ingest and broker-side filtering.
 - `chunker.rs` — `chunk_file()` dispatcher: routes to a language-specific chunker by file
   extension, falling back to blank-line splitting for unsupported types. Language chunkers
   (`chunker_rust.rs`, `chunker_python.rs`, `chunker_typescript.rs`, `chunker_go.rs`) use
   regex + brace-depth tracking to produce function/struct/class-level chunks with extended
   `ChunkMeta` fields: `language`, `symbol`, `signature`, `line_range` (all added in v0.8.0).
+  Conversation chunks reuse these same fields today: palace hierarchy is encoded
+  into `heading_hierarchy`, with `hall` mirrored in `signature` and `room`
+  mirrored in `symbol`.
 - `embeddings.rs` — `EmbeddingProvider` trait with two implementations:
   `FastEmbedProvider` (local ONNX via fastembed, tiered: fast/balanced/quality/multilingual)
   and `ApiEmbeddingProvider` (OpenAI-compatible HTTP).
@@ -112,12 +119,13 @@ Key modules:
 - `broker.rs` — `McpBroker`: the central async struct. Owns per-project `MemoryEngine`
   and `DocsManager` instances in `RwLock<HashMap<String, _>>`, keyed by
   `{project_root}::{project_id}`. Also owns the `ToolCatalog`, `Router`, `PolicyEngine`,
-  and session approvals set.
+  and session approvals set. Conversation-memory filtering for `memory.search`
+  is applied here, after retrieval and before the final MCP response is shaped.
 - `api.rs` — all request and response types. Every MCP tool has a corresponding
   `*Request` / `*Response` struct here.
 - `transport/jsonrpc.rs` — JSON-RPC 2.0 dispatcher. Deserializes incoming requests,
   calls the appropriate `McpBroker` method, serializes the response.
-- `transport/tools.rs` — the `tool_definitions()` function that returns the 17 MCP tool
+- `transport/tools.rs` — the `tool_definitions()` function that returns the 19 MCP tool
   descriptors sent during `initialize`.
 - `transport/stdio.rs`, `sse.rs`, `stream.rs` — transport implementations. The broker
   never knows which transport is active.
@@ -237,6 +245,29 @@ pub trait EmbeddingProvider: Send + Sync {
 `MemoryEngine` holds a `Box<dyn EmbeddingProvider>`. No code outside `embeddings.rs`
 needs to know which provider is in use.
 
+### Conversation Memory Layer
+
+Conversation memory extends the same `MemoryEngine` rather than introducing a
+separate store:
+
+- Transcript exports are normalized into messages.
+- Messages are chunked as verbatim conversation turns.
+- Palace metadata is encoded in chunk fields that already exist today.
+- `memory.search` can optionally filter those chunks by `wing`, `hall`, and `room`.
+- `memory.wake_up` uses the persisted conversation-source table to rebuild a
+  compact resume pack after restart.
+
+This keeps the current architecture local-first and avoids adding a second
+metadata system just for palace state.
+
+### Optional Redis Vector Backend
+
+Vector backend choice is still configured from `the-one-core` config and
+resolved in the broker. Qdrant remains the default. Redis/RediSearch is the
+optional backend surface for teams that want Redis-managed persistence. With
+local embeddings enabled, the broker builds a Redis-backed `MemoryEngine` and
+executes vector ingest/search via Redis/RediSearch for that project memory.
+
 ### Client-Aware Tool Loading
 
 The MCP `initialize` handshake carries `clientInfo.name`. The broker reads this field
@@ -247,7 +278,7 @@ and loads:
 
 ## Tool Dispatch Architecture
 
-The 17 MCP tools are split into two groups:
+The 19 MCP tools are split into two groups:
 
 ### Work Tools (direct methods)
 

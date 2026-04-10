@@ -74,6 +74,12 @@ pub struct MemorySearchRequest {
     pub project_id: String,
     pub query: String,
     pub top_k: usize,
+    #[serde(default)]
+    pub wing: Option<String>,
+    #[serde(default)]
+    pub hall: Option<String>,
+    #[serde(default)]
+    pub room: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -94,6 +100,91 @@ pub struct MemorySearchResponse {
     pub timeout_ms_bound: u64,
     pub retries_bound: u8,
     pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum MemoryConversationFormat {
+    #[serde(rename = "openai_messages")]
+    OpenAiMessages,
+    #[serde(rename = "claude_transcript")]
+    ClaudeTranscript,
+    #[serde(rename = "generic_jsonl")]
+    GenericJsonl,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryIngestConversationRequest {
+    pub project_root: String,
+    pub project_id: String,
+    pub path: String,
+    pub format: MemoryConversationFormat,
+    pub wing: Option<String>,
+    pub hall: Option<String>,
+    pub room: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryIngestConversationResponse {
+    pub ingested_chunks: usize,
+    pub source_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryWakeUpRequest {
+    pub project_root: String,
+    pub project_id: String,
+    pub wing: Option<String>,
+    pub hall: Option<String>,
+    pub room: Option<String>,
+    pub max_items: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryWakeUpResponse {
+    pub summary: String,
+    pub facts: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum MemoryHookEvent {
+    #[serde(rename = "stop")]
+    Stop,
+    #[serde(rename = "precompact")]
+    PreCompact,
+}
+
+impl MemoryHookEvent {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Stop => "stop",
+            Self::PreCompact => "precompact",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryCaptureHookRequest {
+    pub project_root: String,
+    pub project_id: String,
+    pub path: String,
+    pub format: MemoryConversationFormat,
+    pub event: MemoryHookEvent,
+    #[serde(default)]
+    pub wing: Option<String>,
+    #[serde(default)]
+    pub hall: Option<String>,
+    #[serde(default)]
+    pub room: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryCaptureHookResponse {
+    pub event: String,
+    pub ingested_chunks: usize,
+    pub source_path: String,
+    pub wing: String,
+    pub hall: String,
+    pub room: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -606,8 +697,9 @@ pub struct ImageIngestResponse {
 mod tests {
     use super::{
         ConfigExportRequest, ConfigExportResponse, DocsListRequest, DocsSaveRequest,
-        ImageIngestRequest, ImageSearchRequest, MemoryFetchChunkRequest, MemorySearchRequest,
-        ProjectInitRequest, ToolFindRequest, ToolRunRequest,
+        ImageIngestRequest, ImageSearchRequest, MemoryConversationFormat, MemoryFetchChunkRequest,
+        MemoryIngestConversationRequest, MemorySearchRequest, ProjectInitRequest, ToolFindRequest,
+        ToolRunRequest,
     };
 
     #[test]
@@ -626,6 +718,9 @@ mod tests {
             project_id: "project-1".to_string(),
             query: "search docs".to_string(),
             top_k: 5,
+            wing: Some("ops".to_string()),
+            hall: Some("incidents".to_string()),
+            room: Some("auth".to_string()),
         };
         let json = serde_json::to_string(&search).expect("serialize should succeed");
         let decoded: MemorySearchRequest =
@@ -650,6 +745,24 @@ mod tests {
         let decoded: MemoryFetchChunkRequest =
             serde_json::from_str(&json).expect("deserialize should succeed");
         assert_eq!(decoded, fetch);
+    }
+
+    #[test]
+    fn memory_ingest_conversation_request_roundtrip() {
+        let req = MemoryIngestConversationRequest {
+            project_root: "/tmp/project".to_string(),
+            project_id: "proj-1".to_string(),
+            path: "exports/auth.json".to_string(),
+            format: MemoryConversationFormat::OpenAiMessages,
+            wing: Some("proj-auth".to_string()),
+            hall: Some("hall_facts".to_string()),
+            room: Some("auth-migration".to_string()),
+        };
+        let json = serde_json::to_string(&req).expect("serialize should succeed");
+        let decoded: MemoryIngestConversationRequest =
+            serde_json::from_str(&json).expect("deserialize should succeed");
+        assert_eq!(decoded, req);
+        assert!(json.contains(r#""format":"openai_messages""#));
     }
 
     #[test]

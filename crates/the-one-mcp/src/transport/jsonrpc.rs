@@ -226,12 +226,27 @@ async fn dispatch_tool(broker: &McpBroker, tool_name: &str, args: Value) -> Resu
             let project_id = args["project_id"].as_str().ok_or("missing project_id")?;
             let query = args["query"].as_str().ok_or("missing query")?;
             let top_k = args["top_k"].as_u64().unwrap_or(5) as usize;
+            let wing = args
+                .get("wing")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
+            let hall = args
+                .get("hall")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
+            let room = args
+                .get("room")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
             let result = broker
                 .memory_search(MemorySearchRequest {
                     project_root: project_root.to_string(),
                     project_id: project_id.to_string(),
                     query: query.to_string(),
                     top_k,
+                    wing,
+                    hall,
+                    room,
                 })
                 .await;
             serde_json::to_value(result).map_err(|e| e.to_string())
@@ -249,6 +264,75 @@ async fn dispatch_tool(broker: &McpBroker, tool_name: &str, args: Value) -> Resu
                     id: chunk_id.to_string(),
                 })
                 .await;
+            serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+        "memory.ingest_conversation" => {
+            let project_root = args["project_root"]
+                .as_str()
+                .ok_or("missing project_root")?;
+            let project_id = args["project_id"].as_str().ok_or("missing project_id")?;
+            let path = args["path"].as_str().ok_or("missing path")?;
+            let format = match args["format"].as_str().ok_or("missing format")? {
+                "openai_messages" => MemoryConversationFormat::OpenAiMessages,
+                "claude_transcript" => MemoryConversationFormat::ClaudeTranscript,
+                "generic_jsonl" => MemoryConversationFormat::GenericJsonl,
+                other => return Err(format!("invalid format: {other}")),
+            };
+            let wing = args
+                .get("wing")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
+            let hall = args
+                .get("hall")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
+            let room = args
+                .get("room")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
+            let result = broker
+                .memory_ingest_conversation(MemoryIngestConversationRequest {
+                    project_root: project_root.to_string(),
+                    project_id: project_id.to_string(),
+                    path: path.to_string(),
+                    format,
+                    wing,
+                    hall,
+                    room,
+                })
+                .await
+                .map_err(|e| e.to_string())?;
+            serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+        "memory.wake_up" => {
+            let project_root = args["project_root"]
+                .as_str()
+                .ok_or("missing project_root")?;
+            let project_id = args["project_id"].as_str().ok_or("missing project_id")?;
+            let wing = args
+                .get("wing")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
+            let hall = args
+                .get("hall")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
+            let room = args
+                .get("room")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
+            let max_items = args["max_items"].as_u64().unwrap_or(12) as usize;
+            let result = broker
+                .memory_wake_up(MemoryWakeUpRequest {
+                    project_root: project_root.to_string(),
+                    project_id: project_id.to_string(),
+                    wing,
+                    hall,
+                    room,
+                    max_items,
+                })
+                .await
+                .map_err(|e| e.to_string())?;
             serde_json::to_value(result).map_err(|e| e.to_string())
         }
         "docs.list" => {
@@ -800,6 +884,15 @@ async fn dispatch_maintain(broker: &McpBroker, args: Value) -> Result<Value, Str
                 .map_err(|e| e.to_string())?;
             serde_json::to_value(result).map_err(|e| e.to_string())
         }
+        "memory.capture_hook" => {
+            let request: crate::api::MemoryCaptureHookRequest = serde_json::from_value(params)
+                .map_err(|e| format!("invalid memory.capture_hook params: {e}"))?;
+            let result = broker
+                .memory_capture_hook(request)
+                .await
+                .map_err(|e| e.to_string())?;
+            serde_json::to_value(result).map_err(|e| e.to_string())
+        }
         _ => Err(format!("unknown maintain action: {action}")),
     }
 }
@@ -938,7 +1031,7 @@ mod tests {
         let response = dispatch(&broker, request).await;
         assert!(response.error.is_none());
         let tools = response.result.unwrap()["tools"].as_array().unwrap().len();
-        assert_eq!(tools, 17);
+        assert_eq!(tools, 19);
     }
 
     #[tokio::test]
@@ -1098,6 +1191,146 @@ mod tests {
         let response = dispatch(&broker, request).await;
         assert!(
             response.error.is_none() || response.error.as_ref().unwrap().code != INVALID_PARAMS
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_memory_ingest_conversation() {
+        let broker = McpBroker::new();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("repo");
+        std::fs::create_dir_all(&root).expect("repo dir should exist");
+        let transcript_path = root.join("dispatch-transcript.json");
+        std::fs::write(
+            &transcript_path,
+            r#"[
+              {"role":"assistant","content":"Dispatch ingest transcript for task 6."}
+            ]"#,
+        )
+        .expect("transcript should be written");
+
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(Value::Number(21.into())),
+            method: "tools/call".to_string(),
+            params: Some(serde_json::json!({
+                "name": "memory.ingest_conversation",
+                "arguments": {
+                    "project_root": root.display().to_string(),
+                    "project_id": "test-project",
+                    "path": transcript_path.display().to_string(),
+                    "format": "openai_messages",
+                    "wing": "ops",
+                    "room": "auth"
+                }
+            })),
+        };
+
+        let response = dispatch(&broker, request).await;
+        assert!(
+            response.error.is_none(),
+            "memory.ingest_conversation dispatch errored: {:?}",
+            response.error
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_memory_wake_up() {
+        let broker = McpBroker::new();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("repo");
+        std::fs::create_dir_all(&root).expect("repo dir should exist");
+        let transcript_path = root.join("wake-up-dispatch-transcript.json");
+        std::fs::write(
+            &transcript_path,
+            r#"[
+              {"role":"assistant","content":"Wake-up dispatch transcript for task 6."}
+            ]"#,
+        )
+        .expect("transcript should be written");
+
+        broker
+            .memory_ingest_conversation(MemoryIngestConversationRequest {
+                project_root: root.display().to_string(),
+                project_id: "test-project".to_string(),
+                path: transcript_path.display().to_string(),
+                format: MemoryConversationFormat::OpenAiMessages,
+                wing: Some("ops".to_string()),
+                hall: None,
+                room: Some("auth".to_string()),
+            })
+            .await
+            .expect("conversation ingest should succeed");
+
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(Value::Number(22.into())),
+            method: "tools/call".to_string(),
+            params: Some(serde_json::json!({
+                "name": "memory.wake_up",
+                "arguments": {
+                    "project_root": root.display().to_string(),
+                    "project_id": "test-project",
+                    "wing": "ops",
+                    "max_items": 4
+                }
+            })),
+        };
+
+        let response = dispatch(&broker, request).await;
+        assert!(
+            response.error.is_none(),
+            "memory.wake_up dispatch errored: {:?}",
+            response.error
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_maintain_memory_capture_hook() {
+        let broker = McpBroker::new();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("repo");
+        let state_dir = root.join(".the-one");
+        std::fs::create_dir_all(&state_dir).expect("state dir should exist");
+        std::fs::write(
+            state_dir.join("config.json"),
+            r#"{"memory_palace_enabled":true,"memory_palace_hooks_enabled":true}"#,
+        )
+        .expect("config should be written");
+
+        let transcript_path = root.join("hook-dispatch-transcript.json");
+        std::fs::write(
+            &transcript_path,
+            r#"[
+              {"role":"assistant","content":"Dispatch maintain memory.capture_hook test."}
+            ]"#,
+        )
+        .expect("transcript should be written");
+
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(Value::Number(23.into())),
+            method: "tools/call".to_string(),
+            params: Some(serde_json::json!({
+                "name": "maintain",
+                "arguments": {
+                    "action": "memory.capture_hook",
+                    "params": {
+                        "project_root": root.display().to_string(),
+                        "project_id": "test-project",
+                        "path": transcript_path.display().to_string(),
+                        "format": "openai_messages",
+                        "event": "stop"
+                    }
+                }
+            })),
+        };
+
+        let response = dispatch(&broker, request).await;
+        assert!(
+            response.error.is_none(),
+            "maintain memory.capture_hook dispatch errored: {:?}",
+            response.error
         );
     }
 

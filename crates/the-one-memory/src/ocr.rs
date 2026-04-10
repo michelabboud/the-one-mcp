@@ -29,7 +29,7 @@ pub fn extract_text(image_path: &std::path::Path, language: &str) -> Result<Stri
     Ok(text.trim().to_string())
 }
 
-/// No-op stub when OCR feature is disabled.
+/// Feature-disabled implementation for builds without `image-ocr`.
 ///
 /// Returns `Err` immediately so callers can handle the case at runtime
 /// without needing compile-time feature detection.
@@ -47,13 +47,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_extract_text_stub_returns_error_when_feature_disabled() {
+    fn test_extract_text_returns_error_when_feature_disabled() {
         // When image-ocr is disabled (the default), extract_text must return Err
         // with a message explaining the feature requirement.
         #[cfg(not(feature = "image-ocr"))]
         {
             let result = extract_text(std::path::Path::new("any.png"), "eng");
-            assert!(result.is_err(), "stub must return Err");
+            assert!(result.is_err(), "feature-disabled path must return Err");
             let msg = result.unwrap_err();
             assert!(
                 msg.contains("image-ocr"),

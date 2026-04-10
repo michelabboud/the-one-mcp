@@ -462,47 +462,12 @@ pub fn render_nav(
         };
         html.push_str(&format!("<a href=\"{}\"{}>{}</a>", path, cls, label));
     }
-    html.push_str("</div><div class=\"project-switcher\"><label>Project</label><select onchange=\"window.__switchProject(this.value)\" id=\"project-select\">");
-
-    // Sort projects by most recent first for a sensible default order.
-    let mut sorted: Vec<&ProjectRegistryEntry> = registry.projects.iter().collect();
-    sorted.sort_by_key(|e| -e.last_seen_epoch);
     let current_escaped = html_escape(current_project_id);
-    let mut found_current = false;
-    for entry in &sorted {
-        let label = entry
-            .label
-            .clone()
-            .unwrap_or_else(|| entry.project_id.clone());
-        let escaped_id = html_escape(&entry.project_id);
-        let escaped_label = html_escape(&label);
-        let selected = if entry.project_id == current_project_id {
-            found_current = true;
-            " selected"
-        } else {
-            ""
-        };
-        html.push_str(&format!(
-            "<option value=\"{}\"{}>{}</option>",
-            escaped_id, selected, escaped_label
-        ));
-    }
-    if !found_current && !current_project_id.is_empty() {
-        html.push_str(&format!(
-            "<option value=\"{}\" selected>{} (current)</option>",
-            current_escaped, current_escaped
-        ));
-    }
-    html.push_str("</select></div></nav>");
-
-    // Tiny JS stub that just confirms and logs — actual cross-project navigation
-    // requires the broker to be restarted with a new THE_ONE_PROJECT_ID env var,
-    // since the embedded UI is currently scoped to a single project at startup.
-    // Future work: surface the selected project via a cookie + a per-request
-    // project override so this becomes live.
-    html.push_str("<script>window.__switchProject=function(pid){alert('Project switching requires restarting the-one-mcp server with THE_ONE_PROJECT_ID='+pid+'.\\n\\nThe current embedded UI is scoped to one project per server instance. Live switching is a v0.13.1 roadmap item.');document.getElementById('project-select').value='");
-    html.push_str(&current_escaped);
-    html.push_str("';};</script>");
+    let known_projects = registry.projects.len();
+    html.push_str(&format!(
+        "</div><div class=\"project-switcher\"><span class=\"label\">Project</span><span class=\"value\">{}</span><span class=\"count\">{} known</span></div></nav>",
+        current_escaped, known_projects
+    ));
     html
 }
 
@@ -541,9 +506,9 @@ fn shell_styles() -> &'static str {
      nav.topnav .nav-links a:hover{background:rgba(255,255,255,.12);color:#fff}\
      nav.topnav .nav-links a.active{background:rgba(255,255,255,.2);color:#fff;font-weight:700}\
      nav.topnav .project-switcher{display:flex;align-items:center;gap:8px}\
-     nav.topnav .project-switcher label{font-size:.82rem;color:rgba(255,255,255,.78);text-transform:uppercase;letter-spacing:.04em}\
-     nav.topnav .project-switcher select{padding:6px 10px;border-radius:6px;border:1px solid rgba(255,255,255,.2);background:rgba(255,255,255,.1);color:#fff;font:inherit;max-width:220px}\
-     nav.topnav .project-switcher select option{background:var(--card);color:var(--text)}\
+     nav.topnav .project-switcher .label{font-size:.82rem;color:rgba(255,255,255,.78);text-transform:uppercase;letter-spacing:.04em}\
+     nav.topnav .project-switcher .value{padding:6px 10px;border-radius:6px;border:1px solid rgba(255,255,255,.2);background:rgba(255,255,255,.1);color:#fff;font-weight:600;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}\
+     nav.topnav .project-switcher .count{font-size:.78rem;color:rgba(255,255,255,.75)}\
      .page-footer{padding:24px 20px;text-align:center;color:var(--muted);font-size:.88rem;border-top:1px solid var(--border);margin-top:40px}\
      .page-footer a{color:var(--accent);text-decoration:none}\
      .page-footer a:hover{text-decoration:underline}\

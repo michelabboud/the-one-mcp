@@ -1,12 +1,12 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, params_from_iter, types::Value as SqlValue, Connection};
 
 use crate::contracts::ApprovalScope;
 use crate::error::CoreError;
 
-const CURRENT_SCHEMA_VERSION: i64 = 1;
+const CURRENT_SCHEMA_VERSION: i64 = 2;
 
 #[derive(Debug)]
 pub struct ProjectDatabase {
@@ -22,6 +22,18 @@ pub struct AuditEvent {
     pub event_type: String,
     pub payload_json: String,
     pub created_at_epoch_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConversationSourceRecord {
+    pub project_id: String,
+    pub transcript_path: String,
+    pub memory_path: String,
+    pub format: String,
+    pub wing: Option<String>,
+    pub hall: Option<String>,
+    pub room: Option<String>,
+    pub message_count: usize,
 }
 
 impl ProjectDatabase {
@@ -210,6 +222,109 @@ impl ProjectDatabase {
 
         Ok(events)
     }
+
+    pub fn upsert_conversation_source(
+        &self,
+        record: &ConversationSourceRecord,
+    ) -> Result<(), CoreError> {
+        self.conn.execute(
+            "
+            INSERT INTO conversation_sources(
+                project_id,
+                transcript_path,
+                memory_path,
+                format,
+                wing,
+                hall,
+                room,
+                message_count,
+                updated_at_epoch_ms
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, CAST(strftime('%s','now') AS INTEGER) * 1000)
+            ON CONFLICT(project_id, transcript_path)
+            DO UPDATE SET
+                memory_path = excluded.memory_path,
+                format = excluded.format,
+                wing = excluded.wing,
+                hall = excluded.hall,
+                room = excluded.room,
+                message_count = excluded.message_count,
+                updated_at_epoch_ms = excluded.updated_at_epoch_ms
+            ",
+            params![
+                self.project_id,
+                record.transcript_path,
+                record.memory_path,
+                record.format,
+                record.wing,
+                record.hall,
+                record.room,
+                record.message_count as i64,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_conversation_sources(
+        &self,
+        wing: Option<&str>,
+        hall: Option<&str>,
+        room: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ConversationSourceRecord>, CoreError> {
+        let safe_limit = limit.max(1).min(i64::MAX as usize) as i64;
+        let mut sql = String::from(
+            "
+            SELECT project_id, transcript_path, memory_path, format, wing, hall, room, message_count
+            FROM conversation_sources
+            WHERE project_id = ?1
+            ",
+        );
+        let mut bind_values: Vec<SqlValue> = vec![self.project_id.clone().into()];
+        let mut bind_index = 2;
+
+        if let Some(wing) = wing {
+            sql.push_str(&format!(" AND wing = ?{bind_index}"));
+            bind_values.push(wing.to_string().into());
+            bind_index += 1;
+        }
+        if let Some(hall) = hall {
+            sql.push_str(&format!(" AND hall = ?{bind_index}"));
+            bind_values.push(hall.to_string().into());
+            bind_index += 1;
+        }
+        if let Some(room) = room {
+            sql.push_str(&format!(" AND room = ?{bind_index}"));
+            bind_values.push(room.to_string().into());
+            bind_index += 1;
+        }
+
+        sql.push_str(&format!(
+            "
+            ORDER BY updated_at_epoch_ms DESC, transcript_path ASC
+            LIMIT ?{bind_index}
+            "
+        ));
+        bind_values.push(safe_limit.into());
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut query = stmt.query(params_from_iter(bind_values.iter()))?;
+        let mut rows = Vec::new();
+        while let Some(row) = query.next()? {
+            rows.push(ConversationSourceRecord {
+                project_id: row.get(0)?,
+                transcript_path: row.get(1)?,
+                memory_path: row.get(2)?,
+                format: row.get(3)?,
+                wing: row.get(4)?,
+                hall: row.get(5)?,
+                room: row.get(6)?,
+                message_count: row.get::<_, i64>(7)? as usize,
+            });
+        }
+
+        Ok(rows)
+    }
 }
 
 fn approval_scope_to_str(scope: ApprovalScope) -> &'static str {
@@ -275,6 +390,37 @@ fn run_migrations(conn: &Connection) -> Result<(), CoreError> {
         )?;
     }
 
+    if current < 2 {
+        conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS conversation_sources (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id TEXT NOT NULL,
+                transcript_path TEXT NOT NULL,
+                memory_path TEXT NOT NULL,
+                format TEXT NOT NULL,
+                wing TEXT,
+                hall TEXT,
+                room TEXT,
+                message_count INTEGER NOT NULL,
+                updated_at_epoch_ms INTEGER NOT NULL,
+                UNIQUE(project_id, transcript_path)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_conversation_sources_project_wing_updated
+            ON conversation_sources(project_id, wing, updated_at_epoch_ms DESC);
+            ",
+        )?;
+
+        conn.execute(
+            "
+            INSERT INTO schema_migrations(version, applied_at_epoch_ms)
+            VALUES (?1, CAST(strftime('%s','now') AS INTEGER) * 1000)
+            ",
+            [2],
+        )?;
+    }
+
     if current > CURRENT_SCHEMA_VERSION {
         return Err(CoreError::UnsupportedSchemaVersion(current.to_string()));
     }
@@ -288,7 +434,7 @@ mod tests {
 
     use crate::contracts::ApprovalScope;
 
-    use super::ProjectDatabase;
+    use super::{ConversationSourceRecord, ProjectDatabase};
 
     #[test]
     fn test_project_db_uses_wal_and_migrates() {
@@ -304,7 +450,7 @@ mod tests {
             .to_string_lossy()
             .ends_with(".the-one/state.db"));
         assert_eq!(db.journal_mode().expect("journal mode query"), "wal");
-        assert_eq!(db.schema_version().expect("schema version query"), 1);
+        assert_eq!(db.schema_version().expect("schema version query"), 2);
     }
 
     #[test]
@@ -358,5 +504,96 @@ mod tests {
         let events = db.list_audit_events(10).expect("list should work");
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event_type, "tool_run");
+    }
+
+    #[test]
+    fn test_conversation_source_metadata_roundtrip() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let project_root = temp.path().join("repo");
+        fs::create_dir_all(&project_root).expect("project dir should exist");
+
+        let db = ProjectDatabase::open(&project_root, "project-1").expect("db should open");
+        db.upsert_conversation_source(&ConversationSourceRecord {
+            project_id: "project-1".to_string(),
+            transcript_path: "/tmp/transcript.json".to_string(),
+            memory_path: "/tmp/conversations/transcript.md".to_string(),
+            format: "openai_messages".to_string(),
+            wing: Some("ops".to_string()),
+            hall: Some("incidents".to_string()),
+            room: Some("auth".to_string()),
+            message_count: 3,
+        })
+        .expect("conversation metadata write should succeed");
+
+        let rows = db
+            .list_conversation_sources(Some("ops"), None, None, 10)
+            .expect("conversation metadata read should succeed");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].memory_path, "/tmp/conversations/transcript.md");
+        assert_eq!(rows[0].hall.as_deref(), Some("incidents"));
+    }
+
+    #[test]
+    fn test_conversation_source_metadata_can_list_more_than_200_rows() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let project_root = temp.path().join("repo");
+        fs::create_dir_all(&project_root).expect("project dir should exist");
+
+        let db = ProjectDatabase::open(&project_root, "project-1").expect("db should open");
+        for index in 0..250 {
+            db.upsert_conversation_source(&ConversationSourceRecord {
+                project_id: "project-1".to_string(),
+                transcript_path: format!("/tmp/transcript-{index}.json"),
+                memory_path: format!("/tmp/conversations/transcript-{index}.md"),
+                format: "openai_messages".to_string(),
+                wing: Some("ops".to_string()),
+                hall: Some("incidents".to_string()),
+                room: Some(format!("room-{index}")),
+                message_count: 1,
+            })
+            .expect("conversation metadata write should succeed");
+        }
+
+        let rows = db
+            .list_conversation_sources(Some("ops"), None, None, 250)
+            .expect("conversation metadata read should succeed");
+        assert_eq!(rows.len(), 250);
+    }
+
+    #[test]
+    fn test_conversation_source_metadata_filters_by_hall_and_room() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let project_root = temp.path().join("repo");
+        fs::create_dir_all(&project_root).expect("project dir should exist");
+
+        let db = ProjectDatabase::open(&project_root, "project-1").expect("db should open");
+        db.upsert_conversation_source(&ConversationSourceRecord {
+            project_id: "project-1".to_string(),
+            transcript_path: "/tmp/auth.json".to_string(),
+            memory_path: "/tmp/conversations/auth.md".to_string(),
+            format: "openai_messages".to_string(),
+            wing: Some("ops".to_string()),
+            hall: Some("incidents".to_string()),
+            room: Some("auth".to_string()),
+            message_count: 1,
+        })
+        .expect("auth conversation write should succeed");
+        db.upsert_conversation_source(&ConversationSourceRecord {
+            project_id: "project-1".to_string(),
+            transcript_path: "/tmp/pager.json".to_string(),
+            memory_path: "/tmp/conversations/pager.md".to_string(),
+            format: "openai_messages".to_string(),
+            wing: Some("ops".to_string()),
+            hall: Some("incidents".to_string()),
+            room: Some("pager".to_string()),
+            message_count: 1,
+        })
+        .expect("pager conversation write should succeed");
+
+        let rows = db
+            .list_conversation_sources(Some("ops"), Some("incidents"), Some("auth"), 10)
+            .expect("filtered conversation metadata read should succeed");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].room.as_deref(), Some("auth"));
     }
 }

@@ -18,9 +18,13 @@ use the_one_core::manifests::{
 use the_one_core::policy::PolicyEngine;
 use the_one_core::project::{project_init, project_refresh, RefreshMode};
 use the_one_core::storage::sqlite::ProjectDatabase;
+use the_one_memory::conversation::{ConversationFormat, ConversationTranscript};
+use the_one_memory::palace::PalaceMetadata;
 use the_one_memory::qdrant::QdrantOptions;
 #[cfg(feature = "local-embeddings")]
 use the_one_memory::reranker::Reranker;
+#[cfg(all(feature = "local-embeddings", feature = "redis-vectors"))]
+use the_one_memory::RedisEngineConfig;
 use the_one_memory::{MemoryEngine, MemorySearchRequest as EngineSearchRequest, RetrievalMode};
 use the_one_registry::CapabilityRegistry;
 use the_one_router::providers::{ApiNanoProvider, LmStudioNanoProvider, OllamaNanoProvider};
@@ -33,15 +37,17 @@ use crate::api::{
     DocsGetSectionResponse, DocsListRequest, DocsListResponse, DocsMoveRequest, DocsMoveResponse,
     DocsReindexRequest, DocsReindexResponse, DocsTrashEmptyRequest, DocsTrashEmptyResponse,
     DocsTrashListRequest, DocsTrashListResponse, DocsTrashRestoreRequest, DocsTrashRestoreResponse,
-    DocsUpdateRequest, DocsUpdateResponse, MemoryFetchChunkRequest, MemoryFetchChunkResponse,
-    MemorySearchItem, MemorySearchRequest, MemorySearchResponse, MetricsSnapshotResponse,
-    ProjectInitRequest, ProjectInitResponse, ProjectProfileGetRequest, ProjectProfileGetResponse,
-    ProjectRefreshRequest, ProjectRefreshResponse, ToolAddRequest, ToolAddResponse,
-    ToolDisableRequest, ToolDisableResponse, ToolEnableRequest, ToolEnableResponse,
-    ToolInfoRequest, ToolInstallRequest, ToolInstallResponse, ToolListRequest, ToolListResponse,
-    ToolRemoveRequest, ToolRemoveResponse, ToolRunRequest, ToolRunResponse, ToolSearchRequest,
-    ToolSearchResponse, ToolSuggestItem, ToolSuggestRequest, ToolSuggestResponse,
-    ToolUpdateResponse,
+    DocsUpdateRequest, DocsUpdateResponse, MemoryCaptureHookRequest, MemoryCaptureHookResponse,
+    MemoryConversationFormat, MemoryFetchChunkRequest, MemoryFetchChunkResponse,
+    MemoryIngestConversationRequest, MemoryIngestConversationResponse, MemorySearchItem,
+    MemorySearchRequest, MemorySearchResponse, MemoryWakeUpRequest, MemoryWakeUpResponse,
+    MetricsSnapshotResponse, ProjectInitRequest, ProjectInitResponse, ProjectProfileGetRequest,
+    ProjectProfileGetResponse, ProjectRefreshRequest, ProjectRefreshResponse, ToolAddRequest,
+    ToolAddResponse, ToolDisableRequest, ToolDisableResponse, ToolEnableRequest,
+    ToolEnableResponse, ToolInfoRequest, ToolInstallRequest, ToolInstallResponse, ToolListRequest,
+    ToolListResponse, ToolRemoveRequest, ToolRemoveResponse, ToolRunRequest, ToolRunResponse,
+    ToolSearchRequest, ToolSearchResponse, ToolSuggestItem, ToolSuggestRequest,
+    ToolSuggestResponse, ToolUpdateResponse,
 };
 
 pub struct McpBroker {
@@ -154,7 +160,7 @@ impl McpBroker {
         Ok(f(memory))
     }
 
-    fn build_memory_engine(
+    async fn build_memory_engine(
         &self,
         project_root: &Path,
         project_id: &str,
@@ -162,9 +168,67 @@ impl McpBroker {
         let config = AppConfig::load(project_root, RuntimeOverrides::default())?;
 
         let max_chunk_tokens = config.limits.max_chunk_tokens;
+        let vector_backend = config.vector_backend.to_ascii_lowercase();
 
-        // Determine embedding + qdrant setup from config
-        let mut engine = if config.embedding_provider == "api" {
+        let mut engine = if vector_backend == "redis" {
+            let redis_url = config.redis_url.as_deref().ok_or_else(|| {
+                CoreError::InvalidProjectConfig(
+                    "vector_backend 'redis' requires redis_url".to_string(),
+                )
+            })?;
+
+            let redis_index_name = config
+                .redis_index_name
+                .clone()
+                .unwrap_or_else(|| "the_one_memories".to_string());
+            if redis_url.trim().is_empty() {
+                return Err(CoreError::InvalidProjectConfig(
+                    "vector_backend 'redis' requires a non-empty redis_url".to_string(),
+                ));
+            }
+            if !redis_index_name
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, ':' | '_' | '-'))
+            {
+                return Err(CoreError::InvalidProjectConfig(
+                    "redis_index_name must use only ASCII letters, digits, ':', '_' or '-'"
+                        .to_string(),
+                ));
+            }
+
+            if config.embedding_provider == "api" {
+                return Err(CoreError::InvalidProjectConfig(
+                    "vector_backend 'redis' currently supports local embeddings only; set \
+                     embedding_provider to 'local'"
+                        .to_string(),
+                ));
+            }
+
+            #[cfg(all(feature = "local-embeddings", feature = "redis-vectors"))]
+            {
+                let redis_engine_config = RedisEngineConfig {
+                    redis_url: redis_url.to_string(),
+                    index_name: redis_index_name.clone(),
+                    persistence_required: config.redis_persistence_required,
+                };
+                MemoryEngine::new_with_redis(
+                    &config.embedding_model,
+                    max_chunk_tokens,
+                    redis_engine_config,
+                )
+                .await
+                .map_err(CoreError::Embedding)?
+            }
+
+            #[cfg(not(all(feature = "local-embeddings", feature = "redis-vectors")))]
+            {
+                return Err(CoreError::Embedding(
+                    "redis backend selected but redis-vectors + local-embeddings features are \
+                     not enabled in this build"
+                        .to_string(),
+                ));
+            }
+        } else if config.embedding_provider == "api" {
             // API embeddings + Qdrant
             MemoryEngine::new_api(the_one_memory::ApiEngineConfig {
                 embedding_base_url: config.embedding_api_base_url.as_deref().unwrap_or(""),
@@ -236,6 +300,8 @@ impl McpBroker {
             }
         };
 
+        engine.set_project_id(project_id.to_string());
+
         // Attach cross-encoder reranker if enabled (LightRAG-inspired improvement)
         #[cfg(feature = "local-embeddings")]
         if config.reranker_enabled {
@@ -303,6 +369,282 @@ impl McpBroker {
         }
 
         Ok(engine)
+    }
+
+    fn resolve_request_path(project_root: &Path, raw_path: &str) -> PathBuf {
+        let path = PathBuf::from(raw_path);
+        if path.is_absolute() {
+            path
+        } else {
+            project_root.join(path)
+        }
+    }
+
+    fn conversation_format(format: &MemoryConversationFormat) -> ConversationFormat {
+        match format {
+            MemoryConversationFormat::OpenAiMessages => ConversationFormat::OpenAiMessages,
+            MemoryConversationFormat::ClaudeTranscript => ConversationFormat::ClaudeTranscript,
+            MemoryConversationFormat::GenericJsonl => ConversationFormat::GenericJsonl,
+        }
+    }
+
+    fn conversation_format_label(format: &MemoryConversationFormat) -> &'static str {
+        match format {
+            MemoryConversationFormat::OpenAiMessages => "openai_messages",
+            MemoryConversationFormat::ClaudeTranscript => "claude_transcript",
+            MemoryConversationFormat::GenericJsonl => "generic_jsonl",
+        }
+    }
+
+    fn palace_metadata_from_parts(
+        project_id: &str,
+        wing: Option<String>,
+        hall: Option<String>,
+        room: Option<String>,
+    ) -> Option<PalaceMetadata> {
+        if wing.is_none() && hall.is_none() && room.is_none() {
+            return None;
+        }
+
+        let wing_value = wing.unwrap_or_else(|| project_id.to_string());
+        Some(PalaceMetadata::new(&wing_value, hall, room))
+    }
+
+    fn palace_metadata_from_record(
+        project_id: &str,
+        record: &the_one_core::storage::sqlite::ConversationSourceRecord,
+    ) -> Option<PalaceMetadata> {
+        Self::palace_metadata_from_parts(
+            project_id,
+            record.wing.clone(),
+            record.hall.clone(),
+            record.room.clone(),
+        )
+    }
+
+    fn palace_filters_requested(
+        wing: Option<&str>,
+        hall: Option<&str>,
+        room: Option<&str>,
+    ) -> bool {
+        wing.is_some() || hall.is_some() || room.is_some()
+    }
+
+    fn memory_palace_hall_for_hook_event(event: &crate::api::MemoryHookEvent) -> String {
+        format!("hook:{}", event.as_str())
+    }
+
+    fn memory_palace_room_for_hook_event(event: &crate::api::MemoryHookEvent) -> String {
+        format!("event:{}", event.as_str())
+    }
+
+    fn search_candidate_limit(top_k: usize, filters_requested: bool) -> usize {
+        if filters_requested {
+            top_k.saturating_mul(10).max(25)
+        } else {
+            top_k
+        }
+    }
+
+    fn chunk_matches_palace_filters(
+        chunk: &the_one_memory::chunker::ChunkMeta,
+        wing: Option<&str>,
+        hall: Option<&str>,
+        room: Option<&str>,
+    ) -> bool {
+        if !Self::palace_filters_requested(wing, hall, room) {
+            return true;
+        }
+
+        if chunk.language.as_deref() != Some("conversation") {
+            return false;
+        }
+
+        let palace_path: Vec<&str> = chunk
+            .heading_hierarchy
+            .iter()
+            .skip(1)
+            .map(String::as_str)
+            .collect();
+        let chunk_wing = palace_path.first().copied();
+        let chunk_hall = chunk
+            .signature
+            .as_deref()
+            .or_else(|| palace_path.get(1).copied());
+        let chunk_room = chunk.symbol.as_deref().or_else(|| {
+            if chunk_hall.is_some() {
+                palace_path.get(2).copied()
+            } else {
+                palace_path.get(1).copied()
+            }
+        });
+
+        wing.is_none_or(|value| chunk_wing == Some(value))
+            && hall.is_none_or(|value| chunk_hall == Some(value))
+            && room.is_none_or(|value| chunk_room == Some(value))
+    }
+
+    fn filter_memory_search_results(
+        results: Vec<the_one_memory::MemorySearchResult>,
+        wing: Option<&str>,
+        hall: Option<&str>,
+        room: Option<&str>,
+        top_k: usize,
+    ) -> Vec<the_one_memory::MemorySearchResult> {
+        let mut filtered = results
+            .into_iter()
+            .filter(|result| Self::chunk_matches_palace_filters(&result.chunk, wing, hall, room))
+            .collect::<Vec<_>>();
+        filtered.truncate(top_k);
+        filtered
+    }
+
+    fn conversation_format_from_label(label: &str) -> Result<ConversationFormat, CoreError> {
+        match label {
+            "openai_messages" => Ok(ConversationFormat::OpenAiMessages),
+            "claude_transcript" => Ok(ConversationFormat::ClaudeTranscript),
+            "generic_jsonl" => Ok(ConversationFormat::GenericJsonl),
+            other => Err(CoreError::InvalidProjectConfig(format!(
+                "unsupported stored conversation format: {other}"
+            ))),
+        }
+    }
+
+    async fn hydrate_engine_from_disk(
+        engine: &mut MemoryEngine,
+        project_root: &Path,
+        project_id: &str,
+        sources: &[the_one_core::storage::sqlite::ConversationSourceRecord],
+        pending_conversation: Option<(&str, &ConversationTranscript, Option<PalaceMetadata>)>,
+    ) -> Result<usize, CoreError> {
+        let docs_root = project_root.join(".the-one").join("docs");
+        if docs_root.exists() {
+            engine
+                .ingest_markdown_tree(&docs_root)
+                .await
+                .map_err(|error| CoreError::Embedding(error.to_string()))?;
+        }
+
+        for source in sources {
+            let transcript_json =
+                std::fs::read_to_string(&source.transcript_path).map_err(CoreError::Io)?;
+            let transcript = ConversationTranscript::from_json_str(
+                Path::new(&source.transcript_path)
+                    .file_stem()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("conversation"),
+                Self::conversation_format_from_label(&source.format)?,
+                &transcript_json,
+            )
+            .map_err(CoreError::Embedding)?;
+
+            engine
+                .ingest_conversation(
+                    &source.memory_path,
+                    &transcript,
+                    Self::palace_metadata_from_record(project_id, source),
+                )
+                .await
+                .map_err(CoreError::Embedding)?;
+        }
+
+        if let Some((source_path, transcript, palace)) = pending_conversation {
+            let ingested = engine
+                .ingest_conversation(source_path, transcript, palace)
+                .await
+                .map_err(CoreError::Embedding)?;
+            return Ok(ingested);
+        }
+
+        Ok(0)
+    }
+
+    async fn build_rehydrated_local_engine(
+        &self,
+        project_root: &Path,
+        project_id: &str,
+        sources: &[the_one_core::storage::sqlite::ConversationSourceRecord],
+        pending_conversation: Option<(&str, &ConversationTranscript, Option<PalaceMetadata>)>,
+    ) -> Result<(MemoryEngine, usize), CoreError> {
+        #[cfg(feature = "local-embeddings")]
+        {
+            let config = AppConfig::load(project_root, RuntimeOverrides::default())?;
+            let mut engine =
+                MemoryEngine::new_local(&config.embedding_model, config.limits.max_chunk_tokens)
+                    .map_err(CoreError::Embedding)?;
+            engine.set_project_id(project_id.to_string());
+            let ingested = Self::hydrate_engine_from_disk(
+                &mut engine,
+                project_root,
+                project_id,
+                sources,
+                pending_conversation,
+            )
+            .await?;
+            Ok((engine, ingested))
+        }
+        #[cfg(not(feature = "local-embeddings"))]
+        {
+            let _ = project_root;
+            let _ = project_id;
+            let _ = sources;
+            let _ = pending_conversation;
+            Err(CoreError::Embedding(
+                "local embeddings not available for non-destructive fallback".to_string(),
+            ))
+        }
+    }
+
+    async fn ensure_project_memory_loaded(
+        &self,
+        project_root: &Path,
+        project_id: &str,
+    ) -> Result<(), CoreError> {
+        let key = Self::project_memory_key(project_root, project_id);
+        if self.memory_by_project.read().await.contains_key(&key) {
+            return Ok(());
+        }
+
+        let db = ProjectDatabase::open(project_root, project_id)?;
+        let sources = db.list_conversation_sources(None, None, None, usize::MAX)?;
+        let (engine, _) = self
+            .build_rehydrated_local_engine(project_root, project_id, &sources, None)
+            .await?;
+
+        self.memory_by_project.write().await.insert(key, engine);
+        Ok(())
+    }
+
+    fn extract_facts_from_memory(content: &str, max_items: usize) -> Vec<String> {
+        let mut facts = Vec::new();
+        let mut seen = HashSet::new();
+
+        for line in content.lines() {
+            let fact = line.trim();
+            if fact.is_empty()
+                || fact.starts_with('#')
+                || fact.starts_with("Source:")
+                || fact.starts_with("Format:")
+                || fact.starts_with("Wing:")
+                || fact.starts_with("Hall:")
+                || fact.starts_with("Room:")
+                || fact.starts_with("[turn:")
+            {
+                continue;
+            }
+
+            let normalized = fact.split_whitespace().collect::<Vec<_>>().join(" ");
+            if normalized.is_empty() || !seen.insert(normalized.clone()) {
+                continue;
+            }
+
+            facts.push(normalized);
+            if facts.len() >= max_items {
+                break;
+            }
+        }
+
+        facts
     }
 
     /// Spawn a background file watcher task for the given project if
@@ -591,7 +933,7 @@ impl McpBroker {
         let mut memories = self.memory_by_project.write().await;
         let is_new = !memories.contains_key(&key);
         if is_new {
-            let engine = self.build_memory_engine(project_root, project_id)?;
+            let engine = self.build_memory_engine(project_root, project_id).await?;
             memories.insert(key.clone(), engine);
         }
         let memory = memories.get_mut(&key).ok_or_else(|| {
@@ -673,9 +1015,17 @@ impl McpBroker {
         self.metrics
             .memory_search_calls
             .fetch_add(1, Ordering::Relaxed);
-        let route = self
-            .route_query(Path::new(&request.project_root), &request.query)
-            .await;
+        let MemorySearchRequest {
+            project_root,
+            project_id,
+            query,
+            top_k,
+            wing,
+            hall,
+            room,
+        } = request;
+        let project_root = Path::new(&project_root);
+        let route = self.route_query(project_root, &query).await;
         self.metrics
             .router_decision_latency_ms_total
             .fetch_add(route.telemetry.latency_ms, Ordering::Relaxed);
@@ -689,14 +1039,33 @@ impl McpBroker {
                 .router_provider_error_calls
                 .fetch_add(1, Ordering::Relaxed);
         }
-        let top_k = self.policy.clamp_search_hits(request.top_k);
+        let top_k = self.policy.clamp_search_hits(top_k);
+        let wing_filter = wing.as_deref();
+        let hall_filter = hall.as_deref();
+        let room_filter = room.as_deref();
+        let config = AppConfig::load(project_root, RuntimeOverrides::default()).ok();
+        let palace_enabled = config
+            .as_ref()
+            .map(|cfg| cfg.memory_palace_enabled)
+            .unwrap_or(true);
+        let (wing_filter, hall_filter, room_filter) = if palace_enabled {
+            (wing_filter, hall_filter, room_filter)
+        } else {
+            (None, None, None)
+        };
+        let filters_requested =
+            Self::palace_filters_requested(wing_filter, hall_filter, room_filter);
+        let search_top_k = Self::search_candidate_limit(top_k, filters_requested);
 
-        let project_root = Path::new(&request.project_root);
-        let project_id = request.project_id.clone();
-        let query = request.query;
+        if route.decision.requires_memory_search {
+            let _ = self
+                .ensure_project_memory_loaded(project_root, &project_id)
+                .await;
+        }
 
         // Load score threshold from config (LightRAG-inspired improvement)
-        let score_threshold = AppConfig::load(project_root, RuntimeOverrides::default())
+        let score_threshold = config
+            .as_ref()
             .map(|c| c.limits.search_score_threshold)
             .unwrap_or(0.0);
 
@@ -707,24 +1076,26 @@ impl McpBroker {
                 memory
                     .search(&EngineSearchRequest {
                         query,
-                        top_k,
+                        top_k: search_top_k,
                         score_threshold,
                         mode: RetrievalMode::Hybrid,
                     })
                     .await
-                    .into_iter()
-                    .map(|item| MemorySearchItem {
-                        id: item.chunk.id,
-                        source_path: item.chunk.source_path,
-                        score: item.score,
-                    })
-                    .collect::<Vec<_>>()
             } else {
                 Vec::new()
             }
         } else {
             Vec::new()
         };
+        let hits =
+            Self::filter_memory_search_results(hits, wing_filter, hall_filter, room_filter, top_k)
+                .into_iter()
+                .map(|item| MemorySearchItem {
+                    id: item.chunk.id,
+                    source_path: item.chunk.source_path,
+                    score: item.score,
+                })
+                .collect::<Vec<_>>();
 
         let search_latency_ms = search_start.elapsed().as_millis() as u64;
         self.metrics
@@ -761,6 +1132,220 @@ impl McpBroker {
             id: chunk.id,
             source_path: chunk.source_path,
             content: chunk.content,
+        })
+    }
+
+    #[instrument(skip_all)]
+    pub async fn memory_ingest_conversation(
+        &self,
+        request: MemoryIngestConversationRequest,
+    ) -> Result<MemoryIngestConversationResponse, CoreError> {
+        let project_root = Path::new(&request.project_root);
+        let config = AppConfig::load(project_root, RuntimeOverrides::default())?;
+        if !config.memory_palace_enabled {
+            return Err(CoreError::NotEnabled(
+                "memory palace features are disabled; enable memory_palace_enabled".to_string(),
+            ));
+        }
+
+        let transcript_path = Self::resolve_request_path(project_root, &request.path);
+        let transcript_path = transcript_path.canonicalize().map_err(CoreError::Io)?;
+        let transcript_json = std::fs::read_to_string(&transcript_path).map_err(CoreError::Io)?;
+        let db = ProjectDatabase::open(project_root, &request.project_id)?;
+        let existing_sources = db.list_conversation_sources(None, None, None, usize::MAX)?;
+
+        let transcript = ConversationTranscript::from_json_str(
+            transcript_path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or("conversation"),
+            Self::conversation_format(&request.format),
+            &transcript_json,
+        )
+        .map_err(CoreError::Embedding)?;
+
+        let palace = Self::palace_metadata_from_parts(
+            &request.project_id,
+            request.wing.clone(),
+            request.hall.clone(),
+            request.room.clone(),
+        );
+        let source_path = transcript_path.display().to_string();
+        let pending_conversation = (source_path.as_str(), &transcript, palace.clone());
+
+        let key = Self::project_memory_key(project_root, &request.project_id);
+        let mut memories = self.memory_by_project.write().await;
+        let is_new = !memories.contains_key(&key);
+        if is_new {
+            let engine = self
+                .build_memory_engine(project_root, &request.project_id)
+                .await?;
+            memories.insert(key.clone(), engine);
+        }
+        let memory = memories.get_mut(&key).ok_or_else(|| {
+            CoreError::InvalidProjectConfig("project memory not indexed".to_string())
+        })?;
+        if is_new {
+            self.maybe_spawn_watcher(project_root, &request.project_id);
+        }
+
+        let direct_ingest = memory
+            .ingest_conversation(&source_path, &transcript, palace.clone())
+            .await;
+        let ingested_chunks = match direct_ingest {
+            Ok(count) => count,
+            Err(error) => {
+                let (fallback, count) = self
+                    .build_rehydrated_local_engine(
+                        project_root,
+                        &request.project_id,
+                        &existing_sources,
+                        Some(pending_conversation),
+                    )
+                    .await
+                    .map_err(|local_error| {
+                        CoreError::Embedding(format!(
+                            "conversation ingest failed with configured backend ({error}) \
+                             and local fallback ({local_error})"
+                        ))
+                    })?;
+                memories.insert(key.clone(), fallback);
+                count
+            }
+        };
+        drop(memories);
+
+        db.upsert_conversation_source(&the_one_core::storage::sqlite::ConversationSourceRecord {
+            project_id: request.project_id.clone(),
+            transcript_path: transcript_path.display().to_string(),
+            memory_path: source_path,
+            format: Self::conversation_format_label(&request.format).to_string(),
+            wing: palace.as_ref().map(|value| value.wing.clone()),
+            hall: palace.as_ref().and_then(|value| value.hall.clone()),
+            room: palace.as_ref().and_then(|value| value.room.clone()),
+            message_count: transcript.messages.len(),
+        })?;
+
+        Ok(MemoryIngestConversationResponse {
+            ingested_chunks,
+            source_path: transcript_path.display().to_string(),
+        })
+    }
+
+    #[instrument(skip_all)]
+    pub async fn memory_wake_up(
+        &self,
+        request: MemoryWakeUpRequest,
+    ) -> Result<MemoryWakeUpResponse, CoreError> {
+        let project_root = Path::new(&request.project_root);
+        let config = AppConfig::load(project_root, RuntimeOverrides::default())?;
+        if !config.memory_palace_enabled {
+            return Err(CoreError::NotEnabled(
+                "memory palace features are disabled; enable memory_palace_enabled".to_string(),
+            ));
+        }
+
+        self.ensure_project_memory_loaded(project_root, &request.project_id)
+            .await?;
+
+        let db = ProjectDatabase::open(project_root, &request.project_id)?;
+        let sources = db.list_conversation_sources(
+            request.wing.as_deref(),
+            request.hall.as_deref(),
+            request.room.as_deref(),
+            request.max_items,
+        )?;
+        if sources.is_empty() {
+            return Ok(MemoryWakeUpResponse {
+                summary: "No conversation memory available.".to_string(),
+                facts: Vec::new(),
+            });
+        }
+
+        let mut facts = Vec::new();
+        for source in &sources {
+            let maybe_content = self
+                .with_project_memory(project_root, &request.project_id, |memory| {
+                    memory.docs_get(&source.memory_path)
+                })
+                .await?;
+
+            if let Some(content) = maybe_content {
+                let remaining = request.max_items.saturating_sub(facts.len());
+                if remaining == 0 {
+                    break;
+                }
+
+                facts.extend(Self::extract_facts_from_memory(&content, remaining));
+            }
+
+            if facts.len() >= request.max_items {
+                break;
+            }
+        }
+
+        let summary = if facts.is_empty() {
+            format!(
+                "Wake-up pack checked {} conversation source(s) but found no compact facts.",
+                sources.len()
+            )
+        } else {
+            format!(
+                "Wake-up pack with {} fact(s) from {} conversation source(s).",
+                facts.len(),
+                sources.len()
+            )
+        };
+
+        Ok(MemoryWakeUpResponse { summary, facts })
+    }
+
+    #[instrument(skip_all)]
+    pub async fn memory_capture_hook(
+        &self,
+        request: MemoryCaptureHookRequest,
+    ) -> Result<MemoryCaptureHookResponse, CoreError> {
+        let project_root = Path::new(&request.project_root);
+        let config = AppConfig::load(project_root, RuntimeOverrides::default())?;
+        if !config.memory_palace_enabled {
+            return Err(CoreError::NotEnabled(
+                "memory palace features are disabled; enable memory_palace_enabled".to_string(),
+            ));
+        }
+        if !config.memory_palace_hooks_enabled {
+            return Err(CoreError::NotEnabled(
+                "memory palace hook capture is disabled; enable memory_palace_hooks_enabled"
+                    .to_string(),
+            ));
+        }
+
+        let wing = request.wing.unwrap_or_else(|| request.project_id.clone());
+        let hall = request
+            .hall
+            .unwrap_or_else(|| Self::memory_palace_hall_for_hook_event(&request.event));
+        let room = request
+            .room
+            .unwrap_or_else(|| Self::memory_palace_room_for_hook_event(&request.event));
+
+        let ingest = self
+            .memory_ingest_conversation(MemoryIngestConversationRequest {
+                project_root: request.project_root.clone(),
+                project_id: request.project_id,
+                path: request.path,
+                format: request.format,
+                wing: Some(wing.clone()),
+                hall: Some(hall.clone()),
+                room: Some(room.clone()),
+            })
+            .await?;
+
+        Ok(MemoryCaptureHookResponse {
+            event: request.event.as_str().to_string(),
+            ingested_chunks: ingest.ingested_chunks,
+            source_path: ingest.source_path,
+            wing,
+            hall,
+            room,
         })
     }
 
@@ -1794,15 +2379,142 @@ impl McpBroker {
         result
     }
 
-    /// Check for model registry updates (stub — returns current versions).
+    fn repo_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."))
+    }
+
+    fn parse_labeled_value(output: &str, label: &str) -> Option<String> {
+        output.lines().find_map(|line| {
+            let trimmed = line.trim();
+            let prefix = format!("{label}:");
+            trimmed
+                .strip_prefix(&prefix)
+                .map(|value| value.trim().to_string())
+        })
+    }
+
+    fn parse_update_available(current: &str, latest: &str) -> Option<bool> {
+        fn parse_semver(input: &str) -> Option<Vec<u64>> {
+            let core = input
+                .split(['-', '+'])
+                .next()
+                .map(str::trim)
+                .unwrap_or_default();
+            if core.is_empty() {
+                return None;
+            }
+            let mut parts = Vec::new();
+            for piece in core.split('.') {
+                parts.push(piece.parse::<u64>().ok()?);
+            }
+            Some(parts)
+        }
+
+        let current_parts = parse_semver(current)?;
+        let latest_parts = parse_semver(latest)?;
+        let max_len = current_parts.len().max(latest_parts.len());
+        for idx in 0..max_len {
+            let c = current_parts.get(idx).copied().unwrap_or(0);
+            let l = latest_parts.get(idx).copied().unwrap_or(0);
+            if l > c {
+                return Some(true);
+            }
+            if l < c {
+                return Some(false);
+            }
+        }
+        Some(false)
+    }
+
+    fn run_model_check_script(script_name: &str) -> serde_json::Value {
+        let repo_root = Self::repo_root();
+        let script_path = repo_root.join("scripts").join(script_name);
+        if !script_path.exists() {
+            return serde_json::json!({
+                "name": script_name,
+                "status": "error",
+                "error": format!("script not found: {}", script_path.display())
+            });
+        }
+
+        let output = std::process::Command::new("bash")
+            .arg(&script_path)
+            .current_dir(&repo_root)
+            .output();
+
+        match output {
+            Ok(cmd) => {
+                let stdout = String::from_utf8_lossy(&cmd.stdout).to_string();
+                let stderr = String::from_utf8_lossy(&cmd.stderr).to_string();
+                let mut json = serde_json::json!({
+                    "name": script_name,
+                    "status": if cmd.status.success() { "ok" } else { "error" },
+                    "exit_code": cmd.status.code(),
+                });
+
+                if script_name == "update-local-models.sh" {
+                    let current = Self::parse_labeled_value(&stdout, "Current fastembed version");
+                    let latest = Self::parse_labeled_value(&stdout, "Latest fastembed version");
+                    json["current_fastembed_version"] = serde_json::json!(current);
+                    json["latest_fastembed_version"] = serde_json::json!(latest);
+                    if let (Some(current), Some(latest)) = (
+                        json["current_fastembed_version"].as_str(),
+                        json["latest_fastembed_version"].as_str(),
+                    ) {
+                        json["update_available"] =
+                            serde_json::json!(Self::parse_update_available(current, latest));
+                    }
+                }
+
+                // Keep payload bounded and useful for operators.
+                let stdout_excerpt: String = stdout.lines().take(40).collect::<Vec<_>>().join("\n");
+                let stderr_excerpt: String = stderr.lines().take(20).collect::<Vec<_>>().join("\n");
+                json["stdout_excerpt"] = serde_json::json!(stdout_excerpt);
+                if !stderr_excerpt.trim().is_empty() {
+                    json["stderr_excerpt"] = serde_json::json!(stderr_excerpt);
+                }
+                json
+            }
+            Err(err) => serde_json::json!({
+                "name": script_name,
+                "status": "error",
+                "error": format!("failed to execute {}: {}", script_name, err),
+            }),
+        }
+    }
+
     pub fn models_check_updates(&self) -> serde_json::Value {
-        use the_one_memory::models_registry;
+        let local = Self::run_model_check_script("update-local-models.sh");
+        let api = Self::run_model_check_script("update-api-models.sh");
+
+        let any_error = local["status"] == "error" || api["status"] == "error";
+        let update_available = local
+            .get("update_available")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let status = if any_error {
+            "degraded"
+        } else if update_available {
+            "updates_available"
+        } else {
+            "up_to_date"
+        };
 
         serde_json::json!({
-            "fastembed_crate_version": models_registry::fastembed_crate_version(),
-            "local_model_count": models_registry::list_local_models().len(),
-            "api_provider_count": models_registry::list_api_providers().len(),
-            "message": "To update models, run: scripts/update-local-models.sh and scripts/update-api-models.sh"
+            "status": status,
+            "checks": {
+                "local_models": local,
+                "api_models": api
+            },
+            "next_actions": [
+                "Review check output excerpts for provider-specific changes.",
+                "Run scripts/update-local-models.sh --apply and scripts/update-api-models.sh --apply after validating model additions/deprecations.",
+                "Re-run cargo test -p the-one-memory models_registry before shipping registry updates."
+            ]
         })
     }
 
@@ -2323,6 +3035,15 @@ impl McpBroker {
         if let Some(v) = obj.get("external_docs_root").and_then(|v| v.as_str()) {
             update.external_docs_root = Some(v.to_string());
         }
+        if let Some(v) = obj.get("memory_palace_enabled").and_then(|v| v.as_bool()) {
+            update.memory_palace_enabled = Some(v);
+        }
+        if let Some(v) = obj
+            .get("memory_palace_hooks_enabled")
+            .and_then(|v| v.as_bool())
+        {
+            update.memory_palace_hooks_enabled = Some(v);
+        }
 
         let path = update_project_config(&project_root, update)?;
         Ok(ConfigUpdateResponse {
@@ -2561,7 +3282,8 @@ mod tests {
         AuditEventsRequest, DocsCreateRequest, DocsDeleteRequest, DocsGetSectionRequest,
         DocsListRequest, DocsMoveRequest, DocsReindexRequest, DocsTrashEmptyRequest,
         DocsTrashListRequest, DocsTrashRestoreRequest, DocsUpdateRequest, ImageSearchRequest,
-        MemorySearchRequest, ProjectInitRequest, ProjectProfileGetRequest, ProjectRefreshRequest,
+        MemoryCaptureHookRequest, MemoryIngestConversationRequest, MemorySearchRequest,
+        MemoryWakeUpRequest, ProjectInitRequest, ProjectProfileGetRequest, ProjectRefreshRequest,
         ToolEnableRequest, ToolRunRequest, ToolSuggestRequest,
     };
 
@@ -2627,6 +3349,9 @@ mod tests {
                 project_id: "project-1".to_string(),
                 query: "search docs".to_string(),
                 top_k: 5,
+                wing: None,
+                hall: None,
+                room: None,
             })
             .await;
         assert_eq!(search.hits.len(), 1);
@@ -2692,6 +3417,9 @@ mod tests {
                 project_id: "project-1".to_string(),
                 query: "search docs".to_string(),
                 top_k: 5,
+                wing: None,
+                hall: None,
+                room: None,
             })
             .await;
 
@@ -2742,6 +3470,640 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_memory_ingest_conversation_indexes_transcript_content() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let root = temp.path().join("repo");
+        fs::create_dir_all(&root).expect("project dir should exist");
+
+        let transcript_path = root.join("transcript.json");
+        fs::write(
+            &transcript_path,
+            r#"[
+              {"role":"system","content":"You are helpful"},
+              {"role":"user","content":"Why did we switch auth vendors?"},
+              {"role":"assistant","content":"Refresh tokens were failing in staging"}
+            ]"#,
+        )
+        .expect("transcript should be written");
+
+        let broker = McpBroker::new();
+        let response = broker
+            .memory_ingest_conversation(MemoryIngestConversationRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-1".to_string(),
+                path: transcript_path.display().to_string(),
+                format: crate::api::MemoryConversationFormat::OpenAiMessages,
+                wing: Some("ops".to_string()),
+                hall: Some("incidents".to_string()),
+                room: Some("auth".to_string()),
+            })
+            .await
+            .expect("conversation ingest should succeed");
+
+        assert!(response.ingested_chunks >= 1);
+        assert_eq!(response.source_path, transcript_path.display().to_string());
+
+        let search = broker
+            .memory_search(MemorySearchRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-1".to_string(),
+                query: "search refresh tokens staging".to_string(),
+                top_k: 5,
+                wing: None,
+                hall: None,
+                room: None,
+            })
+            .await;
+        assert!(
+            !search.hits.is_empty(),
+            "conversation text should be retrievable after ingest"
+        );
+        assert!(
+            search
+                .hits
+                .iter()
+                .any(|hit| hit.source_path == transcript_path.display().to_string()),
+            "conversation memory should keep the transcript source path, not only a derived markdown path"
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_search_can_filter_by_wing_and_room() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let root = temp.path().join("repo");
+        fs::create_dir_all(&root).expect("project dir should exist");
+
+        let auth_transcript_path = root.join("ops-auth-transcript.json");
+        fs::write(
+            &auth_transcript_path,
+            r#"[
+              {"role":"assistant","content":"palace-filter-smoke-test shared incident thread for room auth."}
+            ]"#,
+        )
+        .expect("auth transcript should be written");
+
+        let broker = McpBroker::new();
+        broker
+            .memory_ingest_conversation(MemoryIngestConversationRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-1".to_string(),
+                path: auth_transcript_path.display().to_string(),
+                format: crate::api::MemoryConversationFormat::OpenAiMessages,
+                wing: Some("ops".to_string()),
+                hall: Some("incidents".to_string()),
+                room: Some("auth".to_string()),
+            })
+            .await
+            .expect("auth conversation ingest should succeed");
+
+        let unfiltered = broker
+            .memory_search(MemorySearchRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-1".to_string(),
+                query: "search palace-filter-smoke-test shared incident thread".to_string(),
+                top_k: 10,
+                wing: None,
+                hall: None,
+                room: None,
+            })
+            .await;
+        assert!(
+            unfiltered
+                .hits
+                .iter()
+                .any(|hit| hit.source_path == auth_transcript_path.display().to_string()),
+            "unfiltered search should include the ingested conversation"
+        );
+
+        let filtered = broker
+            .memory_search(MemorySearchRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-1".to_string(),
+                query: "search palace-filter-smoke-test shared incident thread".to_string(),
+                top_k: 10,
+                wing: Some("ops".to_string()),
+                hall: None,
+                room: Some("auth".to_string()),
+            })
+            .await;
+
+        assert!(
+            !filtered.hits.is_empty(),
+            "filtered search should still return the matching conversation room"
+        );
+        assert!(filtered
+            .hits
+            .iter()
+            .all(|hit| hit.source_path == auth_transcript_path.display().to_string()));
+
+        let wrong_room = broker
+            .memory_search(MemorySearchRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-1".to_string(),
+                query: "search palace-filter-smoke-test shared incident thread".to_string(),
+                top_k: 10,
+                wing: Some("ops".to_string()),
+                hall: None,
+                room: Some("pager".to_string()),
+            })
+            .await;
+        assert!(
+            wrong_room.hits.is_empty(),
+            "room filtering should exclude conversations stored in a different room"
+        );
+
+        let wrong_wing = broker
+            .memory_search(MemorySearchRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-1".to_string(),
+                query: "search palace-filter-smoke-test shared incident thread".to_string(),
+                top_k: 10,
+                wing: Some("support".to_string()),
+                hall: None,
+                room: Some("auth".to_string()),
+            })
+            .await;
+        assert!(
+            wrong_wing.hits.is_empty(),
+            "wing filtering should exclude conversations stored in a different wing"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_memory_wake_up_returns_facts_for_ingested_conversation() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let root = temp.path().join("repo");
+        fs::create_dir_all(&root).expect("project dir should exist");
+
+        let transcript_path = root.join("transcript.json");
+        fs::write(
+            &transcript_path,
+            r#"[
+              {"role":"user","content":"We switched auth vendors after refresh-token failures."},
+              {"role":"assistant","content":"The staging outage was fixed by rotating the issuer config."}
+            ]"#,
+        )
+        .expect("transcript should be written");
+
+        let broker = McpBroker::new();
+        broker
+            .memory_ingest_conversation(MemoryIngestConversationRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-1".to_string(),
+                path: transcript_path.display().to_string(),
+                format: crate::api::MemoryConversationFormat::OpenAiMessages,
+                wing: Some("ops".to_string()),
+                hall: None,
+                room: None,
+            })
+            .await
+            .expect("conversation ingest should succeed");
+
+        let wake_up = broker
+            .memory_wake_up(MemoryWakeUpRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-1".to_string(),
+                wing: Some("ops".to_string()),
+                hall: None,
+                room: None,
+                max_items: 4,
+            })
+            .await
+            .expect("wake-up pack should succeed");
+
+        assert!(!wake_up.summary.is_empty());
+        assert!(
+            !wake_up.facts.is_empty(),
+            "wake-up facts should include conversation-derived memory"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_memory_wake_up_reloads_persisted_conversations_after_broker_restart() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let root = temp.path().join("repo");
+        fs::create_dir_all(&root).expect("project dir should exist");
+
+        let transcript_path = root.join("restart-transcript.json");
+        fs::write(
+            &transcript_path,
+            r#"[
+              {"role":"user","content":"Why did we replace the auth vendor?"},
+              {"role":"assistant","content":"Because refresh token rotation kept failing in staging."}
+            ]"#,
+        )
+        .expect("transcript should be written");
+
+        let broker = McpBroker::new();
+        broker
+            .memory_ingest_conversation(MemoryIngestConversationRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-1".to_string(),
+                path: transcript_path.display().to_string(),
+                format: crate::api::MemoryConversationFormat::OpenAiMessages,
+                wing: Some("ops".to_string()),
+                hall: Some("incidents".to_string()),
+                room: None,
+            })
+            .await
+            .expect("conversation ingest should succeed");
+
+        let restarted_broker = McpBroker::new();
+        let wake_up = restarted_broker
+            .memory_wake_up(MemoryWakeUpRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-1".to_string(),
+                wing: Some("ops".to_string()),
+                hall: Some("incidents".to_string()),
+                room: None,
+                max_items: 4,
+            })
+            .await
+            .expect("wake-up pack should succeed after restart");
+
+        assert!(
+            wake_up
+                .facts
+                .iter()
+                .any(|fact| fact.contains("refresh token rotation kept failing in staging")),
+            "wake-up should reload facts from persisted conversation metadata after restart"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_memory_wake_up_filters_by_hall_and_room() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let root = temp.path().join("repo");
+        fs::create_dir_all(&root).expect("project dir should exist");
+
+        let auth_transcript_path = root.join("auth-transcript.json");
+        fs::write(
+            &auth_transcript_path,
+            r#"[
+              {"role":"assistant","content":"Auth room incident: refresh token issuer mismatch."}
+            ]"#,
+        )
+        .expect("auth transcript should be written");
+
+        let pager_transcript_path = root.join("pager-transcript.json");
+        fs::write(
+            &pager_transcript_path,
+            r#"[
+              {"role":"assistant","content":"Pager room incident: alert fan-out saturation."}
+            ]"#,
+        )
+        .expect("pager transcript should be written");
+
+        let broker = McpBroker::new();
+        broker
+            .memory_ingest_conversation(MemoryIngestConversationRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-1".to_string(),
+                path: auth_transcript_path.display().to_string(),
+                format: crate::api::MemoryConversationFormat::OpenAiMessages,
+                wing: Some("ops".to_string()),
+                hall: Some("incidents".to_string()),
+                room: Some("auth".to_string()),
+            })
+            .await
+            .expect("auth conversation ingest should succeed");
+
+        broker
+            .memory_ingest_conversation(MemoryIngestConversationRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-1".to_string(),
+                path: pager_transcript_path.display().to_string(),
+                format: crate::api::MemoryConversationFormat::OpenAiMessages,
+                wing: Some("ops".to_string()),
+                hall: Some("incidents".to_string()),
+                room: Some("pager".to_string()),
+            })
+            .await
+            .expect("pager conversation ingest should succeed");
+
+        let wake_up = broker
+            .memory_wake_up(MemoryWakeUpRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-1".to_string(),
+                wing: Some("ops".to_string()),
+                hall: Some("incidents".to_string()),
+                room: Some("auth".to_string()),
+                max_items: 8,
+            })
+            .await
+            .expect("wake-up pack should succeed");
+
+        assert!(
+            wake_up
+                .facts
+                .iter()
+                .any(|fact| fact.contains("refresh token issuer mismatch")),
+            "wake-up should include facts from matching hall+room"
+        );
+        assert!(
+            wake_up
+                .facts
+                .iter()
+                .all(|fact| !fact.contains("alert fan-out saturation")),
+            "wake-up should exclude facts from non-matching room"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_memory_palace_feature_toggle_blocks_conversation_features() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let root = temp.path().join("repo");
+        let state_dir = root.join(".the-one");
+        fs::create_dir_all(&state_dir).expect("state dir should exist");
+        fs::write(
+            state_dir.join("config.json"),
+            r#"{"memory_palace_enabled":false}"#,
+        )
+        .expect("config should be written");
+
+        let transcript_path = root.join("disabled-palace.json");
+        fs::write(
+            &transcript_path,
+            r#"[
+              {"role":"assistant","content":"This should not ingest when palace is disabled."}
+            ]"#,
+        )
+        .expect("transcript should be written");
+
+        let broker = McpBroker::new();
+        let ingest_error = broker
+            .memory_ingest_conversation(MemoryIngestConversationRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-1".to_string(),
+                path: transcript_path.display().to_string(),
+                format: crate::api::MemoryConversationFormat::OpenAiMessages,
+                wing: None,
+                hall: None,
+                room: None,
+            })
+            .await
+            .expect_err("ingest should be disabled");
+        assert!(ingest_error
+            .to_string()
+            .contains("memory palace features are disabled"));
+
+        let wake_error = broker
+            .memory_wake_up(MemoryWakeUpRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-1".to_string(),
+                wing: None,
+                hall: None,
+                room: None,
+                max_items: 4,
+            })
+            .await
+            .expect_err("wake-up should be disabled");
+        assert!(wake_error
+            .to_string()
+            .contains("memory palace features are disabled"));
+    }
+
+    #[tokio::test]
+    async fn test_memory_capture_hook_defaults_and_ingests_with_hook_metadata() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let root = temp.path().join("repo");
+        let state_dir = root.join(".the-one");
+        fs::create_dir_all(&state_dir).expect("state dir should exist");
+        fs::write(
+            state_dir.join("config.json"),
+            r#"{"memory_palace_enabled":true,"memory_palace_hooks_enabled":true}"#,
+        )
+        .expect("config should be written");
+
+        let transcript_path = root.join("hook-precompact.json");
+        fs::write(
+            &transcript_path,
+            r#"[
+              {"role":"assistant","content":"Hook capture should persist this memory."}
+            ]"#,
+        )
+        .expect("transcript should be written");
+
+        let broker = McpBroker::new();
+        let captured = broker
+            .memory_capture_hook(MemoryCaptureHookRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-1".to_string(),
+                path: transcript_path.display().to_string(),
+                format: crate::api::MemoryConversationFormat::OpenAiMessages,
+                event: crate::api::MemoryHookEvent::PreCompact,
+                wing: None,
+                hall: None,
+                room: None,
+            })
+            .await
+            .expect("hook capture should succeed");
+        assert_eq!(captured.event, "precompact");
+        assert_eq!(captured.wing, "project-1");
+        assert_eq!(captured.hall, "hook:precompact");
+        assert_eq!(captured.room, "event:precompact");
+        assert!(captured.ingested_chunks >= 1);
+
+        let wake_up = broker
+            .memory_wake_up(MemoryWakeUpRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-1".to_string(),
+                wing: Some("project-1".to_string()),
+                hall: Some("hook:precompact".to_string()),
+                room: Some("event:precompact".to_string()),
+                max_items: 4,
+            })
+            .await
+            .expect("wake-up should include hook-ingested facts");
+
+        assert!(wake_up
+            .facts
+            .iter()
+            .any(|fact| fact.contains("Hook capture should persist this memory")));
+    }
+
+    #[tokio::test]
+    async fn test_memory_capture_hook_requires_hook_flag() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let root = temp.path().join("repo");
+        let state_dir = root.join(".the-one");
+        fs::create_dir_all(&state_dir).expect("state dir should exist");
+        fs::write(
+            state_dir.join("config.json"),
+            r#"{"memory_palace_enabled":true,"memory_palace_hooks_enabled":false}"#,
+        )
+        .expect("config should be written");
+
+        let transcript_path = root.join("hook-stop.json");
+        fs::write(
+            &transcript_path,
+            r#"[
+              {"role":"assistant","content":"Hook capture should fail when disabled."}
+            ]"#,
+        )
+        .expect("transcript should be written");
+
+        let broker = McpBroker::new();
+        let error = broker
+            .memory_capture_hook(MemoryCaptureHookRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-1".to_string(),
+                path: transcript_path.display().to_string(),
+                format: crate::api::MemoryConversationFormat::OpenAiMessages,
+                event: crate::api::MemoryHookEvent::Stop,
+                wing: None,
+                hall: None,
+                room: None,
+            })
+            .await
+            .expect_err("hook capture should be disabled");
+        assert!(error
+            .to_string()
+            .contains("memory palace hook capture is disabled"));
+    }
+
+    #[tokio::test]
+    async fn test_memory_search_reloads_persisted_conversations_after_broker_restart() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let root = temp.path().join("repo");
+        fs::create_dir_all(&root).expect("project dir should exist");
+
+        let transcript_path = root.join("restart-search-transcript.json");
+        fs::write(
+            &transcript_path,
+            r#"[
+              {"role":"assistant","content":"Search reload should find persisted conversation memory after restart."}
+            ]"#,
+        )
+        .expect("transcript should be written");
+
+        let broker = McpBroker::new();
+        broker
+            .memory_ingest_conversation(MemoryIngestConversationRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-1".to_string(),
+                path: transcript_path.display().to_string(),
+                format: crate::api::MemoryConversationFormat::OpenAiMessages,
+                wing: Some("ops".to_string()),
+                hall: Some("incidents".to_string()),
+                room: Some("auth".to_string()),
+            })
+            .await
+            .expect("conversation ingest should succeed");
+
+        let restarted_broker = McpBroker::new();
+        let search = restarted_broker
+            .memory_search(MemorySearchRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-1".to_string(),
+                query: "search persisted conversation memory after restart".to_string(),
+                top_k: 5,
+                wing: Some("ops".to_string()),
+                hall: None,
+                room: Some("auth".to_string()),
+            })
+            .await;
+
+        assert!(
+            search
+                .hits
+                .iter()
+                .any(|hit| hit.source_path == transcript_path.display().to_string()),
+            "memory search should reload persisted conversation metadata after restart"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_memory_ingest_conversation_fallback_preserves_prior_conversation_state() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let root = temp.path().join("repo");
+        fs::create_dir_all(&root).expect("project dir should exist");
+
+        let first_transcript_path = root.join("first-transcript.json");
+        fs::write(
+            &first_transcript_path,
+            r#"[
+              {"role":"assistant","content":"The first incident was caused by stale issuer config."}
+            ]"#,
+        )
+        .expect("first transcript should be written");
+
+        let second_transcript_path = root.join("second-transcript.json");
+        fs::write(
+            &second_transcript_path,
+            r#"[
+              {"role":"assistant","content":"The second incident was caused by refresh token rotation failures."}
+            ]"#,
+        )
+        .expect("second transcript should be written");
+
+        let broker = McpBroker::new();
+        broker
+            .memory_ingest_conversation(MemoryIngestConversationRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-1".to_string(),
+                path: first_transcript_path.display().to_string(),
+                format: crate::api::MemoryConversationFormat::OpenAiMessages,
+                wing: Some("ops".to_string()),
+                hall: None,
+                room: None,
+            })
+            .await
+            .expect("first conversation ingest should succeed");
+
+        let replacement_engine = broker
+            .build_memory_engine(&root, "project-1")
+            .await
+            .expect("replacement engine should build");
+        let key = McpBroker::project_memory_key(&root, "project-1");
+        broker
+            .memory_by_project
+            .write()
+            .await
+            .insert(key, replacement_engine);
+
+        broker
+            .memory_ingest_conversation(MemoryIngestConversationRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-1".to_string(),
+                path: second_transcript_path.display().to_string(),
+                format: crate::api::MemoryConversationFormat::OpenAiMessages,
+                wing: Some("ops".to_string()),
+                hall: None,
+                room: None,
+            })
+            .await
+            .expect("second conversation ingest should succeed");
+
+        let wake_up = broker
+            .memory_wake_up(MemoryWakeUpRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-1".to_string(),
+                wing: Some("ops".to_string()),
+                hall: None,
+                room: None,
+                max_items: 8,
+            })
+            .await
+            .expect("wake-up pack should succeed");
+
+        assert!(
+            wake_up
+                .facts
+                .iter()
+                .any(|fact| fact.contains("stale issuer config")),
+            "fallback ingest should preserve previously persisted conversation state"
+        );
+        assert!(
+            wake_up
+                .facts
+                .iter()
+                .any(|fact| fact.contains("refresh token rotation failures")),
+            "fallback ingest should include the newly ingested conversation"
+        );
+    }
+
+    #[tokio::test]
     async fn test_memory_search_reports_fallback_when_nano_fails() {
         let temp = tempfile::tempdir().expect("tempdir should be created");
         let root = temp.path().join("repo");
@@ -2769,6 +4131,9 @@ mod tests {
                 project_id: "project-1".to_string(),
                 query: "search docs nano-fail".to_string(),
                 top_k: 5,
+                wing: None,
+                hall: None,
+                room: None,
             })
             .await;
         assert!(search.fallback_used);
@@ -2996,6 +4361,9 @@ mod tests {
                 project_id: "project-1".to_string(),
                 query: "search".to_string(),
                 top_k: 10,
+                wing: None,
+                hall: None,
+                room: None,
             })
             .await;
         assert_eq!(hits.hits.len(), 1);
@@ -3324,9 +4692,10 @@ mod tests {
     async fn test_models_check_updates() {
         let broker = McpBroker::new();
         let result = broker.models_check_updates();
-        assert!(result["fastembed_crate_version"].is_string());
-        assert!(result["local_model_count"].as_u64().unwrap() >= 10);
-        assert_eq!(result["api_provider_count"].as_u64().unwrap(), 3);
+        assert!(result["status"].is_string());
+        assert!(result["checks"]["local_models"]["name"].is_string());
+        assert!(result["checks"]["api_models"]["name"].is_string());
+        assert!(result["next_actions"].is_array());
     }
 
     #[tokio::test]

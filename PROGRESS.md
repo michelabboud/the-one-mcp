@@ -1,10 +1,10 @@
 # Progress Report
 
-## Current Version: v0.14.0
+## Current Version: v0.14.3
 
 ## Overall Status
 
-All planned stages complete. Sixteen releases shipped:
+All planned stages complete. Twenty tracked releases shipped:
 - **v0.1.0** — Initial workspace: 8 crates, 14 MCP tools, stub implementations
 - **v0.2.0** — Production overhaul: async broker, real embeddings, 3 transports, 24 tools
 - **v0.3.0** — Tool catalog: SQLite + Qdrant semantic search, tool lifecycle, 31 tools
@@ -22,8 +22,11 @@ All planned stages complete. Sixteen releases shipped:
 - **v0.13.0** — Major UI overhaul (landing page, /ingest, /graph, v2 dashboard, top nav with project switcher, shared page shell, dark-mode-aware) + Graph RAG end-to-end wiring (extraction pipeline, `maintain: graph.extract`/`graph.stats`, LightRAG-inspired research) + graph-rag.md guide, 302 tests
 - **v0.13.1** — Full LightRAG parity: entity name normalization, entity/relation description vector store (3 Qdrant collections), description summarization, query keyword extraction, gleaning/continue-extraction pass, canvas force-directed graph visualization, 308 tests
 - **v0.14.0** — Catalog expansion to 365 tools (+248 new from baseline 117). All 10 language files + all 8 category files populated. Closes the deferred Task 5 from the 9-item roadmap.
+- **v0.14.1** — Documentation refresh for v0.14.0 catalog expansion and counts.
+- **v0.14.2** — Production hardening completion: real Redis vector backend runtime path, `models.check` real check flow, `the-one://catalog/enabled` backed by catalog DB, wake-up `wing/hall/room` filters, test determinism fixes, docs hardening.
+- **v0.14.3** — MemPalace production controls: on/off feature toggles, first-class hook capture (`maintain: memory.capture_hook` for `stop`/`precompact`), config/env/runtime wiring, and strict feature gating.
 
-Build/test gates: all green. 308 tests (default), 0 failures. 365 catalog tools.
+Build/test gates: all green. 340 tests passing (+1 ignored). 365 catalog tools.
 
 ## Stats
 
@@ -144,7 +147,7 @@ All complete: Claude Code + Gemini CLI + OpenCode + Codex auto-detection, tiered
 
 - `cargo fmt --check` — passing
 - `cargo clippy --workspace --all-targets -- -D warnings` — passing
-- `cargo test --workspace` — **272 tests passing**
+- `cargo test --workspace` — **334 passing, 1 ignored**
 - `cargo build --release -p the-one-mcp --bin the-one-mcp` — passing
 - `bash scripts/release-gate.sh` — passing
 - `bash scripts/build.sh check` — full CI pipeline passing

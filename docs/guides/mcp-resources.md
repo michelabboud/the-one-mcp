@@ -68,12 +68,14 @@ frameworks, typical build commands. Always available even on fresh projects
 
 ### Enabled tools (`catalog/enabled`)
 
-Returns the list of enabled tools for this project's CLI client. The
-content is a JSON array.
+Returns the list of enabled tools for this project from the catalog database.
+The content is a JSON array of tool IDs.
 
-> **v0.10.0 note:** `catalog/enabled` currently returns an empty array.
-> Wiring it to the SQLite `enabled_tools` table is planned for a follow-up
-> patch. The URI exists and is validated so clients can rely on its shape.
+Implementation notes (v0.14.2+):
+
+- Data is read from `.the-one/catalog/catalog.db` enabled-tool state for the
+  active project root.
+- Results are deduplicated and normalized before returning to the client.
 
 ---
 

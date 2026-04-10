@@ -1,6 +1,6 @@
 # The-One MCP API Reference
 
-> Complete reference for all 17 MCP tools + 3 MCP resource types exposed by the-one-mcp v0.12.0.
+> Complete reference for all 19 MCP tools + 3 MCP resource types exposed by the-one-mcp v0.12.0.
 >
 > Tools are invoked via JSON-RPC 2.0 over stdio/SSE/stream. Every tool call uses
 > `method: "tools/call"` with `params.name` and `params.arguments`. Results are
@@ -20,6 +20,8 @@
 | `memory.fetch_chunk` | Memory | Retrieve a specific chunk by ID |
 | `memory.search_images` | Memory | Semantic image search |
 | `memory.ingest_image` | Memory | Manually index an image file |
+| `memory.ingest_conversation` | Memory | Import a transcript export as conversation memory |
+| `memory.wake_up` | Memory | Build a compact context pack from conversation memory |
 | `docs.list` | Docs | List all indexed documentation paths |
 | `docs.get` | Docs | Retrieve a document or a named section |
 | `docs.save` | Docs | Create or update a document (upsert) |
@@ -95,6 +97,9 @@ response includes routing metadata from the intelligent router.
 | `project_id` | string | yes | — | Unique project identifier |
 | `query` | string | yes | — | Natural-language search query |
 | `top_k` | integer | no | `5` | Maximum number of results to return |
+| `wing` | string | no | — | Optional palace wing filter for conversation chunks |
+| `hall` | string | no | — | Optional palace hall filter for conversation chunks |
+| `room` | string | no | — | Optional palace room filter for conversation chunks |
 
 **Example call**
 
@@ -108,8 +113,10 @@ response includes routing metadata from the intelligent router.
     "arguments": {
       "project_root": "/home/user/myproject",
       "project_id": "myproject",
-      "query": "authentication middleware setup",
-      "top_k": 3
+      "query": "refresh token staging incident",
+      "top_k": 3,
+      "wing": "ops",
+      "room": "auth"
     }
   }
 }
@@ -161,7 +168,114 @@ response includes routing metadata from the intelligent router.
 - The project must be initialized with `setup` (action: `project`) before searching.
 - Scores above ~0.85 are typically strong matches; below 0.70 may be tangential.
 - `top_k` is capped by the number of indexed chunks; requesting more than exist is safe.
+- `wing`, `hall`, and `room` are applied after retrieval using the existing conversation chunk metadata. Non-conversation chunks are filtered out only when one of those fields is set.
 - **v0.8.0:** Each chunk now carries extended metadata internally — `language`, `symbol`, `signature`, `line_range` — populated for Rust, Python, TypeScript, JavaScript, and Go source files. Use `memory.fetch_chunk` to retrieve the full chunk text; the code-chunking metadata is used to improve chunk boundaries and will be surfaced in API responses in a future release. See the [Code Chunking Guide](code-chunking.md) for details.
+
+---
+
+### memory.ingest_conversation
+
+Import a conversation export and index it as verbatim memory. Palace metadata is optional, but when present it is encoded into the indexed conversation chunks and persisted in the project database for wake-up packs.
+
+**Parameters**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `project_root` | string | yes | Absolute path to the project root |
+| `project_id` | string | yes | Unique project identifier |
+| `path` | string | yes | Absolute or project-relative path to the transcript export |
+| `format` | string | yes | Transcript format: `openai_messages`, `claude_transcript`, or `generic_jsonl` |
+| `wing` | string | no | Optional palace wing |
+| `hall` | string | no | Optional palace hall |
+| `room` | string | no | Optional palace room |
+
+**Example call**
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "tools/call",
+  "params": {
+    "name": "memory.ingest_conversation",
+    "arguments": {
+      "project_root": "/home/user/myproject",
+      "project_id": "myproject",
+      "path": "exports/auth-review.json",
+      "format": "openai_messages",
+      "wing": "ops",
+      "hall": "incidents",
+      "room": "auth"
+    }
+  }
+}
+```
+
+**Example response**
+
+```json
+{
+  "ingested_chunks": 3,
+  "source_path": "/home/user/myproject/exports/auth-review.json"
+}
+```
+
+**Notes**
+
+- Conversation chunks keep the transcript file path as `source_path`.
+- `wing` defaults to `project_id` only when at least one palace field is provided and `wing` itself is omitted.
+- Re-ingesting the same transcript updates the persisted metadata row for that transcript path.
+
+---
+
+### memory.wake_up
+
+Build a compact context pack from recently updated conversation sources. Today the wake-up query filters by `wing` only; it then extracts deduplicated fact lines from the matching conversation documents.
+
+**Parameters**
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `project_root` | string | yes | — | Absolute path to the project root |
+| `project_id` | string | yes | — | Unique project identifier |
+| `wing` | string | no | — | Optional palace wing filter |
+| `max_items` | integer | no | `12` | Maximum facts to include |
+
+**Example call**
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 3,
+  "method": "tools/call",
+  "params": {
+    "name": "memory.wake_up",
+    "arguments": {
+      "project_root": "/home/user/myproject",
+      "project_id": "myproject",
+      "wing": "ops",
+      "max_items": 4
+    }
+  }
+}
+```
+
+**Example response**
+
+```json
+{
+  "summary": "Wake-up pack with 2 fact(s) from 1 conversation source(s).",
+  "facts": [
+    "We switched auth vendors after refresh-token failures.",
+    "The staging outage was fixed by rotating the issuer config."
+  ]
+}
+```
+
+**Notes**
+
+- If there are no matching conversation sources, the broker returns `"No conversation memory available."` with an empty `facts` array.
+- Wake-up packs reload persisted conversation source metadata after broker restart.
 
 ---
 
@@ -2034,7 +2148,7 @@ scheme, security model, and client integration patterns.
 |-----|-----------|---------|
 | `the-one://docs/<relative-path>` | `text/markdown` | A managed doc under `.the-one/docs/` |
 | `the-one://project/profile` | `application/json` | Project profile (languages, frameworks, commands) |
-| `the-one://catalog/enabled` | `application/json` | Enabled tools list (currently empty array — wiring deferred to a follow-up) |
+| `the-one://catalog/enabled` | `application/json` | Enabled tool IDs from `.the-one/catalog/catalog.db` for the project |
 
 ### resources/list
 

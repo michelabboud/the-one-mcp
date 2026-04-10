@@ -1,0 +1,18 @@
+# Redis persistence for the optional vector backend.
+#
+# Use both RDB snapshots and AOF so RediSearch indexes survive restarts and
+# recover cleanly after crashes.
+
+# --- RDB snapshots ---
+save 900 1
+save 300 10
+save 60 10000
+
+# --- AOF persistence ---
+appendonly yes
+appendfsync everysec
+
+# --- RediSearch ---
+# Redis Stack includes RediSearch by default. For a module-based install,
+# load RediSearch explicitly so FT.CREATE / FT.SEARCH are available.
+# loadmodule /path/to/redisearch.so

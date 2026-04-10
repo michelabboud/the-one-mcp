@@ -89,6 +89,48 @@ Qdrant is the vector database used for semantic search. By default the server co
 
 ---
 
+### Vector Backend Selection
+
+These fields choose where semantic vectors live. Qdrant remains the default.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `vector_backend` | string | `"qdrant"` | Active vector backend. Supported values today are `"qdrant"` and `"redis"`. |
+| `redis_url` | string or null | `null` | Redis connection URL used when `vector_backend` is `"redis"`. |
+| `redis_index_name` | string or null | `null` | Stable RediSearch index name to reuse across restarts. |
+| `redis_persistence_required` | bool | `false` | Expresses that Redis durability is required for this deployment. |
+
+**Example:**
+
+```json
+{
+  "vector_backend": "redis",
+  "redis_url": "redis://127.0.0.1:6379",
+  "redis_index_name": "the_one_memories",
+  "redis_persistence_required": true
+}
+```
+
+Persistence expectations:
+
+- Keep both Redis RDB snapshots and AOF enabled if you expect vector data to survive restarts.
+- Keep `redis_index_name` stable for a deployment. Changing it creates a different RediSearch index namespace.
+- If Redis persistence is lost, reusing the same `redis_index_name` does not recreate the old vectors by itself; reindexing is still required.
+
+Current runtime note:
+
+- With local embeddings enabled, `vector_backend: "redis"` uses the Redis-backed memory engine path.
+- With API embeddings and `vector_backend: "redis"`, broker initialization fails fast with a configuration error because this backend pairing is not supported.
+
+Environment variable overrides:
+
+- `THE_ONE_VECTOR_BACKEND`
+- `THE_ONE_REDIS_URL`
+- `THE_ONE_REDIS_INDEX_NAME`
+- `THE_ONE_REDIS_PERSISTENCE_REQUIRED`
+
+---
+
 ### Embeddings (text)
 
 | Field | Type | Default | Description |

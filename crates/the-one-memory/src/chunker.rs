@@ -2,6 +2,9 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 
+use crate::conversation::{ConversationRole, ConversationTranscript};
+use crate::palace::PalaceMetadata;
+
 #[derive(Debug, Clone)]
 pub struct ChunkMeta {
     pub id: String,
@@ -526,6 +529,64 @@ fn push_text_chunk(
     });
 }
 
+pub fn chunk_conversation(
+    source_path: &str,
+    transcript: &ConversationTranscript,
+    palace: Option<&PalaceMetadata>,
+) -> Vec<ChunkMeta> {
+    let mut heading_hierarchy = vec!["conversation".to_string()];
+    if let Some(metadata) = palace {
+        heading_hierarchy.push(metadata.wing.clone());
+        if let Some(hall) = &metadata.hall {
+            heading_hierarchy.push(hall.clone());
+        }
+        if let Some(room) = &metadata.room {
+            heading_hierarchy.push(room.clone());
+        }
+    }
+
+    let mut byte_offset = 0usize;
+
+    transcript
+        .messages
+        .iter()
+        .map(|message| {
+            let content = format!(
+                "[turn:{}][role:{}]\n{}",
+                message.turn_index,
+                conversation_role_label(&message.role),
+                message.content
+            );
+            let chunk = ChunkMeta {
+                id: format!("{source_path}:turn:{}", message.turn_index),
+                source_path: source_path.to_string(),
+                heading_hierarchy: heading_hierarchy.clone(),
+                chunk_index: message.turn_index,
+                byte_offset,
+                byte_length: content.len(),
+                content_hash: content_hash(&content),
+                content,
+                language: Some("conversation".to_string()),
+                symbol: palace.and_then(|metadata| metadata.room.clone()),
+                signature: palace.and_then(|metadata| metadata.hall.clone()),
+                line_range: None,
+            };
+            byte_offset += chunk.byte_length + 1;
+            chunk
+        })
+        .collect()
+}
+
+fn conversation_role_label(role: &ConversationRole) -> &'static str {
+    match role {
+        ConversationRole::System => "system",
+        ConversationRole::User => "user",
+        ConversationRole::Assistant => "assistant",
+        ConversationRole::Tool => "tool",
+        ConversationRole::Unknown => "unknown",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -661,6 +722,46 @@ mod tests {
         let content = "Line one\n\nLine two\n\nLine three\n\nLine four";
         let chunks = chunk_text_fallback("test.txt", content, 500);
         assert!(!chunks.is_empty());
+    }
+
+    #[test]
+    fn test_chunk_conversation_preserves_verbatim_content_and_metadata() {
+        let transcript = ConversationTranscript {
+            source_id: "session".to_string(),
+            messages: vec![crate::conversation::ConversationMessage {
+                role: ConversationRole::Assistant,
+                content: "Refresh token rotation failed in staging.".to_string(),
+                turn_index: 2,
+            }],
+        };
+
+        let chunks = chunk_conversation(
+            "/tmp/session.json",
+            &transcript,
+            Some(&PalaceMetadata::new(
+                "proj-auth",
+                Some("hall_facts".to_string()),
+                Some("auth-migration".to_string()),
+            )),
+        );
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].id, "/tmp/session.json:turn:2");
+        assert!(chunks[0]
+            .content
+            .contains("Refresh token rotation failed in staging."));
+        assert_eq!(
+            chunks[0].heading_hierarchy,
+            vec![
+                "conversation".to_string(),
+                "proj-auth".to_string(),
+                "hall_facts".to_string(),
+                "auth-migration".to_string(),
+            ]
+        );
+        assert_eq!(chunks[0].signature.as_deref(), Some("hall_facts"));
+        assert_eq!(chunks[0].symbol.as_deref(), Some("auth-migration"));
+        assert_eq!(chunks[0].language.as_deref(), Some("conversation"));
     }
 
     #[test]

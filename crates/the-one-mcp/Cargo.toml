@@ -14,6 +14,7 @@ local-embeddings = ["the-one-memory/local-embeddings"]
 local-embeddings-dynamic = ["the-one-memory/local-embeddings-dynamic"]
 image-embeddings = ["the-one-memory/image-embeddings", "dep:image"]
 image-ocr = ["the-one-memory/image-ocr"]
+redis-vectors = ["the-one-memory/redis-vectors", "local-embeddings"]
 
 [[bin]]
 name = "the-one-mcp"

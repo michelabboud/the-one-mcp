@@ -380,6 +380,12 @@ pub fn restore_backup(request: &RestoreRequest) -> Result<RestoreResponse, Strin
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     /// Guard that swaps `$HOME` to a temp dir for the duration of the test
     /// so backup / restore cannot touch the real user home. Returns the
@@ -407,6 +413,7 @@ mod tests {
 
     #[test]
     fn test_backup_creates_tarball_and_restores_roundtrip() {
+        let _guard = env_lock().lock().expect("env lock");
         let tmp = tempfile::tempdir().expect("tempdir");
         let _home = HomeGuard::set(tmp.path());
         let src_root = tmp.path().join("src-project");
@@ -459,6 +466,7 @@ mod tests {
 
     #[test]
     fn test_backup_excludes_fastembed_cache() {
+        let _guard = env_lock().lock().expect("env lock");
         let tmp = tempfile::tempdir().expect("tempdir");
         let _home = HomeGuard::set(tmp.path());
         let src_root = tmp.path().join("src-project");
@@ -500,6 +508,7 @@ mod tests {
 
     #[test]
     fn test_restore_refuses_existing_state_without_overwrite() {
+        let _guard = env_lock().lock().expect("env lock");
         let tmp = tempfile::tempdir().expect("tempdir");
         let _home = HomeGuard::set(tmp.path());
         // Source
@@ -532,6 +541,7 @@ mod tests {
 
     #[test]
     fn test_restore_skips_unknown_top_level_entries() {
+        let _guard = env_lock().lock().expect("env lock");
         // A tarball with an entry under an unrecognized top-level directory
         // should not error hard — it should be recorded in warnings and
         // skipped. This protects forward compatibility if a future backup

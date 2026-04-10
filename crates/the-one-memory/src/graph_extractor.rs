@@ -463,11 +463,20 @@ async fn extract_one(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::OnceLock;
+    use tokio::sync::Mutex;
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[tokio::test]
     async fn test_extract_disabled_by_default() {
+        let _guard = env_lock().lock().await;
         // Ensure THE_ONE_GRAPH_ENABLED is not set
         std::env::remove_var("THE_ONE_GRAPH_ENABLED");
+        std::env::remove_var("THE_ONE_GRAPH_BASE_URL");
         let tmp = tempfile::tempdir().expect("tempdir");
         let result = extract_and_persist(tmp.path(), &[]).await.expect("ok");
         assert!(result.disabled_reason.is_some());
@@ -476,11 +485,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_extract_enabled_without_base_url_errors() {
+        let _guard = env_lock().lock().await;
         std::env::set_var("THE_ONE_GRAPH_ENABLED", "true");
         std::env::remove_var("THE_ONE_GRAPH_BASE_URL");
         let tmp = tempfile::tempdir().expect("tempdir");
         let result = extract_and_persist(tmp.path(), &[]).await;
         assert!(result.is_err());
         std::env::remove_var("THE_ONE_GRAPH_ENABLED");
+        std::env::remove_var("THE_ONE_GRAPH_BASE_URL");
     }
 }
