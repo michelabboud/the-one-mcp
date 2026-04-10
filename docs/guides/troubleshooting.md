@@ -1,6 +1,6 @@
 # Troubleshooting
 
-Common problems and their fixes for the-one-mcp v0.8.0.
+Common problems and their fixes for the-one-mcp.
 
 ---
 
@@ -999,7 +999,7 @@ Ensure the project was initialized (`setup (action: project)` was called) — th
 
 ### Image events fire but images are not re-indexed
 
-This is expected in v0.8.0. Image event detection works; automatic image re-ingestion is planned for v0.8.1. Run `maintain (action: images.rescan)` manually to update image search.
+If image auto-indexing is enabled, image changes should re-ingest automatically. If not, run `maintain (action: images.rescan)` to force a full image reindex and verify your image embedding config is enabled.
 
 ---
 

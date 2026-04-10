@@ -25,8 +25,13 @@ All planned stages complete. Twenty tracked releases shipped:
 - **v0.14.1** — Documentation refresh for v0.14.0 catalog expansion and counts.
 - **v0.14.2** — Production hardening completion: real Redis vector backend runtime path, `models.check` real check flow, `the-one://catalog/enabled` backed by catalog DB, wake-up `wing/hall/room` filters, test determinism fixes, docs hardening.
 - **v0.14.3** — MemPalace production controls: on/off feature toggles, first-class hook capture (`maintain: memory.capture_hook` for `stop`/`precompact`), config/env/runtime wiring, and strict feature gating.
+- **MemPalace phase 2** — completed production feature set:
+  - AAAK compression + lesson persistence (`memory.aaak.*`)
+  - explicit drawers/closets/tunnels primitives (`memory.navigation.*`)
+  - diary-specific memory flows (`memory.diary.*`) with refresh-safe identity
+  - single-switch profile control (`config: profile.set` + Admin UI preset card)
 
-Build/test gates: all green. 340 tests passing (+1 ignored). 365 catalog tools.
+Build/test gates: all green. 387 tests passing (+1 ignored). 365 catalog tools.
 
 ## Stats
 
@@ -147,7 +152,7 @@ All complete: Claude Code + Gemini CLI + OpenCode + Codex auto-detection, tiered
 
 - `cargo fmt --check` — passing
 - `cargo clippy --workspace --all-targets -- -D warnings` — passing
-- `cargo test --workspace` — **334 passing, 1 ignored**
+- `cargo test --workspace` — **387 passing, 1 ignored**
 - `cargo build --release -p the-one-mcp --bin the-one-mcp` — passing
 - `bash scripts/release-gate.sh` — passing
 - `bash scripts/build.sh check` — full CI pipeline passing

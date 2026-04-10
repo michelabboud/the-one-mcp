@@ -39,7 +39,7 @@ The LLM is the brain. The MCP is the data layer — catalog, filtering, executio
 
 - **Tool Catalog** — 365 curated tools across 10 languages (Rust, Python, JS/TS, Go, Java, Kotlin, Ruby, PHP, Swift, C/C++), searchable via semantic search or full-text. Knows what's installed on your system, what's available, what to recommend.
 - **Unlimited Memory** — Semantic RAG search over project docs. Ask about code from last week — it finds the relevant chunks without loading entire files.
-- **Conversation Memory** — Import transcript exports with `memory.ingest_conversation`, tag them with palace metadata (`wing`, `hall`, `room`), search them with `memory.search`, build compact resume packs with `memory.wake_up`, and optionally capture `stop`/`precompact` hooks with `maintain: memory.capture_hook`.
+- **Conversation Memory** — Import transcript exports with `memory.ingest_conversation`, tag them with palace metadata (`wing`, `hall`, `room`), search them with `memory.search`, build compact resume packs with `memory.wake_up`, switch MemPalace presets with `config: profile.set`, capture `stop`/`precompact` hooks with `maintain: memory.capture_hook`, and enable AAAK / diary / navigation tools under the same profile control.
 - **Hybrid Search** — Combine dense cosine similarity with sparse lexical matching (SPLADE++) for stronger exact-match retrieval. Opt-in. Great for code repos with function names, error strings, and crate identifiers.
 - **Redis Vector Backend** — Optional Redis/RediSearch vector storage with durable index naming and persistence enforcement (`redis_persistence_required`) for teams that operate Redis-first infrastructure.
 - **Managed Knowledge Base** — Create, update, and organize markdown docs that persist across sessions. The LLM writes notes, decisions, architecture docs.
@@ -60,7 +60,7 @@ Claude Code / Gemini CLI / OpenCode / Codex
     v
 the-one-mcp broker
     |
-    +-- MCP Primitives       19 tools + 3 resource types (docs/project/catalog)
+    +-- MCP Primitives       30 tools + 3 resource types (docs/project/catalog)
     +-- Tool Catalog         365 curated tools, SQLite + Qdrant semantic search
     +-- Project Lifecycle    Detect languages/frameworks, fingerprint caching
     +-- Knowledge (RAG)      fastembed (384-1024 dim) + Qdrant or Redis/RediSearch
@@ -74,7 +74,7 @@ the-one-mcp broker
     +-- SQLite               Project state, catalog, approvals, audit trail
 ```
 
-## 19 MCP Tools
+## 30 MCP Tools
 
 | Category | Tools |
 |----------|-------|
@@ -133,8 +133,9 @@ Enable with `"image_embedding_enabled": true` in config. OCR text extraction ava
 | **[INSTALL.md](INSTALL.md)** | **Complete installation guide** |
 | [Quickstart](docs/guides/quickstart.md) | Shortest path to a working setup |
 | [Complete Guide](docs/guides/the-one-mcp-complete-guide.md) | Full reference |
-| [API Reference](docs/guides/api-reference.md) | All 19 tools + MCP resources schema |
+| [API Reference](docs/guides/api-reference.md) | All 30 tools + MCP resources schema |
 | [Conversation Memory Guide](docs/guides/conversation-memory.md) | Import transcripts, use palace metadata filters, build wake-up packs |
+| [MemPalace Operations Guide](docs/guides/mempalace-operations.md) | AAAK lessons, diary flows, drawers/closets/tunnels, and profile presets |
 | [Redis Vector Backend](docs/guides/redis-vector-backend.md) | Optional Redis/RediSearch backend settings and persistence expectations |
 | [Conversation Memory Benchmarking](docs/benchmarks/conversation-memory-benchmark.md) | Repro checklist for long-memory evaluation runs |
 | [MCP Resources Guide](docs/guides/mcp-resources.md) | `resources/list`, `resources/read`, `the-one://` URI scheme |
@@ -184,10 +185,10 @@ Releases are **manual only** — tagging does not auto-trigger builds. You decid
 
 | Metric | Count |
 |--------|-------|
-| MCP Tools | 19 |
+| MCP Tools | 30 |
 | MCP Resource Types | 3 (`docs`, `project`, `catalog`) |
 | Admin UI Pages | 8 (home, dashboard, ingest, graph, images, config, audit, swagger) |
-| Tests | 340 passing (+1 ignored) |
+| Tests | 387 passing (+1 ignored) |
 | Rust LOC | ~26,500 |
 | JSON Schemas | 35 |
 | Catalog Tools | 365 across 10 languages + 8 categories |

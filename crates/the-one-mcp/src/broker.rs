@@ -1,15 +1,20 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
 use tracing::instrument;
 
 use the_one_core::config::{
     update_project_config, AppConfig, NanoProviderKind, ProjectConfigUpdate, RuntimeOverrides,
 };
-use the_one_core::contracts::{ApprovalScope, Capability, RiskLevel};
+use the_one_core::contracts::{
+    AaakCompressionResult, AaakLesson, AaakPattern, AaakTeachOutcome, ApprovalScope, Capability,
+    DiaryEntry, DiarySummary, MemoryNavigationNode, MemoryNavigationNodeKind,
+    MemoryNavigationTunnel, RiskLevel,
+};
 use the_one_core::docs_manager::DocsManager;
 use the_one_core::error::CoreError;
 use the_one_core::manifests::{
@@ -18,7 +23,9 @@ use the_one_core::manifests::{
 use the_one_core::policy::PolicyEngine;
 use the_one_core::project::{project_init, project_refresh, RefreshMode};
 use the_one_core::storage::sqlite::ProjectDatabase;
-use the_one_memory::conversation::{ConversationFormat, ConversationTranscript};
+use the_one_memory::conversation::{
+    AaakCompressionArtifact, ConversationFormat, ConversationTranscript,
+};
 use the_one_memory::palace::PalaceMetadata;
 use the_one_memory::qdrant::QdrantOptions;
 #[cfg(feature = "local-embeddings")]
@@ -37,9 +44,17 @@ use crate::api::{
     DocsGetSectionResponse, DocsListRequest, DocsListResponse, DocsMoveRequest, DocsMoveResponse,
     DocsReindexRequest, DocsReindexResponse, DocsTrashEmptyRequest, DocsTrashEmptyResponse,
     DocsTrashListRequest, DocsTrashListResponse, DocsTrashRestoreRequest, DocsTrashRestoreResponse,
-    DocsUpdateRequest, DocsUpdateResponse, MemoryCaptureHookRequest, MemoryCaptureHookResponse,
-    MemoryConversationFormat, MemoryFetchChunkRequest, MemoryFetchChunkResponse,
-    MemoryIngestConversationRequest, MemoryIngestConversationResponse, MemorySearchItem,
+    DocsUpdateRequest, DocsUpdateResponse, MemoryAaakCompressRequest, MemoryAaakCompressResponse,
+    MemoryAaakListLessonsRequest, MemoryAaakListLessonsResponse, MemoryAaakTeachRequest,
+    MemoryAaakTeachResponse, MemoryCaptureHookRequest, MemoryCaptureHookResponse,
+    MemoryConversationFormat, MemoryDiaryAddRequest, MemoryDiaryAddResponse,
+    MemoryDiaryListRequest, MemoryDiaryListResponse, MemoryDiarySearchRequest,
+    MemoryDiarySearchResponse, MemoryDiarySummarizeRequest, MemoryDiarySummarizeResponse,
+    MemoryFetchChunkRequest, MemoryFetchChunkResponse, MemoryIngestConversationRequest,
+    MemoryIngestConversationResponse, MemoryNavigationLinkTunnelRequest,
+    MemoryNavigationLinkTunnelResponse, MemoryNavigationListRequest, MemoryNavigationListResponse,
+    MemoryNavigationTraverseRequest, MemoryNavigationTraverseResponse,
+    MemoryNavigationUpsertNodeRequest, MemoryNavigationUpsertNodeResponse, MemorySearchItem,
     MemorySearchRequest, MemorySearchResponse, MemoryWakeUpRequest, MemoryWakeUpResponse,
     MetricsSnapshotResponse, ProjectInitRequest, ProjectInitResponse, ProjectProfileGetRequest,
     ProjectProfileGetResponse, ProjectRefreshRequest, ProjectRefreshResponse, ToolAddRequest,
@@ -49,6 +64,10 @@ use crate::api::{
     ToolSearchRequest, ToolSearchResponse, ToolSuggestItem, ToolSuggestRequest,
     ToolSuggestResponse, ToolUpdateResponse,
 };
+
+const AAAK_MIN_OCCURRENCES: usize = 2;
+const AAAK_MIN_CONFIDENCE_PERCENT: u8 = 70;
+const AAAK_MAX_LESSONS_PER_BATCH: usize = 8;
 
 pub struct McpBroker {
     router: Router,
@@ -396,6 +415,26 @@ impl McpBroker {
         }
     }
 
+    fn load_transcript_from_path(
+        project_root: &Path,
+        raw_path: &str,
+        format: &MemoryConversationFormat,
+    ) -> Result<(PathBuf, ConversationTranscript), CoreError> {
+        let transcript_path = Self::resolve_request_path(project_root, raw_path);
+        let transcript_path = transcript_path.canonicalize().map_err(CoreError::Io)?;
+        let transcript_json = std::fs::read_to_string(&transcript_path).map_err(CoreError::Io)?;
+        let transcript = ConversationTranscript::from_json_str(
+            transcript_path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or("conversation"),
+            Self::conversation_format(format),
+            &transcript_json,
+        )
+        .map_err(CoreError::Embedding)?;
+        Ok((transcript_path, transcript))
+    }
+
     fn palace_metadata_from_parts(
         project_id: &str,
         wing: Option<String>,
@@ -436,6 +475,395 @@ impl McpBroker {
 
     fn memory_palace_room_for_hook_event(event: &crate::api::MemoryHookEvent) -> String {
         format!("event:{}", event.as_str())
+    }
+
+    fn aaak_lessons_from_transcript(
+        project_id: &str,
+        transcript_path: &Path,
+        transcript: &ConversationTranscript,
+        max_lessons: usize,
+    ) -> Vec<AaakLesson> {
+        transcript
+            .derive_aaak_patterns(AAAK_MIN_OCCURRENCES)
+            .into_iter()
+            .filter(|pattern| pattern.confidence_percent >= AAAK_MIN_CONFIDENCE_PERCENT)
+            .take(max_lessons.min(AAAK_MAX_LESSONS_PER_BATCH))
+            .map(|pattern| {
+                let lesson_id = Self::aaak_lesson_id(project_id, &pattern.pattern_key);
+                AaakLesson {
+                    lesson_id,
+                    project_id: project_id.to_string(),
+                    pattern_key: pattern.pattern_key,
+                    role: Self::conversation_role_label(&pattern.role).to_string(),
+                    canonical_text: pattern.canonical_text,
+                    occurrence_count: pattern.occurrence_count,
+                    confidence_percent: pattern.confidence_percent,
+                    source_transcript_path: Some(transcript_path.display().to_string()),
+                    updated_at_epoch_ms: current_time_epoch_ms(),
+                }
+            })
+            .collect()
+    }
+
+    fn aaak_lesson_id(project_id: &str, pattern_key: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(format!("{project_id}:{pattern_key}").as_bytes());
+        let digest = hasher.finalize();
+        let hex = digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        format!("lesson-{}", &hex[..16])
+    }
+
+    fn conversation_role_label(
+        role: &the_one_memory::conversation::ConversationRole,
+    ) -> &'static str {
+        match role {
+            the_one_memory::conversation::ConversationRole::System => "system",
+            the_one_memory::conversation::ConversationRole::User => "user",
+            the_one_memory::conversation::ConversationRole::Assistant => "assistant",
+            the_one_memory::conversation::ConversationRole::Tool => "tool",
+            the_one_memory::conversation::ConversationRole::Unknown => "unknown",
+        }
+    }
+
+    fn aaak_result_from_artifact(
+        transcript: &ConversationTranscript,
+        artifact: AaakCompressionArtifact,
+    ) -> Result<AaakCompressionResult, CoreError> {
+        let compressed_payload_json = artifact
+            .envelope
+            .to_json_string()
+            .map_err(CoreError::Embedding)?;
+        Ok(AaakCompressionResult {
+            used_verbatim: artifact.used_verbatim,
+            confidence_percent: artifact.confidence_percent,
+            original_message_count: transcript.messages.len(),
+            sequence_item_count: artifact.envelope.sequence.len(),
+            compressed_payload_json,
+            patterns: artifact
+                .patterns
+                .into_iter()
+                .map(|pattern| AaakPattern {
+                    pattern_key: pattern.pattern_key,
+                    role: Self::conversation_role_label(&pattern.role).to_string(),
+                    canonical_text: pattern.canonical_text,
+                    occurrence_count: pattern.occurrence_count,
+                    confidence_percent: pattern.confidence_percent,
+                })
+                .collect(),
+        })
+    }
+
+    fn aaak_features_enabled(config: &AppConfig) -> bool {
+        config.memory_palace_enabled && config.memory_palace_aaak_enabled
+    }
+
+    fn diary_features_enabled(config: &AppConfig) -> bool {
+        config.memory_palace_enabled && config.memory_palace_diary_enabled
+    }
+
+    fn navigation_features_enabled(config: &AppConfig) -> bool {
+        config.memory_palace_enabled && config.memory_palace_navigation_enabled
+    }
+
+    fn validate_diary_date(value: &str, field_name: &str) -> Result<(), CoreError> {
+        if value.len() != 10
+            || !matches!(value.as_bytes().get(4), Some(b'-'))
+            || !matches!(value.as_bytes().get(7), Some(b'-'))
+        {
+            return Err(CoreError::InvalidRequest(format!(
+                "{field_name} must use YYYY-MM-DD format"
+            )));
+        }
+
+        let year = value[0..4].parse::<u32>().map_err(|_| {
+            CoreError::InvalidRequest(format!("{field_name} must use YYYY-MM-DD format"))
+        })?;
+        let month = value[5..7].parse::<u32>().map_err(|_| {
+            CoreError::InvalidRequest(format!("{field_name} must use YYYY-MM-DD format"))
+        })?;
+        let day = value[8..10].parse::<u32>().map_err(|_| {
+            CoreError::InvalidRequest(format!("{field_name} must use YYYY-MM-DD format"))
+        })?;
+
+        if !(1..=9999).contains(&year) || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+            return Err(CoreError::InvalidRequest(format!(
+                "{field_name} must be a real calendar-like date"
+            )));
+        }
+
+        Ok(())
+    }
+
+    fn validate_diary_date_range(
+        start_date: Option<&str>,
+        end_date: Option<&str>,
+    ) -> Result<(), CoreError> {
+        if let Some(start_date) = start_date {
+            Self::validate_diary_date(start_date, "start_date")?;
+        }
+        if let Some(end_date) = end_date {
+            Self::validate_diary_date(end_date, "end_date")?;
+        }
+        if let (Some(start_date), Some(end_date)) = (start_date, end_date) {
+            if start_date > end_date {
+                return Err(CoreError::InvalidRequest(
+                    "start_date must be less than or equal to end_date".to_string(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn normalize_optional_diary_field(value: Option<String>) -> Option<String> {
+        value.and_then(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        })
+    }
+
+    fn normalize_diary_tags(tags: Vec<String>) -> Vec<String> {
+        let mut normalized = Vec::new();
+        let mut seen = HashSet::new();
+        for tag in tags {
+            let trimmed = tag.trim().to_ascii_lowercase();
+            if trimmed.is_empty() || !seen.insert(trimmed.clone()) {
+                continue;
+            }
+            normalized.push(trimmed);
+        }
+        normalized
+    }
+
+    fn diary_entry_id(project_id: &str, entry_date: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(project_id.as_bytes());
+        hasher.update(b":");
+        hasher.update(entry_date.as_bytes());
+        let digest = hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        format!("diary:{entry_date}:{}", &digest[..16])
+    }
+
+    fn build_diary_summary(
+        entries: &[DiaryEntry],
+        start_date: Option<&str>,
+        end_date: Option<&str>,
+        max_summary_items: usize,
+    ) -> DiarySummary {
+        let mut highlights = Vec::new();
+        for entry in entries {
+            let remaining = max_summary_items.saturating_sub(highlights.len());
+            if remaining == 0 {
+                break;
+            }
+            highlights.extend(Self::extract_facts_from_memory(&entry.content, remaining));
+        }
+
+        let summary = if entries.is_empty() {
+            "No diary entries matched the requested range.".to_string()
+        } else {
+            format!(
+                "Summarized {} diary entr{} across the requested range.",
+                entries.len(),
+                if entries.len() == 1 { "y" } else { "ies" }
+            )
+        };
+
+        let date_from = entries
+            .last()
+            .map(|entry| entry.entry_date.clone())
+            .or_else(|| start_date.map(str::to_string));
+        let date_to = entries
+            .first()
+            .map(|entry| entry.entry_date.clone())
+            .or_else(|| end_date.map(str::to_string));
+
+        DiarySummary {
+            date_from,
+            date_to,
+            entry_count: entries.len(),
+            summary,
+            highlights,
+        }
+    }
+
+    fn navigation_node_kind_from_label(value: &str) -> Result<MemoryNavigationNodeKind, CoreError> {
+        match value {
+            "drawer" => Ok(MemoryNavigationNodeKind::Drawer),
+            "closet" => Ok(MemoryNavigationNodeKind::Closet),
+            "room" => Ok(MemoryNavigationNodeKind::Room),
+            other => Err(CoreError::InvalidRequest(format!(
+                "unsupported navigation node kind: {other}"
+            ))),
+        }
+    }
+
+    fn navigation_slug(value: &str) -> String {
+        let mut slug = String::new();
+        let mut last_was_separator = false;
+        for ch in value.chars().flat_map(char::to_lowercase) {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+                slug.push(ch);
+                last_was_separator = false;
+            } else if !last_was_separator {
+                slug.push('_');
+                last_was_separator = true;
+            }
+        }
+
+        let trimmed = slug.trim_matches('_');
+        if trimmed.is_empty() {
+            "node".to_string()
+        } else {
+            trimmed.to_string()
+        }
+    }
+
+    fn navigation_digest(seed: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(seed.as_bytes());
+        hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()[..12]
+            .to_string()
+    }
+
+    fn navigation_drawer_node_id(wing: &str) -> String {
+        format!(
+            "drawer:{}-{}",
+            Self::navigation_slug(wing),
+            Self::navigation_digest(&format!("drawer:{wing}"))
+        )
+    }
+
+    fn navigation_closet_node_id(wing: &str, hall: &str) -> String {
+        format!(
+            "closet:{}-{}",
+            Self::navigation_slug(hall),
+            Self::navigation_digest(&format!("closet:{wing}:{hall}"))
+        )
+    }
+
+    fn navigation_room_node_id(wing: &str, hall: Option<&str>, room: &str) -> String {
+        let scope = hall
+            .map(|hall| format!("room:{wing}:{hall}:{room}"))
+            .unwrap_or_else(|| format!("room:{wing}:{room}"));
+        format!(
+            "room:{}-{}",
+            Self::navigation_slug(room),
+            Self::navigation_digest(&scope)
+        )
+    }
+
+    fn navigation_tunnel_id(project_id: &str, from_node_id: &str, to_node_id: &str) -> String {
+        format!(
+            "tunnel-{}",
+            Self::navigation_digest(&format!("{project_id}:{from_node_id}:{to_node_id}"))
+        )
+    }
+
+    fn normalized_tunnel_endpoints(from_node_id: &str, to_node_id: &str) -> (String, String) {
+        if from_node_id <= to_node_id {
+            (from_node_id.to_string(), to_node_id.to_string())
+        } else {
+            (to_node_id.to_string(), from_node_id.to_string())
+        }
+    }
+
+    fn navigation_missing_node_error(node_id: &str) -> CoreError {
+        CoreError::InvalidRequest(format!("navigation node not found: {node_id}"))
+    }
+
+    fn validate_navigation_parent(
+        node_kind: &MemoryNavigationNodeKind,
+        parent_node: Option<&MemoryNavigationNode>,
+    ) -> Result<(), CoreError> {
+        match (node_kind, parent_node.map(|node| &node.kind)) {
+            (MemoryNavigationNodeKind::Drawer, Some(_)) => Err(CoreError::InvalidRequest(
+                "drawer nodes cannot declare a parent_node_id".to_string(),
+            )),
+            (MemoryNavigationNodeKind::Drawer, None) => Ok(()),
+            (MemoryNavigationNodeKind::Closet, Some(MemoryNavigationNodeKind::Drawer)) => Ok(()),
+            (MemoryNavigationNodeKind::Closet, Some(_)) => Err(CoreError::InvalidRequest(
+                "closet nodes must be children of drawer nodes".to_string(),
+            )),
+            (MemoryNavigationNodeKind::Closet, None) => Err(CoreError::InvalidRequest(
+                "closet nodes require a parent drawer".to_string(),
+            )),
+            (MemoryNavigationNodeKind::Room, Some(MemoryNavigationNodeKind::Drawer)) => Ok(()),
+            (MemoryNavigationNodeKind::Room, Some(MemoryNavigationNodeKind::Closet)) => Ok(()),
+            (MemoryNavigationNodeKind::Room, Some(_)) => Err(CoreError::InvalidRequest(
+                "room nodes must be children of drawer or closet nodes".to_string(),
+            )),
+            (MemoryNavigationNodeKind::Room, None) => Err(CoreError::InvalidRequest(
+                "room nodes require a parent drawer or closet".to_string(),
+            )),
+        }
+    }
+
+    fn sync_navigation_nodes_from_palace_metadata(
+        db: &ProjectDatabase,
+        project_id: &str,
+        palace: &PalaceMetadata,
+    ) -> Result<(), CoreError> {
+        let now = current_time_epoch_ms();
+        let drawer_id = Self::navigation_drawer_node_id(&palace.wing);
+        db.upsert_navigation_node(&MemoryNavigationNode {
+            node_id: drawer_id.clone(),
+            project_id: project_id.to_string(),
+            kind: MemoryNavigationNodeKind::Drawer,
+            label: palace.wing.clone(),
+            parent_node_id: None,
+            wing: Some(palace.wing.clone()),
+            hall: None,
+            room: None,
+            updated_at_epoch_ms: now,
+        })?;
+
+        let mut parent_node_id = drawer_id;
+        if let Some(hall) = palace.hall.as_deref() {
+            let closet_id = Self::navigation_closet_node_id(&palace.wing, hall);
+            db.upsert_navigation_node(&MemoryNavigationNode {
+                node_id: closet_id.clone(),
+                project_id: project_id.to_string(),
+                kind: MemoryNavigationNodeKind::Closet,
+                label: hall.to_string(),
+                parent_node_id: Some(parent_node_id.clone()),
+                wing: Some(palace.wing.clone()),
+                hall: Some(hall.to_string()),
+                room: None,
+                updated_at_epoch_ms: now,
+            })?;
+            parent_node_id = closet_id;
+        }
+
+        if let Some(room) = palace.room.as_deref() {
+            db.upsert_navigation_node(&MemoryNavigationNode {
+                node_id: Self::navigation_room_node_id(&palace.wing, palace.hall.as_deref(), room),
+                project_id: project_id.to_string(),
+                kind: MemoryNavigationNodeKind::Room,
+                label: room.to_string(),
+                parent_node_id: Some(parent_node_id),
+                wing: Some(palace.wing.clone()),
+                hall: palace.hall.clone(),
+                room: Some(room.to_string()),
+                updated_at_epoch_ms: now,
+            })?;
+        }
+
+        Ok(())
     }
 
     fn search_candidate_limit(top_k: usize, filters_requested: bool) -> usize {
@@ -1148,21 +1576,10 @@ impl McpBroker {
             ));
         }
 
-        let transcript_path = Self::resolve_request_path(project_root, &request.path);
-        let transcript_path = transcript_path.canonicalize().map_err(CoreError::Io)?;
-        let transcript_json = std::fs::read_to_string(&transcript_path).map_err(CoreError::Io)?;
+        let (transcript_path, transcript) =
+            Self::load_transcript_from_path(project_root, &request.path, &request.format)?;
         let db = ProjectDatabase::open(project_root, &request.project_id)?;
         let existing_sources = db.list_conversation_sources(None, None, None, usize::MAX)?;
-
-        let transcript = ConversationTranscript::from_json_str(
-            transcript_path
-                .file_stem()
-                .and_then(|value| value.to_str())
-                .unwrap_or("conversation"),
-            Self::conversation_format(&request.format),
-            &transcript_json,
-        )
-        .map_err(CoreError::Embedding)?;
 
         let palace = Self::palace_metadata_from_parts(
             &request.project_id,
@@ -1225,6 +1642,23 @@ impl McpBroker {
             room: palace.as_ref().and_then(|value| value.room.clone()),
             message_count: transcript.messages.len(),
         })?;
+
+        if Self::navigation_features_enabled(&config) {
+            if let Some(palace) = palace.as_ref() {
+                Self::sync_navigation_nodes_from_palace_metadata(&db, &request.project_id, palace)?;
+            }
+        }
+
+        if Self::aaak_features_enabled(&config) {
+            for lesson in Self::aaak_lessons_from_transcript(
+                &request.project_id,
+                &transcript_path,
+                &transcript,
+                AAAK_MAX_LESSONS_PER_BATCH,
+            ) {
+                db.upsert_aaak_lesson(&lesson)?;
+            }
+        }
 
         Ok(MemoryIngestConversationResponse {
             ingested_chunks,
@@ -1346,6 +1780,475 @@ impl McpBroker {
             wing,
             hall,
             room,
+        })
+    }
+
+    #[instrument(skip_all)]
+    pub async fn memory_aaak_compress(
+        &self,
+        request: MemoryAaakCompressRequest,
+    ) -> Result<MemoryAaakCompressResponse, CoreError> {
+        let project_root = Path::new(&request.project_root);
+        let config = AppConfig::load(project_root, RuntimeOverrides::default())?;
+        if !Self::aaak_features_enabled(&config) {
+            return Err(CoreError::NotEnabled(
+                "AAAK features are disabled; enable memory_palace_enabled and memory_palace_aaak_enabled"
+                    .to_string(),
+            ));
+        }
+
+        let (_, transcript) =
+            Self::load_transcript_from_path(project_root, &request.path, &request.format)?;
+        let artifact = transcript.compress_aaak(AAAK_MIN_OCCURRENCES, AAAK_MIN_CONFIDENCE_PERCENT);
+        Ok(MemoryAaakCompressResponse {
+            result: Self::aaak_result_from_artifact(&transcript, artifact)?,
+        })
+    }
+
+    #[instrument(skip_all)]
+    pub async fn memory_aaak_teach(
+        &self,
+        request: MemoryAaakTeachRequest,
+    ) -> Result<MemoryAaakTeachResponse, CoreError> {
+        let project_root = Path::new(&request.project_root);
+        let config = AppConfig::load(project_root, RuntimeOverrides::default())?;
+        if !Self::aaak_features_enabled(&config) {
+            return Err(CoreError::NotEnabled(
+                "AAAK features are disabled; enable memory_palace_enabled and memory_palace_aaak_enabled"
+                    .to_string(),
+            ));
+        }
+
+        let (transcript_path, transcript) =
+            Self::load_transcript_from_path(project_root, &request.path, &request.format)?;
+        let lessons = Self::aaak_lessons_from_transcript(
+            &request.project_id,
+            &transcript_path,
+            &transcript,
+            AAAK_MAX_LESSONS_PER_BATCH,
+        );
+        let db = ProjectDatabase::open(project_root, &request.project_id)?;
+        for lesson in &lessons {
+            db.upsert_aaak_lesson(lesson)?;
+        }
+
+        Ok(MemoryAaakTeachResponse {
+            outcome: AaakTeachOutcome {
+                lessons_written: lessons.len(),
+                skipped_reason: if lessons.is_empty() {
+                    Some("no repeated motifs met AAAK confidence threshold".to_string())
+                } else {
+                    None
+                },
+                lessons,
+            },
+        })
+    }
+
+    #[instrument(skip_all)]
+    pub async fn memory_aaak_list_lessons(
+        &self,
+        request: MemoryAaakListLessonsRequest,
+    ) -> Result<MemoryAaakListLessonsResponse, CoreError> {
+        let project_root = Path::new(&request.project_root);
+        let config = AppConfig::load(project_root, RuntimeOverrides::default())?;
+        if !Self::aaak_features_enabled(&config) {
+            return Err(CoreError::NotEnabled(
+                "AAAK features are disabled; enable memory_palace_enabled and memory_palace_aaak_enabled"
+                    .to_string(),
+            ));
+        }
+
+        let db = ProjectDatabase::open(project_root, &request.project_id)?;
+        Ok(MemoryAaakListLessonsResponse {
+            lessons: db.list_aaak_lessons(&request.project_id, request.limit)?,
+        })
+    }
+
+    #[instrument(skip_all)]
+    pub async fn memory_diary_add(
+        &self,
+        request: MemoryDiaryAddRequest,
+    ) -> Result<MemoryDiaryAddResponse, CoreError> {
+        let project_root = Path::new(&request.project_root);
+        let config = AppConfig::load(project_root, RuntimeOverrides::default())?;
+        if !Self::diary_features_enabled(&config) {
+            return Err(CoreError::NotEnabled(
+                "diary features are disabled; enable memory_palace_enabled and memory_palace_diary_enabled"
+                    .to_string(),
+            ));
+        }
+
+        Self::validate_diary_date(&request.entry_date, "entry_date")?;
+        let content = request.content.trim().to_string();
+        if content.is_empty() {
+            return Err(CoreError::InvalidRequest(
+                "diary entry content cannot be empty".to_string(),
+            ));
+        }
+
+        let mood = Self::normalize_optional_diary_field(request.mood);
+        let tags = Self::normalize_diary_tags(request.tags);
+        let now = current_time_epoch_ms();
+        let db = ProjectDatabase::open(project_root, &request.project_id)?;
+        let existing_entry = db
+            .list_diary_entries(Some(&request.entry_date), Some(&request.entry_date), 1)?
+            .into_iter()
+            .next();
+        let entry = DiaryEntry {
+            entry_id: existing_entry
+                .as_ref()
+                .map(|entry| entry.entry_id.clone())
+                .unwrap_or_else(|| Self::diary_entry_id(&request.project_id, &request.entry_date)),
+            project_id: request.project_id.clone(),
+            entry_date: request.entry_date,
+            mood,
+            tags,
+            content,
+            created_at_epoch_ms: existing_entry
+                .as_ref()
+                .map(|entry| entry.created_at_epoch_ms)
+                .unwrap_or(now),
+            updated_at_epoch_ms: now,
+        };
+
+        db.upsert_diary_entry(&entry)?;
+
+        Ok(MemoryDiaryAddResponse { entry })
+    }
+
+    #[instrument(skip_all)]
+    pub async fn memory_diary_list(
+        &self,
+        request: MemoryDiaryListRequest,
+    ) -> Result<MemoryDiaryListResponse, CoreError> {
+        let project_root = Path::new(&request.project_root);
+        let config = AppConfig::load(project_root, RuntimeOverrides::default())?;
+        if !Self::diary_features_enabled(&config) {
+            return Err(CoreError::NotEnabled(
+                "diary features are disabled; enable memory_palace_enabled and memory_palace_diary_enabled"
+                    .to_string(),
+            ));
+        }
+
+        Self::validate_diary_date_range(
+            request.start_date.as_deref(),
+            request.end_date.as_deref(),
+        )?;
+        let db = ProjectDatabase::open(project_root, &request.project_id)?;
+        Ok(MemoryDiaryListResponse {
+            entries: db.list_diary_entries(
+                request.start_date.as_deref(),
+                request.end_date.as_deref(),
+                self.policy.clamp_search_hits(request.max_results),
+            )?,
+        })
+    }
+
+    #[instrument(skip_all)]
+    pub async fn memory_diary_search(
+        &self,
+        request: MemoryDiarySearchRequest,
+    ) -> Result<MemoryDiarySearchResponse, CoreError> {
+        let project_root = Path::new(&request.project_root);
+        let config = AppConfig::load(project_root, RuntimeOverrides::default())?;
+        if !Self::diary_features_enabled(&config) {
+            return Err(CoreError::NotEnabled(
+                "diary features are disabled; enable memory_palace_enabled and memory_palace_diary_enabled"
+                    .to_string(),
+            ));
+        }
+
+        let query = request.query.trim();
+        if query.is_empty() {
+            return Err(CoreError::InvalidRequest(
+                "diary search query cannot be empty".to_string(),
+            ));
+        }
+        Self::validate_diary_date_range(
+            request.start_date.as_deref(),
+            request.end_date.as_deref(),
+        )?;
+
+        let db = ProjectDatabase::open(project_root, &request.project_id)?;
+        Ok(MemoryDiarySearchResponse {
+            entries: db.search_diary_entries_in_range(
+                query,
+                request.start_date.as_deref(),
+                request.end_date.as_deref(),
+                self.policy.clamp_search_hits(request.max_results),
+            )?,
+        })
+    }
+
+    #[instrument(skip_all)]
+    pub async fn memory_diary_summarize(
+        &self,
+        request: MemoryDiarySummarizeRequest,
+    ) -> Result<MemoryDiarySummarizeResponse, CoreError> {
+        let project_root = Path::new(&request.project_root);
+        let config = AppConfig::load(project_root, RuntimeOverrides::default())?;
+        if !Self::diary_features_enabled(&config) {
+            return Err(CoreError::NotEnabled(
+                "diary features are disabled; enable memory_palace_enabled and memory_palace_diary_enabled"
+                    .to_string(),
+            ));
+        }
+
+        Self::validate_diary_date_range(
+            request.start_date.as_deref(),
+            request.end_date.as_deref(),
+        )?;
+
+        let max_summary_items = self.policy.clamp_search_hits(request.max_summary_items);
+        let db = ProjectDatabase::open(project_root, &request.project_id)?;
+        let entries = db.list_diary_entries(
+            request.start_date.as_deref(),
+            request.end_date.as_deref(),
+            max_summary_items,
+        )?;
+
+        Ok(MemoryDiarySummarizeResponse {
+            summary: Self::build_diary_summary(
+                &entries,
+                request.start_date.as_deref(),
+                request.end_date.as_deref(),
+                max_summary_items,
+            ),
+        })
+    }
+
+    #[instrument(skip_all)]
+    pub async fn memory_navigation_upsert_node(
+        &self,
+        request: MemoryNavigationUpsertNodeRequest,
+    ) -> Result<MemoryNavigationUpsertNodeResponse, CoreError> {
+        let project_root = Path::new(&request.project_root);
+        let config = AppConfig::load(project_root, RuntimeOverrides::default())?;
+        if !Self::navigation_features_enabled(&config) {
+            return Err(CoreError::NotEnabled(
+                "navigation features are disabled; enable memory_palace_enabled and memory_palace_navigation_enabled"
+                    .to_string(),
+            ));
+        }
+
+        let db = ProjectDatabase::open(project_root, &request.project_id)?;
+        let kind = Self::navigation_node_kind_from_label(&request.kind)?;
+        let parent_node = request
+            .parent_node_id
+            .as_deref()
+            .map(|parent_node_id| {
+                db.get_navigation_node(parent_node_id)?
+                    .ok_or_else(|| Self::navigation_missing_node_error(parent_node_id))
+            })
+            .transpose()?;
+        Self::validate_navigation_parent(&kind, parent_node.as_ref())?;
+
+        let node = MemoryNavigationNode {
+            node_id: request.node_id,
+            project_id: request.project_id,
+            kind,
+            label: request.label,
+            parent_node_id: request.parent_node_id,
+            wing: request.wing,
+            hall: request.hall,
+            room: request.room,
+            updated_at_epoch_ms: current_time_epoch_ms(),
+        };
+        db.upsert_navigation_node(&node)?;
+
+        Ok(MemoryNavigationUpsertNodeResponse { node })
+    }
+
+    #[instrument(skip_all)]
+    pub async fn memory_navigation_link_tunnel(
+        &self,
+        request: MemoryNavigationLinkTunnelRequest,
+    ) -> Result<MemoryNavigationLinkTunnelResponse, CoreError> {
+        let project_root = Path::new(&request.project_root);
+        let config = AppConfig::load(project_root, RuntimeOverrides::default())?;
+        if !Self::navigation_features_enabled(&config) {
+            return Err(CoreError::NotEnabled(
+                "navigation features are disabled; enable memory_palace_enabled and memory_palace_navigation_enabled"
+                    .to_string(),
+            ));
+        }
+
+        let db = ProjectDatabase::open(project_root, &request.project_id)?;
+        db.get_navigation_node(&request.from_node_id)?
+            .ok_or_else(|| Self::navigation_missing_node_error(&request.from_node_id))?;
+        db.get_navigation_node(&request.to_node_id)?
+            .ok_or_else(|| Self::navigation_missing_node_error(&request.to_node_id))?;
+
+        let (from_node_id, to_node_id) =
+            Self::normalized_tunnel_endpoints(&request.from_node_id, &request.to_node_id);
+        if from_node_id == to_node_id {
+            return Err(CoreError::InvalidRequest(
+                "navigation tunnel endpoints must differ".to_string(),
+            ));
+        }
+
+        let tunnel = MemoryNavigationTunnel {
+            tunnel_id: Self::navigation_tunnel_id(&request.project_id, &from_node_id, &to_node_id),
+            project_id: request.project_id,
+            from_node_id,
+            to_node_id,
+            updated_at_epoch_ms: current_time_epoch_ms(),
+        };
+        db.upsert_navigation_tunnel(&tunnel)?;
+
+        Ok(MemoryNavigationLinkTunnelResponse { tunnel })
+    }
+
+    #[instrument(skip_all)]
+    pub async fn memory_navigation_list(
+        &self,
+        request: MemoryNavigationListRequest,
+    ) -> Result<MemoryNavigationListResponse, CoreError> {
+        let project_root = Path::new(&request.project_root);
+        let config = AppConfig::load(project_root, RuntimeOverrides::default())?;
+        if !Self::navigation_features_enabled(&config) {
+            return Err(CoreError::NotEnabled(
+                "navigation features are disabled; enable memory_palace_enabled and memory_palace_navigation_enabled"
+                    .to_string(),
+            ));
+        }
+
+        let db = ProjectDatabase::open(project_root, &request.project_id)?;
+        if let Some(parent_node_id) = request.parent_node_id.as_deref() {
+            db.get_navigation_node(parent_node_id)?
+                .ok_or_else(|| Self::navigation_missing_node_error(parent_node_id))?;
+        }
+
+        let kind_filter = request
+            .kind
+            .as_deref()
+            .map(Self::navigation_node_kind_from_label)
+            .transpose()?
+            .map(|kind| kind.as_str().to_string());
+        let nodes = db.list_navigation_nodes(
+            request.parent_node_id.as_deref(),
+            kind_filter.as_deref(),
+            request.limit,
+        )?;
+        let all_tunnels = db.list_navigation_tunnels(None)?;
+        let tunnels = if request.parent_node_id.is_none() && request.kind.is_none() {
+            all_tunnels
+        } else {
+            let node_ids = nodes
+                .iter()
+                .map(|node| node.node_id.as_str())
+                .collect::<HashSet<_>>();
+            all_tunnels
+                .into_iter()
+                .filter(|tunnel| {
+                    node_ids.contains(tunnel.from_node_id.as_str())
+                        || node_ids.contains(tunnel.to_node_id.as_str())
+                })
+                .collect()
+        };
+
+        Ok(MemoryNavigationListResponse { nodes, tunnels })
+    }
+
+    #[instrument(skip_all)]
+    pub async fn memory_navigation_traverse(
+        &self,
+        request: MemoryNavigationTraverseRequest,
+    ) -> Result<MemoryNavigationTraverseResponse, CoreError> {
+        let project_root = Path::new(&request.project_root);
+        let config = AppConfig::load(project_root, RuntimeOverrides::default())?;
+        if !Self::navigation_features_enabled(&config) {
+            return Err(CoreError::NotEnabled(
+                "navigation features are disabled; enable memory_palace_enabled and memory_palace_navigation_enabled"
+                    .to_string(),
+            ));
+        }
+
+        let db = ProjectDatabase::open(project_root, &request.project_id)?;
+        db.get_navigation_node(&request.start_node_id)?
+            .ok_or_else(|| Self::navigation_missing_node_error(&request.start_node_id))?;
+
+        let all_nodes = db.list_navigation_nodes(None, None, 2_000)?;
+        let all_tunnels = db.list_navigation_tunnels(None)?;
+        let node_map = all_nodes
+            .iter()
+            .cloned()
+            .map(|node| (node.node_id.clone(), node))
+            .collect::<HashMap<_, _>>();
+
+        let mut adjacency: HashMap<String, Vec<String>> = HashMap::new();
+        for node in node_map.values() {
+            if let Some(parent_node_id) = node.parent_node_id.as_deref() {
+                if node_map.contains_key(parent_node_id) {
+                    adjacency
+                        .entry(parent_node_id.to_string())
+                        .or_default()
+                        .push(node.node_id.clone());
+                    adjacency
+                        .entry(node.node_id.clone())
+                        .or_default()
+                        .push(parent_node_id.to_string());
+                }
+            }
+        }
+        for tunnel in &all_tunnels {
+            adjacency
+                .entry(tunnel.from_node_id.clone())
+                .or_default()
+                .push(tunnel.to_node_id.clone());
+            adjacency
+                .entry(tunnel.to_node_id.clone())
+                .or_default()
+                .push(tunnel.from_node_id.clone());
+        }
+        for neighbors in adjacency.values_mut() {
+            neighbors.sort();
+            neighbors.dedup();
+        }
+
+        let mut queue = VecDeque::from([(request.start_node_id.clone(), 0usize)]);
+        let mut visited = HashSet::from([request.start_node_id.clone()]);
+        let mut ordered_nodes = Vec::new();
+        while let Some((node_id, depth)) = queue.pop_front() {
+            if let Some(node) = node_map.get(&node_id) {
+                ordered_nodes.push(node.clone());
+            }
+
+            if depth >= request.max_depth {
+                continue;
+            }
+
+            if let Some(neighbors) = adjacency.get(&node_id) {
+                for neighbor in neighbors {
+                    if visited.insert(neighbor.clone()) {
+                        queue.push_back((neighbor.clone(), depth + 1));
+                    }
+                }
+            }
+        }
+
+        let visited_ids = ordered_nodes
+            .iter()
+            .map(|node| node.node_id.as_str())
+            .collect::<HashSet<_>>();
+        let mut tunnels = all_tunnels
+            .into_iter()
+            .filter(|tunnel| {
+                visited_ids.contains(tunnel.from_node_id.as_str())
+                    && visited_ids.contains(tunnel.to_node_id.as_str())
+            })
+            .collect::<Vec<_>>();
+        tunnels.sort_by(|left, right| {
+            left.from_node_id
+                .cmp(&right.from_node_id)
+                .then(left.to_node_id.cmp(&right.to_node_id))
+                .then(left.tunnel_id.cmp(&right.tunnel_id))
+        });
+
+        Ok(MemoryNavigationTraverseResponse {
+            nodes: ordered_nodes,
+            tunnels,
         })
     }
 
@@ -3044,6 +3947,27 @@ impl McpBroker {
         {
             update.memory_palace_hooks_enabled = Some(v);
         }
+        if let Some(v) = obj.get("memory_palace_profile").and_then(|v| v.as_str()) {
+            update.memory_palace_profile = Some(v.to_string());
+        }
+        if let Some(v) = obj
+            .get("memory_palace_aaak_enabled")
+            .and_then(|v| v.as_bool())
+        {
+            update.memory_palace_aaak_enabled = Some(v);
+        }
+        if let Some(v) = obj
+            .get("memory_palace_diary_enabled")
+            .and_then(|v| v.as_bool())
+        {
+            update.memory_palace_diary_enabled = Some(v);
+        }
+        if let Some(v) = obj
+            .get("memory_palace_navigation_enabled")
+            .and_then(|v| v.as_bool())
+        {
+            update.memory_palace_navigation_enabled = Some(v);
+        }
 
         let path = update_project_config(&project_root, update)?;
         Ok(ConfigUpdateResponse {
@@ -3269,11 +4193,20 @@ pub(crate) async fn image_remove_standalone(
     Ok(())
 }
 
+fn current_time_epoch_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
 
-    use the_one_core::contracts::{Capability, CapabilityType, RiskLevel, VisibilityMode};
+    use the_one_core::contracts::{
+        Capability, CapabilityType, MemoryNavigationNodeKind, RiskLevel, VisibilityMode,
+    };
     use the_one_core::limits::ConfigurableLimits;
     use the_one_core::policy::PolicyEngine;
 
@@ -3282,7 +4215,11 @@ mod tests {
         AuditEventsRequest, DocsCreateRequest, DocsDeleteRequest, DocsGetSectionRequest,
         DocsListRequest, DocsMoveRequest, DocsReindexRequest, DocsTrashEmptyRequest,
         DocsTrashListRequest, DocsTrashRestoreRequest, DocsUpdateRequest, ImageSearchRequest,
-        MemoryCaptureHookRequest, MemoryIngestConversationRequest, MemorySearchRequest,
+        MemoryAaakCompressRequest, MemoryAaakListLessonsRequest, MemoryAaakTeachRequest,
+        MemoryCaptureHookRequest, MemoryDiaryAddRequest, MemoryDiaryListRequest,
+        MemoryDiarySearchRequest, MemoryDiarySummarizeRequest, MemoryIngestConversationRequest,
+        MemoryNavigationLinkTunnelRequest, MemoryNavigationListRequest,
+        MemoryNavigationTraverseRequest, MemoryNavigationUpsertNodeRequest, MemorySearchRequest,
         MemoryWakeUpRequest, ProjectInitRequest, ProjectProfileGetRequest, ProjectRefreshRequest,
         ToolEnableRequest, ToolRunRequest, ToolSuggestRequest,
     };
@@ -3525,6 +4462,762 @@ mod tests {
                 .any(|hit| hit.source_path == transcript_path.display().to_string()),
             "conversation memory should keep the transcript source path, not only a derived markdown path"
         );
+    }
+
+    #[tokio::test]
+    async fn test_memory_aaak_compress_returns_lossless_payload() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let root = temp.path().join("repo");
+        let state_dir = root.join(".the-one");
+        fs::create_dir_all(&state_dir).expect("state dir should exist");
+        fs::write(
+            state_dir.join("config.json"),
+            r#"{"memory_palace_enabled":true,"memory_palace_aaak_enabled":true}"#,
+        )
+        .expect("config write should succeed");
+
+        let transcript_path = root.join("aaak-compress.json");
+        fs::write(
+            &transcript_path,
+            r#"[
+              {"role":"assistant","content":"Refresh tokens were failing in staging due to issuer drift."},
+              {"role":"user","content":"What was the mitigation?"},
+              {"role":"assistant","content":"Refresh tokens were failing in staging due to issuer drift."}
+            ]"#,
+        )
+        .expect("transcript should be written");
+
+        let broker = McpBroker::new();
+        let response = broker
+            .memory_aaak_compress(MemoryAaakCompressRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-1".to_string(),
+                path: transcript_path.display().to_string(),
+                format: crate::api::MemoryConversationFormat::OpenAiMessages,
+            })
+            .await
+            .expect("aaak compression should succeed");
+
+        assert!(!response.result.used_verbatim);
+        assert_eq!(response.result.patterns.len(), 1);
+        assert!(response
+            .result
+            .compressed_payload_json
+            .contains("\"motif_ref\""));
+    }
+
+    #[tokio::test]
+    async fn test_memory_aaak_teach_persists_lessons() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let root = temp.path().join("repo");
+        let state_dir = root.join(".the-one");
+        fs::create_dir_all(&state_dir).expect("state dir should exist");
+        fs::write(
+            state_dir.join("config.json"),
+            r#"{"memory_palace_enabled":true,"memory_palace_aaak_enabled":true}"#,
+        )
+        .expect("config write should succeed");
+
+        let transcript_path = root.join("aaak-teach.json");
+        fs::write(
+            &transcript_path,
+            r#"[
+              {"role":"assistant","content":"Refresh tokens were failing in staging due to issuer drift."},
+              {"role":"assistant","content":"Refresh tokens were failing in staging due to issuer drift."}
+            ]"#,
+        )
+        .expect("transcript should be written");
+
+        let broker = McpBroker::new();
+        let taught = broker
+            .memory_aaak_teach(MemoryAaakTeachRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-1".to_string(),
+                path: transcript_path.display().to_string(),
+                format: crate::api::MemoryConversationFormat::OpenAiMessages,
+            })
+            .await
+            .expect("aaak teach should succeed");
+
+        assert_eq!(taught.outcome.lessons_written, 1);
+
+        let listed = broker
+            .memory_aaak_list_lessons(MemoryAaakListLessonsRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-1".to_string(),
+                limit: 10,
+            })
+            .await
+            .expect("aaak list should succeed");
+        assert_eq!(listed.lessons.len(), 1);
+        assert_eq!(listed.lessons[0].occurrence_count, 2);
+    }
+
+    #[tokio::test]
+    async fn test_memory_ingest_conversation_auto_teach_persists_aaak_lessons() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let root = temp.path().join("repo");
+        let state_dir = root.join(".the-one");
+        fs::create_dir_all(&state_dir).expect("state dir should exist");
+        fs::write(
+            state_dir.join("config.json"),
+            r#"{"memory_palace_enabled":true,"memory_palace_aaak_enabled":true}"#,
+        )
+        .expect("config write should succeed");
+
+        let transcript_path = root.join("aaak-auto-teach.json");
+        fs::write(
+            &transcript_path,
+            r#"[
+              {"role":"assistant","content":"Refresh tokens were failing in staging due to issuer drift."},
+              {"role":"assistant","content":"Refresh tokens were failing in staging due to issuer drift."}
+            ]"#,
+        )
+        .expect("transcript should be written");
+
+        let broker = McpBroker::new();
+        broker
+            .memory_ingest_conversation(MemoryIngestConversationRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-1".to_string(),
+                path: transcript_path.display().to_string(),
+                format: crate::api::MemoryConversationFormat::OpenAiMessages,
+                wing: None,
+                hall: None,
+                room: None,
+            })
+            .await
+            .expect("conversation ingest should succeed");
+
+        let listed = broker
+            .memory_aaak_list_lessons(MemoryAaakListLessonsRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-1".to_string(),
+                limit: 10,
+            })
+            .await
+            .expect("aaak list should succeed");
+        assert_eq!(listed.lessons.len(), 1);
+        assert!(listed.lessons[0]
+            .canonical_text
+            .contains("Refresh tokens were failing"));
+    }
+
+    #[tokio::test]
+    async fn test_memory_diary_add_and_list_by_date_range() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let root = temp.path().join("repo");
+        let state_dir = root.join(".the-one");
+        fs::create_dir_all(&state_dir).expect("state dir should exist");
+        fs::write(
+            state_dir.join("config.json"),
+            r#"{"memory_palace_enabled":true,"memory_palace_diary_enabled":true}"#,
+        )
+        .expect("config write should succeed");
+
+        let broker = McpBroker::new();
+        broker
+            .memory_diary_add(MemoryDiaryAddRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-1".to_string(),
+                entry_date: "2026-04-08".to_string(),
+                mood: Some("tired".to_string()),
+                tags: vec!["ops".to_string()],
+                content: "Closed the incident follow-up tasks.".to_string(),
+            })
+            .await
+            .expect("first diary add should succeed");
+        broker
+            .memory_diary_add(MemoryDiaryAddRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-1".to_string(),
+                entry_date: "2026-04-10".to_string(),
+                mood: Some("focused".to_string()),
+                tags: vec!["release".to_string(), "auth".to_string()],
+                content: "Validated the release and auth migration checklist.".to_string(),
+            })
+            .await
+            .expect("second diary add should succeed");
+
+        let listed = broker
+            .memory_diary_list(MemoryDiaryListRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-1".to_string(),
+                start_date: Some("2026-04-09".to_string()),
+                end_date: Some("2026-04-10".to_string()),
+                max_results: 10,
+            })
+            .await
+            .expect("diary list should succeed");
+
+        assert_eq!(listed.entries.len(), 1);
+        assert_eq!(listed.entries[0].entry_date, "2026-04-10");
+        assert_eq!(listed.entries[0].mood.as_deref(), Some("focused"));
+    }
+
+    #[tokio::test]
+    async fn test_memory_diary_search_returns_matches() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let root = temp.path().join("repo");
+        let state_dir = root.join(".the-one");
+        fs::create_dir_all(&state_dir).expect("state dir should exist");
+        fs::write(
+            state_dir.join("config.json"),
+            r#"{"memory_palace_enabled":true,"memory_palace_diary_enabled":true}"#,
+        )
+        .expect("config write should succeed");
+
+        let broker = McpBroker::new();
+        broker
+            .memory_diary_add(MemoryDiaryAddRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-1".to_string(),
+                entry_date: "2026-04-10".to_string(),
+                mood: Some("relieved".to_string()),
+                tags: vec!["release".to_string(), "auth".to_string()],
+                content: "Finished the release after fixing token refresh.".to_string(),
+            })
+            .await
+            .expect("diary add should succeed");
+
+        let found = broker
+            .memory_diary_search(MemoryDiarySearchRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-1".to_string(),
+                query: "release".to_string(),
+                start_date: None,
+                end_date: None,
+                max_results: 10,
+            })
+            .await
+            .expect("diary search should succeed");
+
+        assert_eq!(found.entries.len(), 1);
+        assert_eq!(found.entries[0].tags, vec!["release", "auth"]);
+    }
+
+    #[tokio::test]
+    async fn test_memory_diary_summarize_recent_entries() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let root = temp.path().join("repo");
+        let state_dir = root.join(".the-one");
+        fs::create_dir_all(&state_dir).expect("state dir should exist");
+        fs::write(
+            state_dir.join("config.json"),
+            r#"{"memory_palace_enabled":true,"memory_palace_diary_enabled":true}"#,
+        )
+        .expect("config write should succeed");
+
+        let broker = McpBroker::new();
+        for (entry_date, content) in [
+            (
+                "2026-04-09",
+                "Tracked the auth rollout blockers and documented the mitigation plan.",
+            ),
+            (
+                "2026-04-10",
+                "Validated the release checklist and confirmed refresh token recovery.",
+            ),
+        ] {
+            broker
+                .memory_diary_add(MemoryDiaryAddRequest {
+                    project_root: root.display().to_string(),
+                    project_id: "project-1".to_string(),
+                    entry_date: entry_date.to_string(),
+                    mood: Some("focused".to_string()),
+                    tags: vec!["release".to_string()],
+                    content: content.to_string(),
+                })
+                .await
+                .expect("diary add should succeed");
+        }
+
+        let summary = broker
+            .memory_diary_summarize(MemoryDiarySummarizeRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-1".to_string(),
+                start_date: Some("2026-04-09".to_string()),
+                end_date: Some("2026-04-10".to_string()),
+                max_summary_items: 6,
+            })
+            .await
+            .expect("diary summarize should succeed");
+
+        assert_eq!(summary.summary.entry_count, 2);
+        assert_eq!(summary.summary.date_from, Some("2026-04-09".to_string()));
+        assert_eq!(summary.summary.date_to, Some("2026-04-10".to_string()));
+        assert!(
+            summary.summary.summary.contains("2 diar"),
+            "unexpected summary text: {}",
+            summary.summary.summary
+        );
+        assert!(
+            summary
+                .summary
+                .highlights
+                .iter()
+                .any(|item| item.contains("release checklist") || item.contains("rollout blockers")),
+            "expected highlights to capture recent diary facts: {:?}",
+            summary.summary.highlights
+        );
+    }
+
+    #[tokio::test]
+    async fn test_memory_diary_add_refreshes_existing_entry_instead_of_duplicating() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let root = temp.path().join("repo");
+        let state_dir = root.join(".the-one");
+        fs::create_dir_all(&state_dir).expect("state dir should exist");
+        fs::write(
+            state_dir.join("config.json"),
+            r#"{"memory_palace_enabled":true,"memory_palace_diary_enabled":true}"#,
+        )
+        .expect("config write should succeed");
+
+        let broker = McpBroker::new();
+        let first = broker
+            .memory_diary_add(MemoryDiaryAddRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-1".to_string(),
+                entry_date: "2026-04-10".to_string(),
+                mood: Some("focused".to_string()),
+                tags: vec!["release".to_string()],
+                content: "Initial release checklist".to_string(),
+            })
+            .await
+            .expect("first diary add should succeed");
+        let second = broker
+            .memory_diary_add(MemoryDiaryAddRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-1".to_string(),
+                entry_date: "2026-04-10".to_string(),
+                mood: Some("relieved".to_string()),
+                tags: vec!["release".to_string(), "auth".to_string()],
+                content: "Updated release checklist after auth validation".to_string(),
+            })
+            .await
+            .expect("refresh diary add should succeed");
+
+        let listed = broker
+            .memory_diary_list(MemoryDiaryListRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-1".to_string(),
+                start_date: Some("2026-04-10".to_string()),
+                end_date: Some("2026-04-10".to_string()),
+                max_results: 10,
+            })
+            .await
+            .expect("diary list should succeed");
+
+        assert_eq!(listed.entries.len(), 1);
+        assert_eq!(first.entry.entry_id, second.entry.entry_id);
+        assert_eq!(
+            first.entry.created_at_epoch_ms,
+            second.entry.created_at_epoch_ms
+        );
+        assert_eq!(
+            listed.entries[0].content,
+            "Updated release checklist after auth validation"
+        );
+        assert_eq!(listed.entries[0].tags, vec!["release", "auth"]);
+    }
+
+    #[tokio::test]
+    async fn test_navigation_upsert_and_list_drawer() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let root = temp.path().join("repo");
+        let state_dir = root.join(".the-one");
+        fs::create_dir_all(&state_dir).expect("state dir should exist");
+        fs::write(
+            state_dir.join("config.json"),
+            r#"{"memory_palace_enabled":true,"memory_palace_navigation_enabled":true}"#,
+        )
+        .expect("config write should succeed");
+
+        let broker = McpBroker::new();
+        broker
+            .memory_navigation_upsert_node(MemoryNavigationUpsertNodeRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-1".to_string(),
+                node_id: "drawer:ops".to_string(),
+                kind: "drawer".to_string(),
+                label: "Operations".to_string(),
+                parent_node_id: None,
+                wing: Some("ops".to_string()),
+                hall: None,
+                room: None,
+            })
+            .await
+            .expect("drawer upsert should succeed");
+
+        let listed = broker
+            .memory_navigation_list(MemoryNavigationListRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-1".to_string(),
+                parent_node_id: None,
+                kind: Some("drawer".to_string()),
+                limit: 10,
+            })
+            .await
+            .expect("navigation list should succeed");
+
+        assert_eq!(listed.nodes.len(), 1);
+        assert_eq!(listed.nodes[0].node_id, "drawer:ops");
+        assert_eq!(listed.nodes[0].kind, MemoryNavigationNodeKind::Drawer);
+    }
+
+    #[tokio::test]
+    async fn test_navigation_create_and_list_closet_under_drawer() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let root = temp.path().join("repo");
+        let state_dir = root.join(".the-one");
+        fs::create_dir_all(&state_dir).expect("state dir should exist");
+        fs::write(
+            state_dir.join("config.json"),
+            r#"{"memory_palace_enabled":true,"memory_palace_navigation_enabled":true}"#,
+        )
+        .expect("config write should succeed");
+
+        let broker = McpBroker::new();
+        broker
+            .memory_navigation_upsert_node(MemoryNavigationUpsertNodeRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-1".to_string(),
+                node_id: "drawer:ops".to_string(),
+                kind: "drawer".to_string(),
+                label: "Operations".to_string(),
+                parent_node_id: None,
+                wing: Some("ops".to_string()),
+                hall: None,
+                room: None,
+            })
+            .await
+            .expect("drawer upsert should succeed");
+        broker
+            .memory_navigation_upsert_node(MemoryNavigationUpsertNodeRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-1".to_string(),
+                node_id: "closet:ops:incidents".to_string(),
+                kind: "closet".to_string(),
+                label: "Incidents".to_string(),
+                parent_node_id: Some("drawer:ops".to_string()),
+                wing: Some("ops".to_string()),
+                hall: Some("incidents".to_string()),
+                room: None,
+            })
+            .await
+            .expect("closet upsert should succeed");
+
+        let listed = broker
+            .memory_navigation_list(MemoryNavigationListRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-1".to_string(),
+                parent_node_id: Some("drawer:ops".to_string()),
+                kind: Some("closet".to_string()),
+                limit: 10,
+            })
+            .await
+            .expect("closet list should succeed");
+
+        assert_eq!(listed.nodes.len(), 1);
+        assert_eq!(
+            listed.nodes[0].parent_node_id.as_deref(),
+            Some("drawer:ops")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_navigation_link_tunnel_between_two_nodes() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let root = temp.path().join("repo");
+        let state_dir = root.join(".the-one");
+        fs::create_dir_all(&state_dir).expect("state dir should exist");
+        fs::write(
+            state_dir.join("config.json"),
+            r#"{"memory_palace_enabled":true,"memory_palace_navigation_enabled":true}"#,
+        )
+        .expect("config write should succeed");
+
+        let broker = McpBroker::new();
+        for (node_id, label, wing) in [
+            ("drawer:ops", "Operations", "ops"),
+            ("drawer:platform", "Platform", "platform"),
+        ] {
+            broker
+                .memory_navigation_upsert_node(MemoryNavigationUpsertNodeRequest {
+                    project_root: root.display().to_string(),
+                    project_id: "project-1".to_string(),
+                    node_id: node_id.to_string(),
+                    kind: "drawer".to_string(),
+                    label: label.to_string(),
+                    parent_node_id: None,
+                    wing: Some(wing.to_string()),
+                    hall: None,
+                    room: None,
+                })
+                .await
+                .expect("node upsert should succeed");
+        }
+
+        let linked = broker
+            .memory_navigation_link_tunnel(MemoryNavigationLinkTunnelRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-1".to_string(),
+                from_node_id: "drawer:platform".to_string(),
+                to_node_id: "drawer:ops".to_string(),
+            })
+            .await
+            .expect("tunnel link should succeed");
+
+        assert_eq!(linked.tunnel.from_node_id, "drawer:ops");
+        assert_eq!(linked.tunnel.to_node_id, "drawer:platform");
+
+        let listed = broker
+            .memory_navigation_list(MemoryNavigationListRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-1".to_string(),
+                parent_node_id: None,
+                kind: None,
+                limit: 10,
+            })
+            .await
+            .expect("navigation list should succeed");
+        assert_eq!(listed.tunnels.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_navigation_traverse_returns_deterministic_path_ordering() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let root = temp.path().join("repo");
+        let state_dir = root.join(".the-one");
+        fs::create_dir_all(&state_dir).expect("state dir should exist");
+        fs::write(
+            state_dir.join("config.json"),
+            r#"{"memory_palace_enabled":true,"memory_palace_navigation_enabled":true}"#,
+        )
+        .expect("config write should succeed");
+
+        let broker = McpBroker::new();
+        for request in [
+            MemoryNavigationUpsertNodeRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-1".to_string(),
+                node_id: "drawer:ops".to_string(),
+                kind: "drawer".to_string(),
+                label: "Operations".to_string(),
+                parent_node_id: None,
+                wing: Some("ops".to_string()),
+                hall: None,
+                room: None,
+            },
+            MemoryNavigationUpsertNodeRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-1".to_string(),
+                node_id: "closet:ops:alpha".to_string(),
+                kind: "closet".to_string(),
+                label: "Alpha".to_string(),
+                parent_node_id: Some("drawer:ops".to_string()),
+                wing: Some("ops".to_string()),
+                hall: Some("alpha".to_string()),
+                room: None,
+            },
+            MemoryNavigationUpsertNodeRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-1".to_string(),
+                node_id: "closet:ops:beta".to_string(),
+                kind: "closet".to_string(),
+                label: "Beta".to_string(),
+                parent_node_id: Some("drawer:ops".to_string()),
+                wing: Some("ops".to_string()),
+                hall: Some("beta".to_string()),
+                room: None,
+            },
+            MemoryNavigationUpsertNodeRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-1".to_string(),
+                node_id: "room:ops:delta".to_string(),
+                kind: "room".to_string(),
+                label: "Delta".to_string(),
+                parent_node_id: Some("closet:ops:beta".to_string()),
+                wing: Some("ops".to_string()),
+                hall: Some("beta".to_string()),
+                room: Some("delta".to_string()),
+            },
+        ] {
+            broker
+                .memory_navigation_upsert_node(request)
+                .await
+                .expect("navigation upsert should succeed");
+        }
+
+        broker
+            .memory_navigation_link_tunnel(MemoryNavigationLinkTunnelRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-1".to_string(),
+                from_node_id: "closet:ops:alpha".to_string(),
+                to_node_id: "room:ops:delta".to_string(),
+            })
+            .await
+            .expect("tunnel link should succeed");
+
+        let traversed = broker
+            .memory_navigation_traverse(MemoryNavigationTraverseRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-1".to_string(),
+                start_node_id: "drawer:ops".to_string(),
+                max_depth: 3,
+            })
+            .await
+            .expect("navigation traverse should succeed");
+
+        let ordered_ids = traversed
+            .nodes
+            .iter()
+            .map(|node| node.node_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ordered_ids,
+            vec![
+                "drawer:ops",
+                "closet:ops:alpha",
+                "closet:ops:beta",
+                "room:ops:delta",
+            ]
+        );
+        assert_eq!(traversed.tunnels.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_navigation_ingest_conversation_maps_wing_hall_room_into_nodes() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let root = temp.path().join("repo");
+        let state_dir = root.join(".the-one");
+        fs::create_dir_all(&state_dir).expect("state dir should exist");
+        fs::write(
+            state_dir.join("config.json"),
+            r#"{"memory_palace_enabled":true,"memory_palace_navigation_enabled":true}"#,
+        )
+        .expect("config write should succeed");
+
+        let transcript_path = root.join("nav-map.json");
+        fs::write(
+            &transcript_path,
+            r#"[
+              {"role":"assistant","content":"Document the auth incident remediation path."}
+            ]"#,
+        )
+        .expect("transcript should be written");
+
+        let broker = McpBroker::new();
+        broker
+            .memory_ingest_conversation(MemoryIngestConversationRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-1".to_string(),
+                path: transcript_path.display().to_string(),
+                format: crate::api::MemoryConversationFormat::OpenAiMessages,
+                wing: Some("ops".to_string()),
+                hall: Some("incidents".to_string()),
+                room: Some("auth".to_string()),
+            })
+            .await
+            .expect("conversation ingest should succeed");
+
+        let listed = broker
+            .memory_navigation_list(MemoryNavigationListRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-1".to_string(),
+                parent_node_id: None,
+                kind: None,
+                limit: 10,
+            })
+            .await
+            .expect("navigation list should succeed");
+
+        assert_eq!(listed.nodes.len(), 3);
+        assert!(listed
+            .nodes
+            .iter()
+            .any(|node| node.kind == MemoryNavigationNodeKind::Drawer
+                && node.wing.as_deref() == Some("ops")));
+        assert!(listed
+            .nodes
+            .iter()
+            .any(|node| node.kind == MemoryNavigationNodeKind::Closet
+                && node.hall.as_deref() == Some("incidents")));
+        assert!(listed
+            .nodes
+            .iter()
+            .any(|node| node.kind == MemoryNavigationNodeKind::Room
+                && node.room.as_deref() == Some("auth")));
+    }
+
+    #[tokio::test]
+    async fn test_navigation_same_node_id_is_isolated_per_project_in_same_root() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let root = temp.path().join("repo");
+        let state_dir = root.join(".the-one");
+        fs::create_dir_all(&state_dir).expect("state dir should exist");
+        fs::write(
+            state_dir.join("config.json"),
+            r#"{"memory_palace_enabled":true,"memory_palace_navigation_enabled":true}"#,
+        )
+        .expect("config write should succeed");
+
+        let broker = McpBroker::new();
+        broker
+            .memory_navigation_upsert_node(MemoryNavigationUpsertNodeRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-a".to_string(),
+                node_id: "drawer:shared".to_string(),
+                kind: "drawer".to_string(),
+                label: "Project A Drawer".to_string(),
+                parent_node_id: None,
+                wing: Some("ops-a".to_string()),
+                hall: None,
+                room: None,
+            })
+            .await
+            .expect("project-a node upsert should succeed");
+        broker
+            .memory_navigation_upsert_node(MemoryNavigationUpsertNodeRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-b".to_string(),
+                node_id: "drawer:shared".to_string(),
+                kind: "drawer".to_string(),
+                label: "Project B Drawer".to_string(),
+                parent_node_id: None,
+                wing: Some("ops-b".to_string()),
+                hall: None,
+                room: None,
+            })
+            .await
+            .expect("project-b node upsert should succeed");
+
+        let listed_a = broker
+            .memory_navigation_list(MemoryNavigationListRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-a".to_string(),
+                parent_node_id: None,
+                kind: Some("drawer".to_string()),
+                limit: 10,
+            })
+            .await
+            .expect("project-a list should succeed");
+        let listed_b = broker
+            .memory_navigation_list(MemoryNavigationListRequest {
+                project_root: root.display().to_string(),
+                project_id: "project-b".to_string(),
+                parent_node_id: None,
+                kind: Some("drawer".to_string()),
+                limit: 10,
+            })
+            .await
+            .expect("project-b list should succeed");
+
+        assert_eq!(listed_a.nodes.len(), 1);
+        assert_eq!(listed_b.nodes.len(), 1);
+        assert_eq!(listed_a.nodes[0].label, "Project A Drawer");
+        assert_eq!(listed_b.nodes[0].label, "Project B Drawer");
     }
 
     #[tokio::test]

@@ -32,6 +32,9 @@ const DEFAULT_AUTO_INDEX_ENABLED: bool = false;
 const DEFAULT_AUTO_INDEX_DEBOUNCE_MS: u64 = 2000;
 const DEFAULT_MEMORY_PALACE_ENABLED: bool = true;
 const DEFAULT_MEMORY_PALACE_HOOKS_ENABLED: bool = false;
+const DEFAULT_MEMORY_PALACE_AAAK_ENABLED: bool = false;
+const DEFAULT_MEMORY_PALACE_DIARY_ENABLED: bool = false;
+const DEFAULT_MEMORY_PALACE_NAVIGATION_ENABLED: bool = false;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NanoProviderKind {
@@ -88,6 +91,36 @@ pub enum NanoRoutingPolicy {
     Latency,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryPalaceProfilePreset {
+    Off,
+    Core,
+    Full,
+}
+
+impl MemoryPalaceProfilePreset {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Core => "core",
+            Self::Full => "full",
+        }
+    }
+}
+
+impl FromStr for MemoryPalaceProfilePreset {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "off" | "mempalace_off" | "memory_palace_off" => Ok(Self::Off),
+            "core" | "mempalace_core" | "memory_palace_core" => Ok(Self::Core),
+            "full" | "mempalace_full" | "memory_palace_full" => Ok(Self::Full),
+            _ => Err(()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct RuntimeOverrides {
     pub provider: Option<String>,
@@ -128,6 +161,9 @@ pub struct RuntimeOverrides {
     pub auto_index_debounce_ms: Option<u64>,
     pub memory_palace_enabled: Option<bool>,
     pub memory_palace_hooks_enabled: Option<bool>,
+    pub memory_palace_aaak_enabled: Option<bool>,
+    pub memory_palace_diary_enabled: Option<bool>,
+    pub memory_palace_navigation_enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -170,6 +206,10 @@ pub struct ProjectConfigUpdate {
     pub auto_index_debounce_ms: Option<u64>,
     pub memory_palace_enabled: Option<bool>,
     pub memory_palace_hooks_enabled: Option<bool>,
+    pub memory_palace_profile: Option<String>,
+    pub memory_palace_aaak_enabled: Option<bool>,
+    pub memory_palace_diary_enabled: Option<bool>,
+    pub memory_palace_navigation_enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -231,6 +271,12 @@ pub struct AppConfig {
     pub memory_palace_enabled: bool,
     /// Enable first-class hook capture flow (`stop` / `precompact`) for MemPalace.
     pub memory_palace_hooks_enabled: bool,
+    /// Enable AAAK compression / auto-teach behavior.
+    pub memory_palace_aaak_enabled: bool,
+    /// Enable diary-specific memory tools and flows.
+    pub memory_palace_diary_enabled: bool,
+    /// Enable drawers / closets / tunnels navigation primitives.
+    pub memory_palace_navigation_enabled: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -273,6 +319,9 @@ struct FileConfig {
     auto_index_debounce_ms: Option<u64>,
     memory_palace_enabled: Option<bool>,
     memory_palace_hooks_enabled: Option<bool>,
+    memory_palace_aaak_enabled: Option<bool>,
+    memory_palace_diary_enabled: Option<bool>,
+    memory_palace_navigation_enabled: Option<bool>,
 }
 
 impl AppConfig {
@@ -320,6 +369,9 @@ impl AppConfig {
             auto_index_debounce_ms: Some(DEFAULT_AUTO_INDEX_DEBOUNCE_MS),
             memory_palace_enabled: Some(DEFAULT_MEMORY_PALACE_ENABLED),
             memory_palace_hooks_enabled: Some(DEFAULT_MEMORY_PALACE_HOOKS_ENABLED),
+            memory_palace_aaak_enabled: Some(DEFAULT_MEMORY_PALACE_AAAK_ENABLED),
+            memory_palace_diary_enabled: Some(DEFAULT_MEMORY_PALACE_DIARY_ENABLED),
+            memory_palace_navigation_enabled: Some(DEFAULT_MEMORY_PALACE_NAVIGATION_ENABLED),
         };
 
         apply_file_layer(&global_state_dir.join("config.json"), &mut merged)?;
@@ -418,6 +470,15 @@ impl AppConfig {
             memory_palace_hooks_enabled: merged
                 .memory_palace_hooks_enabled
                 .unwrap_or(DEFAULT_MEMORY_PALACE_HOOKS_ENABLED),
+            memory_palace_aaak_enabled: merged
+                .memory_palace_aaak_enabled
+                .unwrap_or(DEFAULT_MEMORY_PALACE_AAAK_ENABLED),
+            memory_palace_diary_enabled: merged
+                .memory_palace_diary_enabled
+                .unwrap_or(DEFAULT_MEMORY_PALACE_DIARY_ENABLED),
+            memory_palace_navigation_enabled: merged
+                .memory_palace_navigation_enabled
+                .unwrap_or(DEFAULT_MEMORY_PALACE_NAVIGATION_ENABLED),
         })
     }
 }
@@ -551,6 +612,18 @@ pub fn update_project_config(
     }
     if update.memory_palace_hooks_enabled.is_some() {
         merged.memory_palace_hooks_enabled = update.memory_palace_hooks_enabled;
+    }
+    if update.memory_palace_aaak_enabled.is_some() {
+        merged.memory_palace_aaak_enabled = update.memory_palace_aaak_enabled;
+    }
+    if update.memory_palace_diary_enabled.is_some() {
+        merged.memory_palace_diary_enabled = update.memory_palace_diary_enabled;
+    }
+    if update.memory_palace_navigation_enabled.is_some() {
+        merged.memory_palace_navigation_enabled = update.memory_palace_navigation_enabled;
+    }
+    if let Some(profile) = update.memory_palace_profile.as_deref() {
+        apply_memory_palace_profile(profile, &mut merged)?;
     }
 
     let tmp_path = project_state_dir.join("config.json.tmp");
@@ -965,6 +1038,15 @@ fn apply_runtime_layer(runtime: RuntimeOverrides, merged: &mut FileConfig) {
     if runtime.memory_palace_hooks_enabled.is_some() {
         merged.memory_palace_hooks_enabled = runtime.memory_palace_hooks_enabled;
     }
+    if runtime.memory_palace_aaak_enabled.is_some() {
+        merged.memory_palace_aaak_enabled = runtime.memory_palace_aaak_enabled;
+    }
+    if runtime.memory_palace_diary_enabled.is_some() {
+        merged.memory_palace_diary_enabled = runtime.memory_palace_diary_enabled;
+    }
+    if runtime.memory_palace_navigation_enabled.is_some() {
+        merged.memory_palace_navigation_enabled = runtime.memory_palace_navigation_enabled;
+    }
 }
 
 fn merge(base: &mut FileConfig, overlay: FileConfig) {
@@ -1082,6 +1164,15 @@ fn merge(base: &mut FileConfig, overlay: FileConfig) {
     if overlay.memory_palace_hooks_enabled.is_some() {
         base.memory_palace_hooks_enabled = overlay.memory_palace_hooks_enabled;
     }
+    if overlay.memory_palace_aaak_enabled.is_some() {
+        base.memory_palace_aaak_enabled = overlay.memory_palace_aaak_enabled;
+    }
+    if overlay.memory_palace_diary_enabled.is_some() {
+        base.memory_palace_diary_enabled = overlay.memory_palace_diary_enabled;
+    }
+    if overlay.memory_palace_navigation_enabled.is_some() {
+        base.memory_palace_navigation_enabled = overlay.memory_palace_navigation_enabled;
+    }
 }
 
 fn parse_bool_env(value: &str) -> Option<bool> {
@@ -1090,6 +1181,26 @@ fn parse_bool_env(value: &str) -> Option<bool> {
         "0" | "false" | "no" | "off" => Some(false),
         _ => None,
     }
+}
+
+fn apply_memory_palace_profile(profile: &str, merged: &mut FileConfig) -> Result<(), CoreError> {
+    let preset = profile.parse::<MemoryPalaceProfilePreset>().map_err(|_| {
+        CoreError::InvalidProjectConfig(format!("invalid memory palace profile: {profile}"))
+    })?;
+
+    let (palace_enabled, hooks_enabled, aaak_enabled, diary_enabled, navigation_enabled) =
+        match preset {
+            MemoryPalaceProfilePreset::Off => (false, false, false, false, false),
+            MemoryPalaceProfilePreset::Core => (true, false, false, false, false),
+            MemoryPalaceProfilePreset::Full => (true, true, true, true, true),
+        };
+
+    merged.memory_palace_enabled = Some(palace_enabled);
+    merged.memory_palace_hooks_enabled = Some(hooks_enabled);
+    merged.memory_palace_aaak_enabled = Some(aaak_enabled);
+    merged.memory_palace_diary_enabled = Some(diary_enabled);
+    merged.memory_palace_navigation_enabled = Some(navigation_enabled);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1478,6 +1589,115 @@ mod tests {
                 AppConfig::load(&project_root, RuntimeOverrides::default()).expect("config load");
             assert!(!config.memory_palace_enabled);
             assert!(config.memory_palace_hooks_enabled);
+        });
+    }
+
+    #[test]
+    fn update_project_config_applies_mempalace_profile_presets() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let project_root = temp.path().join("repo");
+        let global_state_dir = temp.path().join("global");
+
+        fs::create_dir_all(&project_root).expect("project root should exist");
+        fs::create_dir_all(&global_state_dir).expect("global state dir should exist");
+        let global_home = global_state_dir.display().to_string();
+
+        temp_env::with_vars([("THE_ONE_HOME", Some(global_home.as_str()))], || {
+            update_project_config(
+                &project_root,
+                ProjectConfigUpdate {
+                    memory_palace_profile: Some("mempalace_full".to_string()),
+                    ..ProjectConfigUpdate::default()
+                },
+            )
+            .expect("full profile update should succeed");
+
+            let full_config =
+                AppConfig::load(&project_root, RuntimeOverrides::default()).expect("config load");
+            assert!(full_config.memory_palace_enabled);
+            assert!(full_config.memory_palace_hooks_enabled);
+            assert!(full_config.memory_palace_aaak_enabled);
+            assert!(full_config.memory_palace_diary_enabled);
+            assert!(full_config.memory_palace_navigation_enabled);
+
+            update_project_config(
+                &project_root,
+                ProjectConfigUpdate {
+                    memory_palace_profile: Some("mempalace_off".to_string()),
+                    ..ProjectConfigUpdate::default()
+                },
+            )
+            .expect("off profile update should succeed");
+
+            let off_config =
+                AppConfig::load(&project_root, RuntimeOverrides::default()).expect("config load");
+            assert!(!off_config.memory_palace_enabled);
+            assert!(!off_config.memory_palace_hooks_enabled);
+            assert!(!off_config.memory_palace_aaak_enabled);
+            assert!(!off_config.memory_palace_diary_enabled);
+            assert!(!off_config.memory_palace_navigation_enabled);
+        });
+    }
+
+    #[test]
+    fn update_project_config_rejects_invalid_mempalace_profile() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let project_root = temp.path().join("repo");
+        let global_state_dir = temp.path().join("global");
+
+        fs::create_dir_all(&project_root).expect("project root should exist");
+        fs::create_dir_all(&global_state_dir).expect("global state dir should exist");
+        let global_home = global_state_dir.display().to_string();
+
+        temp_env::with_vars([("THE_ONE_HOME", Some(global_home.as_str()))], || {
+            let err = update_project_config(
+                &project_root,
+                ProjectConfigUpdate {
+                    memory_palace_profile: Some("not-a-profile".to_string()),
+                    ..ProjectConfigUpdate::default()
+                },
+            )
+            .expect_err("invalid profile should fail");
+
+            assert!(
+                err.to_string().contains("invalid memory palace profile"),
+                "unexpected error: {err}"
+            );
+        });
+    }
+
+    #[test]
+    fn update_project_config_profile_overrides_explicit_mempalace_flags() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let project_root = temp.path().join("repo");
+        let global_state_dir = temp.path().join("global");
+
+        fs::create_dir_all(&project_root).expect("project root should exist");
+        fs::create_dir_all(&global_state_dir).expect("global state dir should exist");
+        let global_home = global_state_dir.display().to_string();
+
+        temp_env::with_vars([("THE_ONE_HOME", Some(global_home.as_str()))], || {
+            update_project_config(
+                &project_root,
+                ProjectConfigUpdate {
+                    memory_palace_enabled: Some(false),
+                    memory_palace_hooks_enabled: Some(false),
+                    memory_palace_aaak_enabled: Some(false),
+                    memory_palace_diary_enabled: Some(false),
+                    memory_palace_navigation_enabled: Some(false),
+                    memory_palace_profile: Some("full".to_string()),
+                    ..ProjectConfigUpdate::default()
+                },
+            )
+            .expect("profile update should succeed");
+
+            let config =
+                AppConfig::load(&project_root, RuntimeOverrides::default()).expect("config load");
+            assert!(config.memory_palace_enabled);
+            assert!(config.memory_palace_hooks_enabled);
+            assert!(config.memory_palace_aaak_enabled);
+            assert!(config.memory_palace_diary_enabled);
+            assert!(config.memory_palace_navigation_enabled);
         });
     }
 }

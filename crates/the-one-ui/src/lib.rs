@@ -9,7 +9,10 @@ use axum::{Json, Router};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use the_one_core::backup::{backup_project_state, restore_project_state, BackupResult};
-use the_one_core::config::{update_project_config, ProjectConfigUpdate};
+use the_one_core::config::{
+    update_project_config, AppConfig, MemoryPalaceProfilePreset, ProjectConfigUpdate,
+    RuntimeOverrides,
+};
 use the_one_mcp::api::{
     AuditEventsRequest, AuditEventsResponse, ConfigExportResponse, MetricsSnapshotResponse,
     ProjectInitRequest, ProjectInitResponse, ProjectProfileGetRequest, ProjectProfileGetResponse,
@@ -154,6 +157,7 @@ struct ConfigUpdatePayload {
     qdrant_ca_cert_path: Option<String>,
     qdrant_tls_insecure: Option<bool>,
     qdrant_strict_auth: Option<bool>,
+    memory_palace_profile: Option<String>,
     limits: Option<the_one_core::limits::ConfigurableLimits>,
 }
 
@@ -172,6 +176,183 @@ pub struct AdminHealthReport {
     pub config: ConfigExportResponse,
     pub metrics: MetricsSnapshotResponse,
     pub recent_audit_events: usize,
+}
+
+fn memory_palace_profile_from_config(config: &AppConfig) -> Option<MemoryPalaceProfilePreset> {
+    match (
+        config.memory_palace_enabled,
+        config.memory_palace_hooks_enabled,
+        config.memory_palace_aaak_enabled,
+        config.memory_palace_diary_enabled,
+        config.memory_palace_navigation_enabled,
+    ) {
+        (false, false, false, false, false) => Some(MemoryPalaceProfilePreset::Off),
+        (true, false, false, false, false) => Some(MemoryPalaceProfilePreset::Core),
+        (true, true, true, true, true) => Some(MemoryPalaceProfilePreset::Full),
+        _ => None,
+    }
+}
+
+fn memory_palace_profile_label(config: &AppConfig) -> &'static str {
+    memory_palace_profile_from_config(config)
+        .map(|preset| preset.as_str())
+        .unwrap_or("custom")
+}
+
+fn memory_palace_profile_select_value(config: &AppConfig) -> Option<&'static str> {
+    memory_palace_profile_from_config(config).map(|preset| preset.as_str())
+}
+
+fn render_memory_palace_profile_card(config: &AppConfig) -> String {
+    let profile_label = memory_palace_profile_label(config);
+    let badge_class = if profile_label == "custom" {
+        "warn"
+    } else {
+        "ok"
+    };
+    let enabled_badge = if config.memory_palace_enabled {
+        "ok"
+    } else {
+        "err"
+    };
+    let hooks_badge = if config.memory_palace_hooks_enabled {
+        "ok"
+    } else {
+        "err"
+    };
+    let aaak_badge = if config.memory_palace_aaak_enabled {
+        "ok"
+    } else {
+        "err"
+    };
+    let diary_badge = if config.memory_palace_diary_enabled {
+        "ok"
+    } else {
+        "err"
+    };
+    let navigation_badge = if config.memory_palace_navigation_enabled {
+        "ok"
+    } else {
+        "err"
+    };
+
+    format!(
+        r#"<section class="card profile-card">
+  <h3>MemPalace profile</h3>
+  <p class="muted">Active preset: <span class="badge {badge_class}">{profile_label}</span></p>
+  <p class="muted">Expanded flags:
+    <code>enabled={enabled}</code>
+    <code>hooks={hooks}</code>
+    <code>aaak={aaak}</code>
+    <code>diary={diary}</code>
+    <code>navigation={navigation}</code>
+  </p>
+  <ul class="profile-flag-list">
+    <li><code>memory_palace_enabled</code> <span class="badge {enabled_badge}">{enabled_text}</span></li>
+    <li><code>memory_palace_hooks_enabled</code> <span class="badge {hooks_badge}">{hooks_text}</span></li>
+    <li><code>memory_palace_aaak_enabled</code> <span class="badge {aaak_badge}">{aaak_text}</span></li>
+    <li><code>memory_palace_diary_enabled</code> <span class="badge {diary_badge}">{diary_text}</span></li>
+    <li><code>memory_palace_navigation_enabled</code> <span class="badge {navigation_badge}">{navigation_text}</span></li>
+  </ul>
+  <p class="muted">Use the config select below to switch between <code>off</code>, <code>core</code>, and <code>full</code>.</p>
+</section>"#,
+        enabled = config.memory_palace_enabled,
+        hooks = config.memory_palace_hooks_enabled,
+        aaak = config.memory_palace_aaak_enabled,
+        diary = config.memory_palace_diary_enabled,
+        navigation = config.memory_palace_navigation_enabled,
+        enabled_text = if config.memory_palace_enabled {
+            "enabled"
+        } else {
+            "disabled"
+        },
+        hooks_text = if config.memory_palace_hooks_enabled {
+            "enabled"
+        } else {
+            "disabled"
+        },
+        aaak_text = if config.memory_palace_aaak_enabled {
+            "enabled"
+        } else {
+            "disabled"
+        },
+        diary_text = if config.memory_palace_diary_enabled {
+            "enabled"
+        } else {
+            "disabled"
+        },
+        navigation_text = if config.memory_palace_navigation_enabled {
+            "enabled"
+        } else {
+            "disabled"
+        },
+    )
+}
+
+fn render_memory_palace_profile_select(config: &AppConfig) -> String {
+    let profile_select_value = memory_palace_profile_select_value(config);
+    let preserve_selected = if profile_select_value.is_none() {
+        "selected"
+    } else {
+        ""
+    };
+    let profile_off_selected = if matches!(profile_select_value, Some("off")) {
+        "selected"
+    } else {
+        ""
+    };
+    let profile_core_selected = if matches!(profile_select_value, Some("core")) {
+        "selected"
+    } else {
+        ""
+    };
+    let profile_full_selected = if matches!(profile_select_value, Some("full")) {
+        "selected"
+    } else {
+        ""
+    };
+
+    format!(
+        r#"<div class="form-grid"><label class="field">MemPalace Profile<select name="memory_palace_profile"><option value="" {preserve_selected}>preserve current custom state</option><option value="off" {profile_off_selected}>off</option><option value="core" {profile_core_selected}>core</option><option value="full" {profile_full_selected}>full</option></select></label></div>"#
+    )
+}
+
+fn render_limits_form(config: &AppConfig) -> String {
+    let limits = &config.limits;
+    format!(
+        r#"<h3 style="margin-top:16px">Limits</h3><p class="muted">Configurable limits with validation bounds. Environment variables override these values.</p><div class="form-grid"><label class="field">Max Tool Suggestions (1-20)<input type="number" name="limit_max_tool_suggestions" value="{max_tool_suggestions}" min="1" max="20"></label><label class="field">Max Search Hits (1-50)<input type="number" name="limit_max_search_hits" value="{max_search_hits}" min="1" max="50"></label><label class="field">Max Raw Section Bytes (1024-102400)<input type="number" name="limit_max_raw_section_bytes" value="{max_raw_section_bytes}" min="1024" max="102400"></label><label class="field">Max Enabled Families (1-50)<input type="number" name="limit_max_enabled_families" value="{max_enabled_families}" min="1" max="50"></label><label class="field">Max Doc Size Bytes (1024-1048576)<input type="number" name="limit_max_doc_size_bytes" value="{max_doc_size_bytes}" min="1024" max="1048576"></label><label class="field">Max Managed Docs (1-10000)<input type="number" name="limit_max_managed_docs" value="{max_managed_docs}" min="1" max="10000"></label><label class="field">Max Embedding Batch Size (1-256)<input type="number" name="limit_max_embedding_batch_size" value="{max_embedding_batch_size}" min="1" max="256"></label><label class="field">Max Chunk Tokens (64-4096)<input type="number" name="limit_max_chunk_tokens" value="{max_chunk_tokens}" min="64" max="4096"></label><label class="field">Max Nano Timeout Ms (100-30000)<input type="number" name="limit_max_nano_timeout_ms" value="{max_nano_timeout_ms}" min="100" max="30000"></label><label class="field">Max Nano Retries (0-10)<input type="number" name="limit_max_nano_retries" value="{max_nano_retries}" min="0" max="10"></label><label class="field">Max Nano Providers (1-5)<input type="number" name="limit_max_nano_providers" value="{max_nano_providers}" min="1" max="5"></label><label class="field">Search Score Threshold (0.0-1.0)<input type="number" name="limit_search_score_threshold" value="{search_score_threshold}" min="0" max="1" step="0.01"></label></div>"#,
+        max_tool_suggestions = limits.max_tool_suggestions,
+        max_search_hits = limits.max_search_hits,
+        max_raw_section_bytes = limits.max_raw_section_bytes,
+        max_enabled_families = limits.max_enabled_families,
+        max_doc_size_bytes = limits.max_doc_size_bytes,
+        max_managed_docs = limits.max_managed_docs,
+        max_embedding_batch_size = limits.max_embedding_batch_size,
+        max_chunk_tokens = limits.max_chunk_tokens,
+        max_nano_timeout_ms = limits.max_nano_timeout_ms,
+        max_nano_retries = limits.max_nano_retries,
+        max_nano_providers = limits.max_nano_providers,
+        search_score_threshold = limits.search_score_threshold,
+    )
+}
+
+fn render_config_save_script(config: &AppConfig) -> String {
+    let limits = &config.limits;
+    format!(
+        r#"<script>const f=document.getElementById('cfg');const out=document.getElementById('result');const currentLimits={{max_tool_suggestions:{max_tool_suggestions},max_search_hits:{max_search_hits},max_raw_section_bytes:{max_raw_section_bytes},max_enabled_families:{max_enabled_families},max_doc_size_bytes:{max_doc_size_bytes},max_managed_docs:{max_managed_docs},max_embedding_batch_size:{max_embedding_batch_size},max_chunk_tokens:{max_chunk_tokens},max_nano_timeout_ms:{max_nano_timeout_ms},max_nano_retries:{max_nano_retries},max_nano_providers:{max_nano_providers},search_score_threshold:{search_score_threshold}}};const readInt=(name,fallback)=>{{const value=Number.parseInt(f.elements.namedItem(name)?.value ?? '',10);return Number.isNaN(value)?fallback:value;}};const readFloat=(name,fallback)=>{{const value=Number.parseFloat(f.elements.namedItem(name)?.value ?? '');return Number.isNaN(value)?fallback:value;}};f.addEventListener('submit',async(e)=>{{e.preventDefault();const d=new FormData(f);const payload={{provider:d.get('provider'),nano_provider:d.get('nano_provider'),nano_model:d.get('nano_model'),qdrant_url:d.get('qdrant_url'),qdrant_ca_cert_path:d.get('qdrant_ca_cert_path'),qdrant_strict_auth:d.get('qdrant_strict_auth')==='on',qdrant_tls_insecure:d.get('qdrant_tls_insecure')==='on'}};const profile=d.get('memory_palace_profile');if(profile==='off'||profile==='core'||profile==='full')payload.memory_palace_profile=profile;const apiKey=d.get('qdrant_api_key');if(apiKey&&apiKey.trim().length>0)payload.qdrant_api_key=apiKey;payload.limits={{max_tool_suggestions:readInt('limit_max_tool_suggestions',currentLimits.max_tool_suggestions),max_search_hits:readInt('limit_max_search_hits',currentLimits.max_search_hits),max_raw_section_bytes:readInt('limit_max_raw_section_bytes',currentLimits.max_raw_section_bytes),max_enabled_families:readInt('limit_max_enabled_families',currentLimits.max_enabled_families),max_doc_size_bytes:readInt('limit_max_doc_size_bytes',currentLimits.max_doc_size_bytes),max_managed_docs:readInt('limit_max_managed_docs',currentLimits.max_managed_docs),max_embedding_batch_size:readInt('limit_max_embedding_batch_size',currentLimits.max_embedding_batch_size),max_chunk_tokens:readInt('limit_max_chunk_tokens',currentLimits.max_chunk_tokens),max_nano_timeout_ms:readInt('limit_max_nano_timeout_ms',currentLimits.max_nano_timeout_ms),max_nano_retries:readInt('limit_max_nano_retries',currentLimits.max_nano_retries),max_nano_providers:readInt('limit_max_nano_providers',currentLimits.max_nano_providers),search_score_threshold:readFloat('limit_search_score_threshold',currentLimits.search_score_threshold)}};const res=await fetch('/api/config',{{method:'POST',headers:{{'content-type':'application/json'}},body:JSON.stringify(payload)}});const body=await res.json();out.textContent=res.ok?'Saved: '+(body.path||'ok'):'Error: '+(body.error||'unknown');}});</script>"#,
+        max_tool_suggestions = limits.max_tool_suggestions,
+        max_search_hits = limits.max_search_hits,
+        max_raw_section_bytes = limits.max_raw_section_bytes,
+        max_enabled_families = limits.max_enabled_families,
+        max_doc_size_bytes = limits.max_doc_size_bytes,
+        max_managed_docs = limits.max_managed_docs,
+        max_embedding_batch_size = limits.max_embedding_batch_size,
+        max_chunk_tokens = limits.max_chunk_tokens,
+        max_nano_timeout_ms = limits.max_nano_timeout_ms,
+        max_nano_retries = limits.max_nano_retries,
+        max_nano_providers = limits.max_nano_providers,
+        search_score_threshold = limits.search_score_threshold,
+    )
 }
 
 /// Render the admin UI landing page served at `/`.
@@ -338,7 +519,7 @@ pub fn render_dashboard_html(report: &AdminHealthReport) -> String {
 }
 
 fn base_styles() -> &'static str {
-    "body{font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif;background:#f4f7fb;color:#0f172a;margin:0}header{background:linear-gradient(120deg,#0b3d91,#14532d);color:#fff;padding:20px}h1{margin:0 0 10px 0}nav a{color:#fff;text-decoration:none;margin-right:16px;font-weight:600}main{padding:20px}h2{margin-top:0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px}.card{background:#fff;border:1px solid #dbe3ef;border-radius:12px;padding:16px;box-shadow:0 4px 10px rgba(2,6,23,.06)}table{width:100%;border-collapse:collapse;background:#fff}th,td{border:1px solid #dbe3ef;padding:8px;text-align:left}th{background:#e8eef8}code{white-space:pre-wrap;word-break:break-word}.form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px}.field{display:flex;flex-direction:column;gap:6px}.field input,.field select{padding:8px;border:1px solid #cbd5e1;border-radius:8px}.actions{margin-top:12px;display:flex;gap:8px}.btn{border:0;border-radius:8px;padding:10px 14px;font-weight:700;cursor:pointer}.btn.primary{background:#14532d;color:#fff}.muted{color:#475569;font-size:.95rem}"
+    "body{font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif;background:#f4f7fb;color:#0f172a;margin:0}header{background:linear-gradient(120deg,#0b3d91,#14532d);color:#fff;padding:20px}h1{margin:0 0 10px 0}nav a{color:#fff;text-decoration:none;margin-right:16px;font-weight:600}main{padding:20px}h2{margin-top:0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px}.card{background:#fff;border:1px solid #dbe3ef;border-radius:12px;padding:16px;box-shadow:0 4px 10px rgba(2,6,23,.06)}table{width:100%;border-collapse:collapse;background:#fff}th,td{border:1px solid #dbe3ef;padding:8px;text-align:left}th{background:#e8eef8}code{white-space:pre-wrap;word-break:break-word}.form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px}.field{display:flex;flex-direction:column;gap:6px}.field input,.field select{padding:8px;border:1px solid #cbd5e1;border-radius:8px}.actions{margin-top:12px;display:flex;gap:8px}.btn{border:0;border-radius:8px;padding:10px 14px;font-weight:700;cursor:pointer}.btn.primary{background:#14532d;color:#fff}.muted{color:#475569;font-size:.95rem}.badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:.78rem;font-weight:700;background:#eef2f8;color:#334155}.badge.ok{background:#dcfce7;color:#166534}.badge.warn{background:#fef3c7;color:#92400e}.badge.err{background:#fee2e2;color:#991b1b}.profile-card{display:grid;gap:10px}.profile-flag-list{margin:0;padding-left:20px;display:grid;gap:6px}.profile-flag-list li{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.profile-flag-list code{background:#eef2f8;padding:2px 6px;border-radius:4px}"
 }
 
 fn html_escape(value: &str) -> String {
@@ -1628,6 +1809,17 @@ async fn audit_page_handler(State(state): State<EmbeddedUiState>) -> impl IntoRe
 }
 
 async fn config_page_handler(State(state): State<EmbeddedUiState>) -> impl IntoResponse {
+    let runtime_config = match AppConfig::load(&state.project_root, RuntimeOverrides::default()) {
+        Ok(config) => config,
+        Err(err) => {
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("config load error: {err}"),
+            )
+                .into_response();
+        }
+    };
+
     match state
         .admin
         .health_report(&state.project_root, &state.project_id)
@@ -1653,9 +1845,13 @@ async fn config_page_handler(State(state): State<EmbeddedUiState>) -> impl IntoR
             } else {
                 ""
             };
+            let profile_card = render_memory_palace_profile_card(&runtime_config);
+            let profile_select = render_memory_palace_profile_select(&runtime_config);
+            let limits_form = render_limits_form(&runtime_config);
+            let config_save_script = render_config_save_script(&runtime_config);
 
             Html(format!(
-                "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Config</title><style>{}</style></head><body><header><h1>Runtime Config</h1><nav><a href=\"/dashboard\">Dashboard</a><a href=\"/config\">Config</a><a href=\"/audit\">Audit</a><a href=\"/images\">Images</a><a href=\"/swagger\">Swagger</a></nav></header><main><p class=\"muted\">Edit and save project configuration. Environment variables still override these values.</p><form id=\"cfg\" class=\"card\"><div class=\"form-grid\"><label class=\"field\">Provider<select name=\"provider\"><option value=\"local\" {}>local</option><option value=\"hosted\" {}>hosted</option></select></label><label class=\"field\">Nano Provider<select name=\"nano_provider\"><option value=\"rules\" {}>rules</option><option value=\"api\" {}>api</option><option value=\"ollama\" {}>ollama</option><option value=\"lmstudio\" {}>lmstudio</option></select></label><label class=\"field\">Nano Model<input name=\"nano_model\" value=\"{}\"></label><label class=\"field\">Qdrant URL<input name=\"qdrant_url\" value=\"{}\"></label><label class=\"field\">Qdrant API Key<input name=\"qdrant_api_key\" value=\"\" placeholder=\"leave empty to keep current\"></label><label class=\"field\">Qdrant CA Cert Path<input name=\"qdrant_ca_cert_path\" value=\"{}\"></label><label class=\"field\">Qdrant Strict Auth<input type=\"checkbox\" name=\"qdrant_strict_auth\" {}></label><label class=\"field\">Qdrant TLS Insecure<input type=\"checkbox\" name=\"qdrant_tls_insecure\" {}></label></div><h3 style=\"margin-top:16px\">Limits</h3><p class=\"muted\">Configurable limits with validation bounds. Environment variables override these values.</p><div class=\"form-grid\"><label class=\"field\">Max Tool Suggestions (1-20)<input type=\"number\" name=\"limit_max_tool_suggestions\" value=\"5\" min=\"1\" max=\"20\"></label><label class=\"field\">Max Search Hits (1-50)<input type=\"number\" name=\"limit_max_search_hits\" value=\"5\" min=\"1\" max=\"50\"></label><label class=\"field\">Max Raw Section Bytes (1024-102400)<input type=\"number\" name=\"limit_max_raw_section_bytes\" value=\"24576\" min=\"1024\" max=\"102400\"></label><label class=\"field\">Max Enabled Families (1-50)<input type=\"number\" name=\"limit_max_enabled_families\" value=\"12\" min=\"1\" max=\"50\"></label><label class=\"field\">Max Doc Size Bytes (1024-1048576)<input type=\"number\" name=\"limit_max_doc_size_bytes\" value=\"102400\" min=\"1024\" max=\"1048576\"></label><label class=\"field\">Max Managed Docs (1-10000)<input type=\"number\" name=\"limit_max_managed_docs\" value=\"500\" min=\"1\" max=\"10000\"></label><label class=\"field\">Max Embedding Batch Size (1-256)<input type=\"number\" name=\"limit_max_embedding_batch_size\" value=\"64\" min=\"1\" max=\"256\"></label><label class=\"field\">Max Chunk Tokens (64-4096)<input type=\"number\" name=\"limit_max_chunk_tokens\" value=\"512\" min=\"64\" max=\"4096\"></label><label class=\"field\">Max Nano Timeout Ms (100-30000)<input type=\"number\" name=\"limit_max_nano_timeout_ms\" value=\"2000\" min=\"100\" max=\"30000\"></label><label class=\"field\">Max Nano Retries (0-10)<input type=\"number\" name=\"limit_max_nano_retries\" value=\"3\" min=\"0\" max=\"10\"></label><label class=\"field\">Max Nano Providers (1-5)<input type=\"number\" name=\"limit_max_nano_providers\" value=\"5\" min=\"1\" max=\"5\"></label><label class=\"field\">Search Score Threshold (0.0-1.0)<input type=\"number\" name=\"limit_search_score_threshold\" value=\"0.3\" min=\"0\" max=\"1\" step=\"0.01\"></label></div><div class=\"actions\"><button class=\"btn primary\" type=\"submit\">Save Config</button></div><p id=\"result\" class=\"muted\"></p></form></main><script>const f=document.getElementById('cfg');const out=document.getElementById('result');f.addEventListener('submit',async(e)=>{{e.preventDefault();const d=new FormData(f);const payload={{provider:d.get('provider'),nano_provider:d.get('nano_provider'),nano_model:d.get('nano_model'),qdrant_url:d.get('qdrant_url'),qdrant_ca_cert_path:d.get('qdrant_ca_cert_path'),qdrant_strict_auth:d.get('qdrant_strict_auth')==='on',qdrant_tls_insecure:d.get('qdrant_tls_insecure')==='on'}};const apiKey=d.get('qdrant_api_key');if(apiKey&&apiKey.trim().length>0)payload.qdrant_api_key=apiKey;payload.limits={{max_tool_suggestions:parseInt(d.get('limit_max_tool_suggestions'))||5,max_search_hits:parseInt(d.get('limit_max_search_hits'))||5,max_raw_section_bytes:parseInt(d.get('limit_max_raw_section_bytes'))||24576,max_enabled_families:parseInt(d.get('limit_max_enabled_families'))||12,max_doc_size_bytes:parseInt(d.get('limit_max_doc_size_bytes'))||102400,max_managed_docs:parseInt(d.get('limit_max_managed_docs'))||500,max_embedding_batch_size:parseInt(d.get('limit_max_embedding_batch_size'))||64,max_chunk_tokens:parseInt(d.get('limit_max_chunk_tokens'))||512,max_nano_timeout_ms:parseInt(d.get('limit_max_nano_timeout_ms'))||2000,max_nano_retries:parseInt(d.get('limit_max_nano_retries'))||3,max_nano_providers:parseInt(d.get('limit_max_nano_providers'))||5,search_score_threshold:parseFloat(d.get('limit_search_score_threshold'))||0.3}};const res=await fetch('/api/config',{{method:'POST',headers:{{'content-type':'application/json'}},body:JSON.stringify(payload)}});const body=await res.json();out.textContent=res.ok?'Saved: '+(body.path||'ok'):'Error: '+(body.error||'unknown');}});</script></body></html>",
+                "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Config</title><style>{}</style></head><body><header><h1>Runtime Config</h1><nav><a href=\"/dashboard\">Dashboard</a><a href=\"/config\">Config</a><a href=\"/audit\">Audit</a><a href=\"/images\">Images</a><a href=\"/swagger\">Swagger</a></nav></header><main><p class=\"muted\">Edit and save project configuration. Environment variables still override these values.</p>{profile_card}<form id=\"cfg\" class=\"card\"><div class=\"form-grid\"><label class=\"field\">Provider<select name=\"provider\"><option value=\"local\" {}>local</option><option value=\"hosted\" {}>hosted</option></select></label><label class=\"field\">Nano Provider<select name=\"nano_provider\"><option value=\"rules\" {}>rules</option><option value=\"api\" {}>api</option><option value=\"ollama\" {}>ollama</option><option value=\"lmstudio\" {}>lmstudio</option></select></label><label class=\"field\">Nano Model<input name=\"nano_model\" value=\"{}\"></label><label class=\"field\">Qdrant URL<input name=\"qdrant_url\" value=\"{}\"></label><label class=\"field\">Qdrant API Key<input name=\"qdrant_api_key\" value=\"\" placeholder=\"leave empty to keep current\"></label><label class=\"field\">Qdrant CA Cert Path<input name=\"qdrant_ca_cert_path\" value=\"{}\"></label><label class=\"field\">Qdrant Strict Auth<input type=\"checkbox\" name=\"qdrant_strict_auth\" {}></label><label class=\"field\">Qdrant TLS Insecure<input type=\"checkbox\" name=\"qdrant_tls_insecure\" {}></label></div><h3 style=\"margin-top:16px\">MemPalace</h3><p class=\"muted\">Switch the conversation memory preset with one save.</p>{profile_select}<h3 style=\"margin-top:16px\">Limits</h3><p class=\"muted\">Configurable limits with validation bounds. Environment variables override these values.</p>{limits_form}<div class=\"actions\"><button class=\"btn primary\" type=\"submit\">Save Config</button></div><p id=\"result\" class=\"muted\"></p></form></main>{config_save_script}</body></html>",
                 base_styles(),
                 if report.config.provider == "local" { "selected" } else { "" },
                 if report.config.provider == "hosted" { "selected" } else { "" },
@@ -1668,6 +1864,10 @@ async fn config_page_handler(State(state): State<EmbeddedUiState>) -> impl IntoR
                 ca_path,
                 strict_checked,
                 insecure_checked,
+                profile_card = profile_card,
+                profile_select = profile_select,
+                limits_form = limits_form,
+                config_save_script = config_save_script,
             ))
             .into_response()
         }
@@ -1966,6 +2166,13 @@ async fn config_update_handler(
         }
     }
 
+    let memory_palace_profile = payload
+        .memory_palace_profile
+        .as_deref()
+        .map(str::trim)
+        .filter(|profile| !profile.is_empty())
+        .map(|profile| profile.to_string());
+
     let result = update_project_config(
         &state.project_root,
         ProjectConfigUpdate {
@@ -1977,6 +2184,7 @@ async fn config_update_handler(
             qdrant_strict_auth: payload.qdrant_strict_auth,
             nano_provider: payload.nano_provider,
             nano_model: payload.nano_model,
+            memory_palace_profile,
             limits: payload.limits,
             ..ProjectConfigUpdate::default()
         },
@@ -2344,6 +2552,285 @@ mod tests {
             .expect("report should work");
         assert_eq!(report.config.provider, "hosted");
         assert_eq!(report.config.nano_provider, "api");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_mempalace_profile_config_view_reflects_active_preset() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let project = temp.path().join("repo");
+        fs::create_dir_all(&project).expect("project dir should exist");
+        fs::write(project.join("Cargo.toml"), "[package]\nname='x'\n")
+            .expect("cargo write should work");
+
+        let admin = Arc::new(AdminUi::new(McpBroker::new()));
+        let runtime = start_embedded_ui_runtime(
+            admin,
+            project.clone(),
+            "project-1".to_string(),
+            "127.0.0.1:0".parse().expect("addr should parse"),
+        )
+        .await
+        .expect("runtime should start");
+
+        let client = reqwest::Client::new();
+        let config_html = client
+            .get(format!("http://{}/config", runtime.listen_addr))
+            .send()
+            .await
+            .expect("config request should work")
+            .text()
+            .await
+            .expect("config body should read");
+
+        assert!(
+            config_html.contains("MemPalace profile"),
+            "config page should show the profile control card"
+        );
+        assert!(
+            config_html.contains("Active preset"),
+            "config page should expose the active profile summary"
+        );
+        assert!(
+            config_html.contains("core"),
+            "default MemPalace preset should resolve to core"
+        );
+        assert!(
+            config_html.contains("memory_palace_enabled"),
+            "config page should show expanded flag state"
+        );
+
+        let runtime_config = the_one_core::config::AppConfig::load(
+            &project,
+            the_one_core::config::RuntimeOverrides::default(),
+        )
+        .expect("config should load");
+        assert!(runtime_config.memory_palace_enabled);
+        assert!(!runtime_config.memory_palace_hooks_enabled);
+        assert!(!runtime_config.memory_palace_aaak_enabled);
+        assert!(!runtime_config.memory_palace_diary_enabled);
+        assert!(!runtime_config.memory_palace_navigation_enabled);
+
+        runtime.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_mempalace_profile_api_update_switches_preset() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let project = temp.path().join("repo");
+        fs::create_dir_all(&project).expect("project dir should exist");
+        fs::write(project.join("Cargo.toml"), "[package]\nname='x'\n")
+            .expect("cargo write should work");
+
+        let admin = Arc::new(AdminUi::new(McpBroker::new()));
+        let runtime = start_embedded_ui_runtime(
+            admin,
+            project.clone(),
+            "project-1".to_string(),
+            "127.0.0.1:0".parse().expect("addr should parse"),
+        )
+        .await
+        .expect("runtime should start");
+
+        let client = reqwest::Client::new();
+        let update = client
+            .post(format!("http://{}/api/config", runtime.listen_addr))
+            .json(&serde_json::json!({
+                "memory_palace_profile": "full"
+            }))
+            .send()
+            .await
+            .expect("config update should work")
+            .json::<serde_json::Value>()
+            .await
+            .expect("config update body should parse");
+        assert_eq!(update["saved"], true);
+
+        let runtime_config = the_one_core::config::AppConfig::load(
+            &project,
+            the_one_core::config::RuntimeOverrides::default(),
+        )
+        .expect("config should load");
+        assert!(runtime_config.memory_palace_enabled);
+        assert!(runtime_config.memory_palace_hooks_enabled);
+        assert!(runtime_config.memory_palace_aaak_enabled);
+        assert!(runtime_config.memory_palace_diary_enabled);
+        assert!(runtime_config.memory_palace_navigation_enabled);
+
+        let config_html = client
+            .get(format!("http://{}/config", runtime.listen_addr))
+            .send()
+            .await
+            .expect("config request should work")
+            .text()
+            .await
+            .expect("config body should read");
+
+        assert!(
+            config_html.contains("Active preset"),
+            "config page should expose the active profile summary"
+        );
+        assert!(
+            config_html.contains(">full<"),
+            "config page should show the active full profile"
+        );
+        assert!(
+            config_html.contains("memory_palace_navigation_enabled"),
+            "config page should reflect the expanded flag state"
+        );
+
+        runtime.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_mempalace_custom_profile_survives_unrelated_save() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let project = temp.path().join("repo");
+        fs::create_dir_all(&project).expect("project dir should exist");
+        fs::write(project.join("Cargo.toml"), "[package]\nname='x'\n")
+            .expect("cargo write should work");
+
+        let custom_update = super::ProjectConfigUpdate {
+            memory_palace_enabled: Some(true),
+            memory_palace_hooks_enabled: Some(true),
+            memory_palace_aaak_enabled: Some(false),
+            memory_palace_diary_enabled: Some(false),
+            memory_palace_navigation_enabled: Some(false),
+            ..Default::default()
+        };
+        super::update_project_config(&project, custom_update)
+            .expect("custom profile update should work");
+
+        let admin = Arc::new(AdminUi::new(McpBroker::new()));
+        let runtime = start_embedded_ui_runtime(
+            admin,
+            project.clone(),
+            "project-1".to_string(),
+            "127.0.0.1:0".parse().expect("addr should parse"),
+        )
+        .await
+        .expect("runtime should start");
+
+        let client = reqwest::Client::new();
+        let config_html = client
+            .get(format!("http://{}/config", runtime.listen_addr))
+            .send()
+            .await
+            .expect("config request should work")
+            .text()
+            .await
+            .expect("config body should read");
+        assert!(
+            config_html.contains("Active preset: <span class=\"badge warn\">custom</span>"),
+            "custom MemPalace state should be visible in the config card"
+        );
+        assert!(
+            config_html.contains("preserve current custom state"),
+            "custom MemPalace state should preserve the profile selector"
+        );
+
+        let update = client
+            .post(format!("http://{}/api/config", runtime.listen_addr))
+            .json(&serde_json::json!({
+                "provider": "hosted"
+            }))
+            .send()
+            .await
+            .expect("config update should work")
+            .json::<serde_json::Value>()
+            .await
+            .expect("config update body should parse");
+        assert_eq!(update["saved"], true);
+
+        let runtime_config = the_one_core::config::AppConfig::load(
+            &project,
+            the_one_core::config::RuntimeOverrides::default(),
+        )
+        .expect("config should load");
+        assert!(runtime_config.memory_palace_enabled);
+        assert!(runtime_config.memory_palace_hooks_enabled);
+        assert!(!runtime_config.memory_palace_aaak_enabled);
+        assert!(!runtime_config.memory_palace_diary_enabled);
+        assert!(!runtime_config.memory_palace_navigation_enabled);
+
+        runtime.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_mempalace_limits_render_and_survive_unrelated_save() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let project = temp.path().join("repo");
+        fs::create_dir_all(&project).expect("project dir should exist");
+        fs::write(project.join("Cargo.toml"), "[package]\nname='x'\n")
+            .expect("cargo write should work");
+
+        let custom_limits = the_one_core::limits::ConfigurableLimits {
+            max_search_hits: 17,
+            max_nano_retries: 0,
+            search_score_threshold: 0.0,
+            ..Default::default()
+        };
+
+        let limit_update = super::ProjectConfigUpdate {
+            limits: Some(custom_limits.clone()),
+            ..Default::default()
+        };
+        super::update_project_config(&project, limit_update).expect("limit update should work");
+
+        let admin = Arc::new(AdminUi::new(McpBroker::new()));
+        let runtime = start_embedded_ui_runtime(
+            admin,
+            project.clone(),
+            "project-1".to_string(),
+            "127.0.0.1:0".parse().expect("addr should parse"),
+        )
+        .await
+        .expect("runtime should start");
+
+        let client = reqwest::Client::new();
+        let config_html = client
+            .get(format!("http://{}/config", runtime.listen_addr))
+            .send()
+            .await
+            .expect("config request should work")
+            .text()
+            .await
+            .expect("config body should read");
+        assert!(
+            config_html.contains("name=\"limit_max_search_hits\" value=\"17\""),
+            "config page should render the current non-default integer limit"
+        );
+        assert!(
+            config_html.contains("name=\"limit_max_nano_retries\" value=\"0\""),
+            "config page should render zero-valued limits instead of defaulting them"
+        );
+        assert!(
+            config_html.contains("name=\"limit_search_score_threshold\" value=\"0\""),
+            "config page should render zero-valued float limits instead of defaulting them"
+        );
+
+        let update = client
+            .post(format!("http://{}/api/config", runtime.listen_addr))
+            .json(&serde_json::json!({
+                "provider": "hosted"
+            }))
+            .send()
+            .await
+            .expect("config update should work")
+            .json::<serde_json::Value>()
+            .await
+            .expect("config update body should parse");
+        assert_eq!(update["saved"], true);
+
+        let runtime_config = the_one_core::config::AppConfig::load(
+            &project,
+            the_one_core::config::RuntimeOverrides::default(),
+        )
+        .expect("config should load");
+        assert_eq!(runtime_config.limits.max_search_hits, 17);
+        assert_eq!(runtime_config.limits.max_nano_retries, 0);
+        assert!((runtime_config.limits.search_score_threshold - 0.0).abs() < f32::EPSILON);
+
+        runtime.shutdown();
     }
 
     #[test]

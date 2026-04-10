@@ -1,6 +1,6 @@
 # The-One MCP API Reference
 
-> Complete reference for all 19 MCP tools + 3 MCP resource types exposed by the-one-mcp v0.12.0.
+> Complete reference for all 30 MCP tools + 3 MCP resource types exposed by the-one-mcp v0.12.0.
 >
 > Tools are invoked via JSON-RPC 2.0 over stdio/SSE/stream. Every tool call uses
 > `method: "tools/call"` with `params.name` and `params.arguments`. Results are
@@ -32,9 +32,25 @@
 | `tool.install` | Tools | Install a tool and auto-enable it |
 | `tool.run` | Tools | Execute a tool action with policy gate |
 | `setup` | Admin | Project init, refresh, profile |
-| `config` | Admin | Config export/update, custom tools, models |
-| `maintain` | Admin | Reindex, tool enable/disable, trash, images |
+| `config` | Admin | Config export/update, `profile.set`, custom tools, models |
+| `maintain` | Admin | Reindex, `memory.capture_hook`, tool enable/disable, trash, images |
 | `observe` | Admin | Broker metrics and audit events |
+
+### MemPalace Extensions
+
+| Tool | Category | Purpose |
+|------|----------|---------|
+| `memory.aaak.compress` | Memory | Compress a transcript into the AAAK dialect |
+| `memory.aaak.teach` | Memory | Persist reusable AAAK lessons |
+| `memory.aaak.list_lessons` | Memory | List stored AAAK lessons for the project |
+| `memory.diary.add` | Memory | Create or refresh a diary entry |
+| `memory.diary.list` | Memory | List diary entries by date range |
+| `memory.diary.search` | Memory | Search diary entries by content / mood / tags |
+| `memory.diary.summarize` | Memory | Summarize recent diary entries |
+| `memory.navigation.upsert_node` | Memory | Create or update a drawer / closet / room |
+| `memory.navigation.link_tunnel` | Memory | Link two navigation nodes with a tunnel |
+| `memory.navigation.list` | Memory | List navigation nodes in the current project |
+| `memory.navigation.traverse` | Memory | Traverse the navigation graph deterministically |
 
 ---
 
@@ -494,6 +510,251 @@ discovered during a rescan.
 - Requires `image_embedding_enabled: true` in project config.
 
 ---
+
+### MemPalace tools
+
+#### memory.aaak.compress
+
+Compress a transcript into the AAAK dialect.
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 5,
+  "method": "tools/call",
+  "params": {
+    "name": "memory.aaak.compress",
+    "arguments": {
+      "project_root": "/home/user/myproject",
+      "project_id": "myproject",
+      "path": "exports/review.json",
+      "format": "openai_messages"
+    }
+  }
+}
+```
+
+#### memory.aaak.teach
+
+Extract reusable AAAK patterns and persist them as lessons.
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 6,
+  "method": "tools/call",
+  "params": {
+    "name": "memory.aaak.teach",
+    "arguments": {
+      "project_root": "/home/user/myproject",
+      "project_id": "myproject",
+      "path": "exports/review.json",
+      "format": "openai_messages"
+    }
+  }
+}
+```
+
+#### memory.aaak.list_lessons
+
+List persisted AAAK lessons for the project.
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 7,
+  "method": "tools/call",
+  "params": {
+    "name": "memory.aaak.list_lessons",
+    "arguments": {
+      "project_root": "/home/user/myproject",
+      "project_id": "myproject",
+      "limit": 10
+    }
+  }
+}
+```
+
+#### memory.diary.add
+
+Create or refresh a diary entry with date, mood, tags, and content.
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 8,
+  "method": "tools/call",
+  "params": {
+    "name": "memory.diary.add",
+    "arguments": {
+      "project_root": "/home/user/myproject",
+      "project_id": "myproject",
+      "entry_date": "2026-04-10",
+      "mood": "focused",
+      "tags": ["planning", "release"],
+      "content": "Prepared the MemPalace phase 2 rollout."
+    }
+  }
+}
+```
+
+#### memory.diary.list
+
+List diary entries for a date range.
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 9,
+  "method": "tools/call",
+  "params": {
+    "name": "memory.diary.list",
+    "arguments": {
+      "project_root": "/home/user/myproject",
+      "project_id": "myproject",
+      "start_date": "2026-04-01",
+      "end_date": "2026-04-10",
+      "max_results": 20
+    }
+  }
+}
+```
+
+#### memory.diary.search
+
+Search diary entries by content, mood, or tags.
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 10,
+  "method": "tools/call",
+  "params": {
+    "name": "memory.diary.search",
+    "arguments": {
+      "project_root": "/home/user/myproject",
+      "project_id": "myproject",
+      "query": "planning release",
+      "max_results": 10
+    }
+  }
+}
+```
+
+#### memory.diary.summarize
+
+Summarize recent diary entries into a compact memory pack.
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 11,
+  "method": "tools/call",
+  "params": {
+    "name": "memory.diary.summarize",
+    "arguments": {
+      "project_root": "/home/user/myproject",
+      "project_id": "myproject",
+      "start_date": "2026-04-01",
+      "end_date": "2026-04-10",
+      "max_summary_items": 8
+    }
+  }
+}
+```
+
+#### memory.navigation.upsert_node
+
+Create or update a drawer, closet, or room node.
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 12,
+  "method": "tools/call",
+  "params": {
+    "name": "memory.navigation.upsert_node",
+    "arguments": {
+      "project_root": "/home/user/myproject",
+      "project_id": "myproject",
+      "node_id": "drawer:release",
+      "kind": "drawer",
+      "label": "Release notes",
+      "hall": "notes"
+    }
+  }
+}
+```
+
+#### memory.navigation.link_tunnel
+
+Create or refresh a tunnel between two navigation nodes.
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 13,
+  "method": "tools/call",
+  "params": {
+    "name": "memory.navigation.link_tunnel",
+    "arguments": {
+      "project_root": "/home/user/myproject",
+      "project_id": "myproject",
+      "from_node_id": "drawer:release",
+      "to_node_id": "room:planning"
+    }
+  }
+}
+```
+
+#### memory.navigation.list
+
+List navigation nodes for the current project.
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 14,
+  "method": "tools/call",
+  "params": {
+    "name": "memory.navigation.list",
+    "arguments": {
+      "project_root": "/home/user/myproject",
+      "project_id": "myproject",
+      "kind": "drawer",
+      "limit": 25
+    }
+  }
+}
+```
+
+#### memory.navigation.traverse
+
+Traverse the navigation graph from a starting node.
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 15,
+  "method": "tools/call",
+  "params": {
+    "name": "memory.navigation.traverse",
+    "arguments": {
+      "project_root": "/home/user/myproject",
+      "project_id": "myproject",
+      "start_node_id": "drawer:release",
+      "max_depth": 8
+    }
+  }
+}
+```
+
+**Notes**
+
+- `AAAK` is the compression / lesson dialect used to preserve reusable transcript motifs.
+- Diary tools require MemPalace to be enabled and preserve `entry_date` as the stable logical identity.
+- Navigation tools use `drawer`, `closet`, and `room` node kinds plus explicit tunnel edges.
+- The admin UI exposes the same feature family as a preset-controlled profile so you can turn the whole stack on or off consistently.
 
 ### docs.list
 
@@ -1338,6 +1599,56 @@ settings including provider, log level, Qdrant connection, and nano-LLM config.
 
 ---
 
+#### config — action: profile.set
+
+Apply a MemPalace preset (`off`, `core`, or `full`) in one write. The broker
+also accepts aliases such as `mempalace_off`, `mempalace_core`, and
+`mempalace_full`.
+
+**Params fields**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `project_root` | string | yes | Absolute path to the project root |
+| `profile` | string | yes | Preset name: `off`, `core`, or `full` |
+
+**Example call**
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 31,
+  "method": "tools/call",
+  "params": {
+    "name": "config",
+    "arguments": {
+      "action": "profile.set",
+      "params": {
+        "project_root": "/home/user/myproject",
+        "profile": "full"
+      }
+    }
+  }
+}
+```
+
+**Example response**
+
+```json
+{
+  "path": "/home/user/myproject/.the-one/config.json"
+}
+```
+
+**Notes**
+
+- `off` disables all MemPalace subfeatures.
+- `core` keeps conversation memory enabled but leaves hooks, AAAK, diary, and
+  navigation off.
+- `full` enables conversation memory, hooks, AAAK, diary, and navigation.
+
+---
+
 #### config — action: update
 
 Apply a partial configuration update for a project. Only the fields present in
@@ -1582,6 +1893,66 @@ trash management, and image index management.
 |-------|------|----------|-------------|
 | `action` | string | yes | See actions below |
 | `params` | object | no | Action-specific parameters |
+
+---
+
+#### maintain — action: memory.capture_hook
+
+Capture a `stop` or `precompact` hook transcript as first-class conversation
+memory. This is the broker-side hook ingestion flow used by MemPalace.
+
+**Params fields**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `project_root` | string | yes | Absolute path to the project root |
+| `project_id` | string | yes | Unique project identifier |
+| `path` | string | yes | Absolute or project-relative path to the hook transcript |
+| `format` | string | yes | Transcript format |
+| `event` | string | yes | Hook event name: `stop` or `precompact` |
+
+**Example call**
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 40,
+  "method": "tools/call",
+  "params": {
+    "name": "maintain",
+    "arguments": {
+      "action": "memory.capture_hook",
+      "params": {
+        "project_root": "/home/user/myproject",
+        "project_id": "myproject",
+        "path": "exports/precompact.json",
+        "format": "openai_messages",
+        "event": "precompact"
+      }
+    }
+  }
+}
+```
+
+**Example response**
+
+```json
+{
+  "event": "precompact",
+  "ingested_chunks": 2,
+  "source_path": "/home/user/myproject/exports/precompact.json",
+  "wing": "myproject",
+  "hall": "hook:precompact",
+  "room": "event:precompact"
+}
+```
+
+**Notes**
+
+- `event` must be `stop` or `precompact`.
+- If `wing`, `hall`, or `room` is omitted, the broker fills deterministic
+  defaults based on the project and event name.
+- This action also requires `memory_palace_hooks_enabled=true`.
 
 ---
 

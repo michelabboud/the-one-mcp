@@ -10,8 +10,9 @@ It provides:
 - **Semantic memory** — production-grade RAG with fastembed 5.13 (1024-dim ONNX) or API embeddings over Qdrant
 - **Image search** — multimodal image indexing and search with optional OCR
 - **Reranking** — optional cross-encoder reranking for higher-precision search results
-- **Code-aware chunking** — language-specific chunkers for Rust, Python, TypeScript, JavaScript, Go with function/struct/class-level boundaries and symbol metadata (v0.8.0+)
-- **Watcher auto-reindex** — background file watcher automatically re-ingests changed markdown files (v0.8.0+)
+- **Code-aware chunking** — AST chunkers for 13 languages with symbol metadata and fallback behavior
+- **Watcher auto-reindex** — background file watcher re-ingests changed markdown and image files
+- **MemPalace operations** — profile presets (`off/core/full`), AAAK lessons, diary workflows, navigation primitives, and hook capture
 - **Managed documents** — full CRUD for markdown files with soft-delete, trash, and auto-sync
 - **Policy-gated tools** — risk-tier approval gates (once/session/forever) with headless deny-by-default
 - **Intelligent routing** — rules-first with optional nano LLM provider pool (priority/round-robin/latency)
@@ -22,7 +23,7 @@ It provides:
 | Crate | Responsibility |
 |-------|---------------|
 | `the-one-core` | Config layering, SQLite storage (WAL), policy engine, profiler, manifests, docs manager, configurable limits |
-| `the-one-mcp` | Async broker orchestrator, 17 MCP tools (13 work + 4 multiplexed admin), JSON-RPC dispatch, transport layer (stdio/SSE/stream), CLI binary |
+| `the-one-mcp` | Async broker orchestrator, 30 MCP tools (26 work + 4 multiplexed admin), JSON-RPC dispatch, transport layer (stdio/SSE/stream), CLI binary |
 | `the-one-memory` | Code-aware chunker (Rust/Python/TypeScript/JavaScript/Go + markdown fallback), embedding providers (fastembed local + OpenAI-compatible API), async Qdrant HTTP backend |
 | `the-one-router` | Rules-first request classification, OpenAI-compatible nano provider, provider pool with health tracking and 3 routing policies |
 | `the-one-registry` | Capability catalog with risk-tier filtering, visibility modes (core/project/dormant) |
@@ -68,7 +69,7 @@ The installer:
 5. Auto-detects Claude Code, Gemini CLI, OpenCode, Codex and registers the MCP
 6. Validates with a smoke test
 
-Options: `--version v0.8.0`, `--lean` (no swagger), `--local ./target/release`, `--uninstall`
+Options: `--version v0.14.3`, `--lean` (no swagger), `--local ./target/release`, `--uninstall`
 
 ### Build from Source
 

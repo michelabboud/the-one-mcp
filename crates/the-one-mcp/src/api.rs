@@ -1,4 +1,8 @@
 use serde::{Deserialize, Serialize};
+use the_one_core::contracts::{
+    AaakCompressionResult, AaakLesson, AaakTeachOutcome, DiaryEntry, DiarySummary,
+    MemoryNavigationNode, MemoryNavigationTunnel,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProjectInitRequest {
@@ -143,6 +147,202 @@ pub struct MemoryWakeUpRequest {
 pub struct MemoryWakeUpResponse {
     pub summary: String,
     pub facts: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryAaakCompressRequest {
+    pub project_root: String,
+    pub project_id: String,
+    pub path: String,
+    pub format: MemoryConversationFormat,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryAaakCompressResponse {
+    pub result: AaakCompressionResult,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryAaakTeachRequest {
+    pub project_root: String,
+    pub project_id: String,
+    pub path: String,
+    pub format: MemoryConversationFormat,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryAaakTeachResponse {
+    pub outcome: AaakTeachOutcome,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryAaakListLessonsRequest {
+    pub project_root: String,
+    pub project_id: String,
+    #[serde(default = "default_aaak_lessons_limit")]
+    pub limit: usize,
+}
+
+fn default_aaak_lessons_limit() -> usize {
+    20
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryAaakListLessonsResponse {
+    pub lessons: Vec<AaakLesson>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryDiaryAddRequest {
+    pub project_root: String,
+    pub project_id: String,
+    pub entry_date: String,
+    #[serde(default)]
+    pub mood: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryDiaryAddResponse {
+    pub entry: DiaryEntry,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryDiaryListRequest {
+    pub project_root: String,
+    pub project_id: String,
+    #[serde(default)]
+    pub start_date: Option<String>,
+    #[serde(default)]
+    pub end_date: Option<String>,
+    #[serde(default = "default_diary_max_results")]
+    pub max_results: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryDiaryListResponse {
+    pub entries: Vec<DiaryEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryDiarySearchRequest {
+    pub project_root: String,
+    pub project_id: String,
+    pub query: String,
+    #[serde(default)]
+    pub start_date: Option<String>,
+    #[serde(default)]
+    pub end_date: Option<String>,
+    #[serde(default = "default_diary_max_results")]
+    pub max_results: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryDiarySearchResponse {
+    pub entries: Vec<DiaryEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryDiarySummarizeRequest {
+    pub project_root: String,
+    pub project_id: String,
+    #[serde(default)]
+    pub start_date: Option<String>,
+    #[serde(default)]
+    pub end_date: Option<String>,
+    #[serde(default = "default_diary_summary_items")]
+    pub max_summary_items: usize,
+}
+
+fn default_diary_max_results() -> usize {
+    20
+}
+
+fn default_diary_summary_items() -> usize {
+    12
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryDiarySummarizeResponse {
+    pub summary: DiarySummary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryNavigationUpsertNodeRequest {
+    pub project_root: String,
+    pub project_id: String,
+    pub node_id: String,
+    pub kind: String,
+    pub label: String,
+    #[serde(default)]
+    pub parent_node_id: Option<String>,
+    #[serde(default)]
+    pub wing: Option<String>,
+    #[serde(default)]
+    pub hall: Option<String>,
+    #[serde(default)]
+    pub room: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryNavigationUpsertNodeResponse {
+    pub node: MemoryNavigationNode,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryNavigationLinkTunnelRequest {
+    pub project_root: String,
+    pub project_id: String,
+    pub from_node_id: String,
+    pub to_node_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryNavigationLinkTunnelResponse {
+    pub tunnel: MemoryNavigationTunnel,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryNavigationListRequest {
+    pub project_root: String,
+    pub project_id: String,
+    #[serde(default)]
+    pub parent_node_id: Option<String>,
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default = "default_navigation_limit")]
+    pub limit: usize,
+}
+
+fn default_navigation_limit() -> usize {
+    100
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryNavigationListResponse {
+    pub nodes: Vec<MemoryNavigationNode>,
+    pub tunnels: Vec<MemoryNavigationTunnel>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryNavigationTraverseRequest {
+    pub project_root: String,
+    pub project_id: String,
+    pub start_node_id: String,
+    #[serde(default = "default_navigation_depth")]
+    pub max_depth: usize,
+}
+
+fn default_navigation_depth() -> usize {
+    8
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryNavigationTraverseResponse {
+    pub nodes: Vec<MemoryNavigationNode>,
+    pub tunnels: Vec<MemoryNavigationTunnel>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -697,9 +897,13 @@ pub struct ImageIngestResponse {
 mod tests {
     use super::{
         ConfigExportRequest, ConfigExportResponse, DocsListRequest, DocsSaveRequest,
-        ImageIngestRequest, ImageSearchRequest, MemoryConversationFormat, MemoryFetchChunkRequest,
-        MemoryIngestConversationRequest, MemorySearchRequest, ProjectInitRequest, ToolFindRequest,
-        ToolRunRequest,
+        ImageIngestRequest, ImageSearchRequest, MemoryAaakCompressRequest,
+        MemoryAaakListLessonsRequest, MemoryConversationFormat, MemoryDiaryAddRequest,
+        MemoryDiarySearchRequest, MemoryDiarySummarizeRequest, MemoryFetchChunkRequest,
+        MemoryIngestConversationRequest, MemoryNavigationLinkTunnelRequest,
+        MemoryNavigationListRequest, MemoryNavigationTraverseRequest,
+        MemoryNavigationUpsertNodeRequest, MemorySearchRequest, ProjectInitRequest,
+        ToolFindRequest, ToolRunRequest,
     };
 
     #[test]
@@ -763,6 +967,124 @@ mod tests {
             serde_json::from_str(&json).expect("deserialize should succeed");
         assert_eq!(decoded, req);
         assert!(json.contains(r#""format":"openai_messages""#));
+    }
+
+    #[test]
+    fn memory_aaak_requests_roundtrip() {
+        let compress = MemoryAaakCompressRequest {
+            project_root: "/tmp/project".to_string(),
+            project_id: "proj-1".to_string(),
+            path: "exports/auth.json".to_string(),
+            format: MemoryConversationFormat::OpenAiMessages,
+        };
+        let json = serde_json::to_string(&compress).expect("serialize should succeed");
+        let decoded: MemoryAaakCompressRequest =
+            serde_json::from_str(&json).expect("deserialize should succeed");
+        assert_eq!(decoded, compress);
+
+        let list = MemoryAaakListLessonsRequest {
+            project_root: "/tmp/project".to_string(),
+            project_id: "proj-1".to_string(),
+            limit: 25,
+        };
+        let json = serde_json::to_string(&list).expect("serialize should succeed");
+        let decoded: MemoryAaakListLessonsRequest =
+            serde_json::from_str(&json).expect("deserialize should succeed");
+        assert_eq!(decoded, list);
+    }
+
+    #[test]
+    fn memory_navigation_requests_roundtrip() {
+        let upsert = MemoryNavigationUpsertNodeRequest {
+            project_root: "/tmp/project".to_string(),
+            project_id: "proj-1".to_string(),
+            node_id: "drawer:ops".to_string(),
+            kind: "drawer".to_string(),
+            label: "Operations".to_string(),
+            parent_node_id: None,
+            wing: Some("ops".to_string()),
+            hall: None,
+            room: None,
+        };
+        let json = serde_json::to_string(&upsert).expect("serialize should succeed");
+        let decoded: MemoryNavigationUpsertNodeRequest =
+            serde_json::from_str(&json).expect("deserialize should succeed");
+        assert_eq!(decoded, upsert);
+
+        let link = MemoryNavigationLinkTunnelRequest {
+            project_root: "/tmp/project".to_string(),
+            project_id: "proj-1".to_string(),
+            from_node_id: "drawer:ops".to_string(),
+            to_node_id: "drawer:platform".to_string(),
+        };
+        let json = serde_json::to_string(&link).expect("serialize should succeed");
+        let decoded: MemoryNavigationLinkTunnelRequest =
+            serde_json::from_str(&json).expect("deserialize should succeed");
+        assert_eq!(decoded, link);
+
+        let list = MemoryNavigationListRequest {
+            project_root: "/tmp/project".to_string(),
+            project_id: "proj-1".to_string(),
+            parent_node_id: Some("drawer:ops".to_string()),
+            kind: Some("closet".to_string()),
+            limit: 25,
+        };
+        let json = serde_json::to_string(&list).expect("serialize should succeed");
+        let decoded: MemoryNavigationListRequest =
+            serde_json::from_str(&json).expect("deserialize should succeed");
+        assert_eq!(decoded, list);
+
+        let traverse = MemoryNavigationTraverseRequest {
+            project_root: "/tmp/project".to_string(),
+            project_id: "proj-1".to_string(),
+            start_node_id: "drawer:ops".to_string(),
+            max_depth: 3,
+        };
+        let json = serde_json::to_string(&traverse).expect("serialize should succeed");
+        let decoded: MemoryNavigationTraverseRequest =
+            serde_json::from_str(&json).expect("deserialize should succeed");
+        assert_eq!(decoded, traverse);
+    }
+
+    #[test]
+    fn memory_diary_requests_roundtrip() {
+        let add = MemoryDiaryAddRequest {
+            project_root: "/tmp/project".to_string(),
+            project_id: "proj-1".to_string(),
+            entry_date: "2026-04-10".to_string(),
+            mood: Some("focused".to_string()),
+            tags: vec!["release".to_string(), "auth".to_string()],
+            content: "Validated the release and auth migration checklist.".to_string(),
+        };
+        let json = serde_json::to_string(&add).expect("serialize should succeed");
+        let decoded: MemoryDiaryAddRequest =
+            serde_json::from_str(&json).expect("deserialize should succeed");
+        assert_eq!(decoded, add);
+
+        let search = MemoryDiarySearchRequest {
+            project_root: "/tmp/project".to_string(),
+            project_id: "proj-1".to_string(),
+            query: "release".to_string(),
+            start_date: Some("2026-04-01".to_string()),
+            end_date: Some("2026-04-30".to_string()),
+            max_results: 15,
+        };
+        let json = serde_json::to_string(&search).expect("serialize should succeed");
+        let decoded: MemoryDiarySearchRequest =
+            serde_json::from_str(&json).expect("deserialize should succeed");
+        assert_eq!(decoded, search);
+
+        let summarize = MemoryDiarySummarizeRequest {
+            project_root: "/tmp/project".to_string(),
+            project_id: "proj-1".to_string(),
+            start_date: Some("2026-04-09".to_string()),
+            end_date: Some("2026-04-10".to_string()),
+            max_summary_items: 8,
+        };
+        let json = serde_json::to_string(&summarize).expect("serialize should succeed");
+        let decoded: MemoryDiarySummarizeRequest =
+            serde_json::from_str(&json).expect("deserialize should succeed");
+        assert_eq!(decoded, summarize);
     }
 
     #[test]

@@ -8,7 +8,7 @@ Shortest path to a working MCP server connected to your AI assistant.
 curl -fsSL https://raw.githubusercontent.com/michelabboud/the-one-mcp/main/scripts/install.sh | bash
 ```
 
-This auto-detects your OS, downloads the latest release, creates default config, imports the tool catalog (125+ tools), and registers with every AI CLI it finds.
+This auto-detects your OS, downloads the latest release, creates default config, imports the tool catalog (365 tools), and registers with every AI CLI it finds.
 
 **Done.** Start an AI coding session — the MCP connects automatically.
 
@@ -79,5 +79,6 @@ $EDITOR ~/.the-one/config.json
 
 - **[INSTALL.md](../../INSTALL.md)** — complete installation guide
 - **[Complete Guide](the-one-mcp-complete-guide.md)** — all features including image search and reranking
+- **[MemPalace Operations Guide](mempalace-operations.md)** — profile presets, AAAK, diary, navigation, hook capture
 - **[Operator Runbook](../ops/operator-runbook.md)** — backup, incident triage
 - **[Tool Ecosystem](../plans/tool-ecosystem-architecture.md)** — catalog vision

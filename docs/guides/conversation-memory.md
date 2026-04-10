@@ -29,6 +29,44 @@ Behavior:
 - `memory.search` still works for docs and ignores palace filters while disabled.
 - `memory.capture_hook` additionally requires `memory_palace_hooks_enabled=true`.
 
+## MemPalace profile control
+
+Use `config` action `profile.set` to switch the full MemPalace preset in one
+step. The accepted values are `off`, `core`, and `full` (aliases such as
+`mempalace_full` are also accepted by the broker).
+
+Exact example:
+
+```json
+{
+  "name": "config",
+  "arguments": {
+    "action": "profile.set",
+    "params": {
+      "project_root": "/home/user/myproject",
+      "profile": "full"
+    }
+  }
+}
+```
+
+Expected result shape:
+
+```json
+{
+  "path": "/home/user/myproject/.the-one/config.json"
+}
+```
+
+Notes:
+
+- `off` disables all MemPalace subfeatures.
+- `core` keeps conversation memory enabled but leaves hooks, AAAK, diary, and
+  navigation off.
+- `full` enables conversation memory, hooks, AAAK, diary, and navigation.
+- The admin UI config page shows the active preset plus the resolved flag
+  matrix so you can confirm what is actually enabled on disk.
+
 ## Ingest a transcript
 
 `memory.ingest_conversation` accepts absolute paths or project-relative paths and stores transcript metadata in the project database.

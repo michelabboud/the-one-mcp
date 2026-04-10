@@ -1,6 +1,6 @@
 # Configuration Reference
 
-> v0.8.0 — authoritative source: `crates/the-one-core/src/config.rs` and `crates/the-one-core/src/limits.rs`
+> v0.14.3 — authoritative source: `crates/the-one-core/src/config.rs` and `crates/the-one-core/src/limits.rs`
 
 ## Overview
 
@@ -55,6 +55,47 @@ All fields use their JSON key names (matching the config file format).
   "log_level": "warn"
 }
 ```
+
+---
+
+### MemPalace
+
+MemPalace controls transcript memory, hook capture, AAAK lessons, diary flows,
+and navigation primitives.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `memory_palace_enabled` | bool | `true` | Master switch for transcript ingest and wake-up tools. |
+| `memory_palace_hooks_enabled` | bool | `false` | Enables `maintain` action `memory.capture_hook`. |
+| `memory_palace_aaak_enabled` | bool | `false` | Enables AAAK compression and lesson persistence tools. |
+| `memory_palace_diary_enabled` | bool | `false` | Enables diary entry tools (`memory.diary.*`). |
+| `memory_palace_navigation_enabled` | bool | `false` | Enables drawers/closets/tunnels navigation tools (`memory.navigation.*`). |
+
+**Example (full profile equivalent):**
+
+```json
+{
+  "memory_palace_enabled": true,
+  "memory_palace_hooks_enabled": true,
+  "memory_palace_aaak_enabled": true,
+  "memory_palace_diary_enabled": true,
+  "memory_palace_navigation_enabled": true
+}
+```
+
+Environment variable overrides:
+
+- `THE_ONE_MEMORY_PALACE_ENABLED`
+- `THE_ONE_MEMORY_PALACE_HOOKS_ENABLED`
+- `THE_ONE_MEMORY_PALACE_AAAK_ENABLED`
+- `THE_ONE_MEMORY_PALACE_DIARY_ENABLED`
+- `THE_ONE_MEMORY_PALACE_NAVIGATION_ENABLED`
+
+Operational note:
+
+- You can set all MemPalace flags consistently through `config` action
+  `profile.set` with preset `off`, `core`, or `full` instead of editing each
+  flag manually.
 
 ---
 
@@ -215,7 +256,7 @@ Hybrid search combines dense cosine similarity with sparse lexical matching (SPL
 
 ### Auto-Indexing (File Watcher)
 
-An optional background file watcher that monitors `.the-one/docs/` and `.the-one/images/` for changes. As of v0.8.0, markdown file changes are automatically re-ingested. Image auto-reindex is planned for v0.8.1. See [Auto-Indexing Guide](auto-indexing.md).
+An optional background file watcher that monitors `.the-one/docs/` and `.the-one/images/` for changes. Markdown and image file changes are automatically re-ingested when their corresponding feature paths are enabled. See [Auto-Indexing Guide](auto-indexing.md).
 
 | Field | Type | Default | Description |
 |---|---|---|---|

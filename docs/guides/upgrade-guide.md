@@ -4,6 +4,44 @@
 
 ---
 
+## Upgrading to v0.14.3 (from v0.14.2)
+
+### New features (non-breaking)
+
+- **MemPalace profile presets** via `config` action `profile.set`:
+  - `off`, `core`, `full`
+  - single switch that maps deterministically to all MemPalace flags
+- **AAAK feature family**:
+  - `memory.aaak.compress`
+  - `memory.aaak.teach`
+  - `memory.aaak.list_lessons`
+- **Diary feature family**:
+  - `memory.diary.add`, `list`, `search`, `summarize`
+  - refresh-safe identity (`project_id + entry_date`)
+- **Navigation feature family**:
+  - `memory.navigation.upsert_node`, `link_tunnel`, `list`, `traverse`
+  - project-scoped node/tunnel integrity
+- **Hook capture first-class flow**:
+  - `maintain` action `memory.capture_hook` for `stop` / `precompact`
+
+### Required action
+
+- **None.** Existing projects continue to work without changes.
+
+### Optional actions
+
+- Set an explicit MemPalace preset for each project with `config: profile.set`
+  to avoid ambiguous per-flag drift.
+- If adopting AAAK/diary/navigation on existing projects, run `setup` action
+  `refresh` once after upgrade.
+
+### No breaking changes
+
+- Existing tools and request shapes remain valid.
+- New behavior is additive and gated by MemPalace profile/flags.
+
+---
+
 ## Upgrading to v0.14.0 (from v0.13.x)
 
 ### New features (non-breaking)

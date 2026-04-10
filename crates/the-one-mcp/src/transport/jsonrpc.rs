@@ -272,12 +272,8 @@ async fn dispatch_tool(broker: &McpBroker, tool_name: &str, args: Value) -> Resu
                 .ok_or("missing project_root")?;
             let project_id = args["project_id"].as_str().ok_or("missing project_id")?;
             let path = args["path"].as_str().ok_or("missing path")?;
-            let format = match args["format"].as_str().ok_or("missing format")? {
-                "openai_messages" => MemoryConversationFormat::OpenAiMessages,
-                "claude_transcript" => MemoryConversationFormat::ClaudeTranscript,
-                "generic_jsonl" => MemoryConversationFormat::GenericJsonl,
-                other => return Err(format!("invalid format: {other}")),
-            };
+            let format =
+                parse_memory_conversation_format(args["format"].as_str().ok_or("missing format")?)?;
             let wing = args
                 .get("wing")
                 .and_then(serde_json::Value::as_str)
@@ -299,6 +295,269 @@ async fn dispatch_tool(broker: &McpBroker, tool_name: &str, args: Value) -> Resu
                     wing,
                     hall,
                     room,
+                })
+                .await
+                .map_err(|e| e.to_string())?;
+            serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+        "memory.aaak.compress" => {
+            let project_root = args["project_root"]
+                .as_str()
+                .ok_or("missing project_root")?;
+            let project_id = args["project_id"].as_str().ok_or("missing project_id")?;
+            let path = args["path"].as_str().ok_or("missing path")?;
+            let format =
+                parse_memory_conversation_format(args["format"].as_str().ok_or("missing format")?)?;
+            let result = broker
+                .memory_aaak_compress(MemoryAaakCompressRequest {
+                    project_root: project_root.to_string(),
+                    project_id: project_id.to_string(),
+                    path: path.to_string(),
+                    format,
+                })
+                .await
+                .map_err(|e| e.to_string())?;
+            serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+        "memory.aaak.teach" => {
+            let project_root = args["project_root"]
+                .as_str()
+                .ok_or("missing project_root")?;
+            let project_id = args["project_id"].as_str().ok_or("missing project_id")?;
+            let path = args["path"].as_str().ok_or("missing path")?;
+            let format =
+                parse_memory_conversation_format(args["format"].as_str().ok_or("missing format")?)?;
+            let result = broker
+                .memory_aaak_teach(MemoryAaakTeachRequest {
+                    project_root: project_root.to_string(),
+                    project_id: project_id.to_string(),
+                    path: path.to_string(),
+                    format,
+                })
+                .await
+                .map_err(|e| e.to_string())?;
+            serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+        "memory.aaak.list_lessons" => {
+            let project_root = args["project_root"]
+                .as_str()
+                .ok_or("missing project_root")?;
+            let project_id = args["project_id"].as_str().ok_or("missing project_id")?;
+            let limit = args["limit"].as_u64().unwrap_or(20) as usize;
+            let result = broker
+                .memory_aaak_list_lessons(MemoryAaakListLessonsRequest {
+                    project_root: project_root.to_string(),
+                    project_id: project_id.to_string(),
+                    limit,
+                })
+                .await
+                .map_err(|e| e.to_string())?;
+            serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+        "memory.diary.add" => {
+            let project_root = args["project_root"]
+                .as_str()
+                .ok_or("missing project_root")?;
+            let project_id = args["project_id"].as_str().ok_or("missing project_id")?;
+            let entry_date = args["entry_date"].as_str().ok_or("missing entry_date")?;
+            let content = args["content"].as_str().ok_or("missing content")?;
+            let tags = match args.get("tags") {
+                None => Vec::new(),
+                Some(Value::Array(items)) => {
+                    let mut tags = Vec::with_capacity(items.len());
+                    for item in items {
+                        let tag = item.as_str().ok_or("tags must be an array of strings")?;
+                        tags.push(tag.to_string());
+                    }
+                    tags
+                }
+                Some(_) => return Err("tags must be an array of strings".to_string()),
+            };
+            let result = broker
+                .memory_diary_add(MemoryDiaryAddRequest {
+                    project_root: project_root.to_string(),
+                    project_id: project_id.to_string(),
+                    entry_date: entry_date.to_string(),
+                    mood: args
+                        .get("mood")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string),
+                    tags,
+                    content: content.to_string(),
+                })
+                .await
+                .map_err(|e| e.to_string())?;
+            serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+        "memory.diary.list" => {
+            let project_root = args["project_root"]
+                .as_str()
+                .ok_or("missing project_root")?;
+            let project_id = args["project_id"].as_str().ok_or("missing project_id")?;
+            let max_results = args["max_results"].as_u64().unwrap_or(20) as usize;
+            let result = broker
+                .memory_diary_list(MemoryDiaryListRequest {
+                    project_root: project_root.to_string(),
+                    project_id: project_id.to_string(),
+                    start_date: args
+                        .get("start_date")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string),
+                    end_date: args
+                        .get("end_date")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string),
+                    max_results,
+                })
+                .await
+                .map_err(|e| e.to_string())?;
+            serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+        "memory.diary.search" => {
+            let project_root = args["project_root"]
+                .as_str()
+                .ok_or("missing project_root")?;
+            let project_id = args["project_id"].as_str().ok_or("missing project_id")?;
+            let query = args["query"].as_str().ok_or("missing query")?;
+            let max_results = args["max_results"].as_u64().unwrap_or(20) as usize;
+            let result = broker
+                .memory_diary_search(MemoryDiarySearchRequest {
+                    project_root: project_root.to_string(),
+                    project_id: project_id.to_string(),
+                    query: query.to_string(),
+                    start_date: args
+                        .get("start_date")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string),
+                    end_date: args
+                        .get("end_date")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string),
+                    max_results,
+                })
+                .await
+                .map_err(|e| e.to_string())?;
+            serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+        "memory.diary.summarize" => {
+            let project_root = args["project_root"]
+                .as_str()
+                .ok_or("missing project_root")?;
+            let project_id = args["project_id"].as_str().ok_or("missing project_id")?;
+            let max_summary_items = args["max_summary_items"].as_u64().unwrap_or(12) as usize;
+            let result = broker
+                .memory_diary_summarize(MemoryDiarySummarizeRequest {
+                    project_root: project_root.to_string(),
+                    project_id: project_id.to_string(),
+                    start_date: args
+                        .get("start_date")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string),
+                    end_date: args
+                        .get("end_date")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string),
+                    max_summary_items,
+                })
+                .await
+                .map_err(|e| e.to_string())?;
+            serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+        "memory.navigation.upsert_node" => {
+            let project_root = args["project_root"]
+                .as_str()
+                .ok_or("missing project_root")?;
+            let project_id = args["project_id"].as_str().ok_or("missing project_id")?;
+            let node_id = args["node_id"].as_str().ok_or("missing node_id")?;
+            let kind = args["kind"].as_str().ok_or("missing kind")?;
+            let label = args["label"].as_str().ok_or("missing label")?;
+            let result = broker
+                .memory_navigation_upsert_node(MemoryNavigationUpsertNodeRequest {
+                    project_root: project_root.to_string(),
+                    project_id: project_id.to_string(),
+                    node_id: node_id.to_string(),
+                    kind: kind.to_string(),
+                    label: label.to_string(),
+                    parent_node_id: args
+                        .get("parent_node_id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string),
+                    wing: args
+                        .get("wing")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string),
+                    hall: args
+                        .get("hall")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string),
+                    room: args
+                        .get("room")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string),
+                })
+                .await
+                .map_err(|e| e.to_string())?;
+            serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+        "memory.navigation.link_tunnel" => {
+            let project_root = args["project_root"]
+                .as_str()
+                .ok_or("missing project_root")?;
+            let project_id = args["project_id"].as_str().ok_or("missing project_id")?;
+            let from_node_id = args["from_node_id"]
+                .as_str()
+                .ok_or("missing from_node_id")?;
+            let to_node_id = args["to_node_id"].as_str().ok_or("missing to_node_id")?;
+            let result = broker
+                .memory_navigation_link_tunnel(MemoryNavigationLinkTunnelRequest {
+                    project_root: project_root.to_string(),
+                    project_id: project_id.to_string(),
+                    from_node_id: from_node_id.to_string(),
+                    to_node_id: to_node_id.to_string(),
+                })
+                .await
+                .map_err(|e| e.to_string())?;
+            serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+        "memory.navigation.list" => {
+            let project_root = args["project_root"]
+                .as_str()
+                .ok_or("missing project_root")?;
+            let project_id = args["project_id"].as_str().ok_or("missing project_id")?;
+            let limit = args["limit"].as_u64().unwrap_or(100) as usize;
+            let result = broker
+                .memory_navigation_list(MemoryNavigationListRequest {
+                    project_root: project_root.to_string(),
+                    project_id: project_id.to_string(),
+                    parent_node_id: args
+                        .get("parent_node_id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string),
+                    kind: args
+                        .get("kind")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string),
+                    limit,
+                })
+                .await
+                .map_err(|e| e.to_string())?;
+            serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+        "memory.navigation.traverse" => {
+            let project_root = args["project_root"]
+                .as_str()
+                .ok_or("missing project_root")?;
+            let project_id = args["project_id"].as_str().ok_or("missing project_id")?;
+            let start_node_id = args["start_node_id"]
+                .as_str()
+                .ok_or("missing start_node_id")?;
+            let max_depth = args["max_depth"].as_u64().unwrap_or(8) as usize;
+            let result = broker
+                .memory_navigation_traverse(MemoryNavigationTraverseRequest {
+                    project_root: project_root.to_string(),
+                    project_id: project_id.to_string(),
+                    start_node_id: start_node_id.to_string(),
+                    max_depth,
                 })
                 .await
                 .map_err(|e| e.to_string())?;
@@ -595,6 +854,15 @@ async fn dispatch_tool(broker: &McpBroker, tool_name: &str, args: Value) -> Resu
     }
 }
 
+fn parse_memory_conversation_format(value: &str) -> Result<MemoryConversationFormat, String> {
+    match value {
+        "openai_messages" => Ok(MemoryConversationFormat::OpenAiMessages),
+        "claude_transcript" => Ok(MemoryConversationFormat::ClaudeTranscript),
+        "generic_jsonl" => Ok(MemoryConversationFormat::GenericJsonl),
+        other => Err(format!("invalid format: {other}")),
+    }
+}
+
 async fn dispatch_setup(broker: &McpBroker, args: Value) -> Result<Value, String> {
     let action = args["action"].as_str().ok_or("missing action")?;
     let params = args
@@ -671,6 +939,22 @@ async fn dispatch_config(broker: &McpBroker, args: Value) -> Result<Value, Strin
                 .config_update(ConfigUpdateRequest {
                     project_root: project_root.to_string(),
                     update,
+                })
+                .await
+                .map_err(|e| e.to_string())?;
+            serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+        "profile.set" => {
+            let project_root = params["project_root"]
+                .as_str()
+                .ok_or("missing params.project_root")?;
+            let profile = params["profile"].as_str().ok_or("missing params.profile")?;
+            let result = broker
+                .config_update(ConfigUpdateRequest {
+                    project_root: project_root.to_string(),
+                    update: serde_json::json!({
+                        "memory_palace_profile": profile
+                    }),
                 })
                 .await
                 .map_err(|e| e.to_string())?;
@@ -933,6 +1217,7 @@ async fn dispatch_observe(broker: &McpBroker, args: Value) -> Result<Value, Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    use the_one_core::config::{AppConfig, RuntimeOverrides};
 
     #[tokio::test]
     async fn test_dispatch_initialize() {
@@ -1031,7 +1316,7 @@ mod tests {
         let response = dispatch(&broker, request).await;
         assert!(response.error.is_none());
         let tools = response.result.unwrap()["tools"].as_array().unwrap().len();
-        assert_eq!(tools, 19);
+        assert_eq!(tools, crate::transport::tools::tool_definitions().len());
     }
 
     #[tokio::test]
@@ -1195,6 +1480,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_dispatch_config_profile_set() {
+        let broker = McpBroker::new();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("repo");
+        std::fs::create_dir_all(&root).expect("repo dir should exist");
+
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(Value::Number(24.into())),
+            method: "tools/call".to_string(),
+            params: Some(serde_json::json!({
+                "name": "config",
+                "arguments": {
+                    "action": "profile.set",
+                    "params": {
+                        "project_root": root.display().to_string(),
+                        "profile": "full"
+                    }
+                }
+            })),
+        };
+
+        let response = dispatch(&broker, request).await;
+        assert!(
+            response.error.is_none(),
+            "config profile.set dispatch errored: {:?}",
+            response.error
+        );
+
+        let config =
+            AppConfig::load(&root, RuntimeOverrides::default()).expect("config should load");
+        assert!(config.memory_palace_enabled);
+        assert!(config.memory_palace_hooks_enabled);
+        assert!(config.memory_palace_aaak_enabled);
+        assert!(config.memory_palace_diary_enabled);
+        assert!(config.memory_palace_navigation_enabled);
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_config_profile_set_rejects_invalid_profile() {
+        let broker = McpBroker::new();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("repo");
+        std::fs::create_dir_all(&root).expect("repo dir should exist");
+
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(Value::Number(25.into())),
+            method: "tools/call".to_string(),
+            params: Some(serde_json::json!({
+                "name": "config",
+                "arguments": {
+                    "action": "profile.set",
+                    "params": {
+                        "project_root": root.display().to_string(),
+                        "profile": "bad-profile"
+                    }
+                }
+            })),
+        };
+
+        let response = dispatch(&broker, request).await;
+        assert!(
+            response.error.is_some(),
+            "expected invalid profile to produce an error response"
+        );
+        let error = response.error.expect("error should exist");
+        assert_eq!(error.code, INTERNAL_ERROR);
+        assert!(
+            error.message.contains("invalid memory palace profile"),
+            "unexpected error message: {}",
+            error.message
+        );
+    }
+
+    #[tokio::test]
     async fn test_dispatch_memory_ingest_conversation() {
         let broker = McpBroker::new();
         let temp = tempfile::tempdir().expect("tempdir");
@@ -1231,6 +1592,356 @@ mod tests {
             response.error.is_none(),
             "memory.ingest_conversation dispatch errored: {:?}",
             response.error
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_memory_aaak_tools() {
+        let broker = McpBroker::new();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("repo");
+        let state_dir = root.join(".the-one");
+        std::fs::create_dir_all(&state_dir).expect("state dir should exist");
+        std::fs::write(
+            state_dir.join("config.json"),
+            r#"{"memory_palace_enabled":true,"memory_palace_aaak_enabled":true}"#,
+        )
+        .expect("config should be written");
+
+        let transcript_path = root.join("aaak-dispatch-transcript.json");
+        std::fs::write(
+            &transcript_path,
+            r#"[
+              {"role":"assistant","content":"Refresh tokens were failing in staging due to issuer drift."},
+              {"role":"assistant","content":"Refresh tokens were failing in staging due to issuer drift."}
+            ]"#,
+        )
+        .expect("transcript should be written");
+
+        let compress_request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(Value::Number(26.into())),
+            method: "tools/call".to_string(),
+            params: Some(serde_json::json!({
+                "name": "memory.aaak.compress",
+                "arguments": {
+                    "project_root": root.display().to_string(),
+                    "project_id": "test-project",
+                    "path": transcript_path.display().to_string(),
+                    "format": "openai_messages"
+                }
+            })),
+        };
+        let compress_response = dispatch(&broker, compress_request).await;
+        assert!(
+            compress_response.error.is_none(),
+            "memory.aaak.compress dispatch errored: {:?}",
+            compress_response.error
+        );
+
+        let teach_request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(Value::Number(27.into())),
+            method: "tools/call".to_string(),
+            params: Some(serde_json::json!({
+                "name": "memory.aaak.teach",
+                "arguments": {
+                    "project_root": root.display().to_string(),
+                    "project_id": "test-project",
+                    "path": transcript_path.display().to_string(),
+                    "format": "openai_messages"
+                }
+            })),
+        };
+        let teach_response = dispatch(&broker, teach_request).await;
+        assert!(
+            teach_response.error.is_none(),
+            "memory.aaak.teach dispatch errored: {:?}",
+            teach_response.error
+        );
+
+        let list_request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(Value::Number(28.into())),
+            method: "tools/call".to_string(),
+            params: Some(serde_json::json!({
+                "name": "memory.aaak.list_lessons",
+                "arguments": {
+                    "project_root": root.display().to_string(),
+                    "project_id": "test-project",
+                    "limit": 10
+                }
+            })),
+        };
+        let list_response = dispatch(&broker, list_request).await;
+        assert!(
+            list_response.error.is_none(),
+            "memory.aaak.list_lessons dispatch errored: {:?}",
+            list_response.error
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_memory_diary_tools() {
+        let broker = McpBroker::new();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("repo");
+        let state_dir = root.join(".the-one");
+        std::fs::create_dir_all(&state_dir).expect("state dir should exist");
+        std::fs::write(
+            state_dir.join("config.json"),
+            r#"{"memory_palace_enabled":true,"memory_palace_diary_enabled":true}"#,
+        )
+        .expect("config should be written");
+
+        let add_request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(Value::Number(34.into())),
+            method: "tools/call".to_string(),
+            params: Some(serde_json::json!({
+                "name": "memory.diary.add",
+                "arguments": {
+                    "project_root": root.display().to_string(),
+                    "project_id": "test-project",
+                    "entry_date": "2026-04-10",
+                    "mood": "focused",
+                    "tags": ["release", "auth"],
+                    "content": "Validated the release checklist and auth migration."
+                }
+            })),
+        };
+        let add_response = dispatch(&broker, add_request).await;
+        assert!(
+            add_response.error.is_none(),
+            "memory.diary.add dispatch errored: {:?}",
+            add_response.error
+        );
+
+        let list_request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(Value::Number(35.into())),
+            method: "tools/call".to_string(),
+            params: Some(serde_json::json!({
+                "name": "memory.diary.list",
+                "arguments": {
+                    "project_root": root.display().to_string(),
+                    "project_id": "test-project",
+                    "start_date": "2026-04-01",
+                    "end_date": "2026-04-30",
+                    "max_results": 10
+                }
+            })),
+        };
+        let list_response = dispatch(&broker, list_request).await;
+        assert!(
+            list_response.error.is_none(),
+            "memory.diary.list dispatch errored: {:?}",
+            list_response.error
+        );
+
+        let search_request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(Value::Number(36.into())),
+            method: "tools/call".to_string(),
+            params: Some(serde_json::json!({
+                "name": "memory.diary.search",
+                "arguments": {
+                    "project_root": root.display().to_string(),
+                    "project_id": "test-project",
+                    "query": "release",
+                    "max_results": 10
+                }
+            })),
+        };
+        let search_response = dispatch(&broker, search_request).await;
+        assert!(
+            search_response.error.is_none(),
+            "memory.diary.search dispatch errored: {:?}",
+            search_response.error
+        );
+
+        let summarize_request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(Value::Number(37.into())),
+            method: "tools/call".to_string(),
+            params: Some(serde_json::json!({
+                "name": "memory.diary.summarize",
+                "arguments": {
+                    "project_root": root.display().to_string(),
+                    "project_id": "test-project",
+                    "start_date": "2026-04-01",
+                    "end_date": "2026-04-30",
+                    "max_summary_items": 6
+                }
+            })),
+        };
+        let summarize_response = dispatch(&broker, summarize_request).await;
+        assert!(
+            summarize_response.error.is_none(),
+            "memory.diary.summarize dispatch errored: {:?}",
+            summarize_response.error
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_memory_diary_add_rejects_non_string_tags() {
+        let broker = McpBroker::new();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("repo");
+        let state_dir = root.join(".the-one");
+        std::fs::create_dir_all(&state_dir).expect("state dir should exist");
+        std::fs::write(
+            state_dir.join("config.json"),
+            r#"{"memory_palace_enabled":true,"memory_palace_diary_enabled":true}"#,
+        )
+        .expect("config should be written");
+
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(Value::Number(38.into())),
+            method: "tools/call".to_string(),
+            params: Some(serde_json::json!({
+                "name": "memory.diary.add",
+                "arguments": {
+                    "project_root": root.display().to_string(),
+                    "project_id": "test-project",
+                    "entry_date": "2026-04-10",
+                    "tags": ["release", 7],
+                    "content": "This should fail."
+                }
+            })),
+        };
+
+        let response = dispatch(&broker, request).await;
+        assert!(response.error.is_some(), "expected invalid tags to error");
+        let error = response.error.expect("error should exist");
+        assert_eq!(error.code, INTERNAL_ERROR);
+        assert!(
+            error.message.contains("tags"),
+            "unexpected error message: {}",
+            error.message
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_memory_navigation_tools() {
+        let broker = McpBroker::new();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("repo");
+        let state_dir = root.join(".the-one");
+        std::fs::create_dir_all(&state_dir).expect("state dir should exist");
+        std::fs::write(
+            state_dir.join("config.json"),
+            r#"{"memory_palace_enabled":true,"memory_palace_navigation_enabled":true}"#,
+        )
+        .expect("config should be written");
+
+        let upsert_request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(Value::Number(29.into())),
+            method: "tools/call".to_string(),
+            params: Some(serde_json::json!({
+                "name": "memory.navigation.upsert_node",
+                "arguments": {
+                    "project_root": root.display().to_string(),
+                    "project_id": "test-project",
+                    "node_id": "drawer:ops",
+                    "kind": "drawer",
+                    "label": "Operations",
+                    "wing": "ops"
+                }
+            })),
+        };
+        let upsert_response = dispatch(&broker, upsert_request).await;
+        assert!(
+            upsert_response.error.is_none(),
+            "memory.navigation.upsert_node dispatch errored: {:?}",
+            upsert_response.error
+        );
+
+        let second_upsert_request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(Value::Number(30.into())),
+            method: "tools/call".to_string(),
+            params: Some(serde_json::json!({
+                "name": "memory.navigation.upsert_node",
+                "arguments": {
+                    "project_root": root.display().to_string(),
+                    "project_id": "test-project",
+                    "node_id": "drawer:platform",
+                    "kind": "drawer",
+                    "label": "Platform",
+                    "wing": "platform"
+                }
+            })),
+        };
+        let second_upsert_response = dispatch(&broker, second_upsert_request).await;
+        assert!(
+            second_upsert_response.error.is_none(),
+            "second navigation upsert dispatch errored: {:?}",
+            second_upsert_response.error
+        );
+
+        let link_request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(Value::Number(31.into())),
+            method: "tools/call".to_string(),
+            params: Some(serde_json::json!({
+                "name": "memory.navigation.link_tunnel",
+                "arguments": {
+                    "project_root": root.display().to_string(),
+                    "project_id": "test-project",
+                    "from_node_id": "drawer:platform",
+                    "to_node_id": "drawer:ops"
+                }
+            })),
+        };
+        let link_response = dispatch(&broker, link_request).await;
+        assert!(
+            link_response.error.is_none(),
+            "memory.navigation.link_tunnel dispatch errored: {:?}",
+            link_response.error
+        );
+
+        let list_request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(Value::Number(32.into())),
+            method: "tools/call".to_string(),
+            params: Some(serde_json::json!({
+                "name": "memory.navigation.list",
+                "arguments": {
+                    "project_root": root.display().to_string(),
+                    "project_id": "test-project",
+                    "limit": 10
+                }
+            })),
+        };
+        let list_response = dispatch(&broker, list_request).await;
+        assert!(
+            list_response.error.is_none(),
+            "memory.navigation.list dispatch errored: {:?}",
+            list_response.error
+        );
+
+        let traverse_request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(Value::Number(33.into())),
+            method: "tools/call".to_string(),
+            params: Some(serde_json::json!({
+                "name": "memory.navigation.traverse",
+                "arguments": {
+                    "project_root": root.display().to_string(),
+                    "project_id": "test-project",
+                    "start_node_id": "drawer:ops",
+                    "max_depth": 2
+                }
+            })),
+        };
+        let traverse_response = dispatch(&broker, traverse_request).await;
+        assert!(
+            traverse_response.error.is_none(),
+            "memory.navigation.traverse dispatch errored: {:?}",
+            traverse_response.error
         );
     }
 

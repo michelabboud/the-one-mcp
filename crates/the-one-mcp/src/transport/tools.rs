@@ -10,7 +10,7 @@ fn tool_def(name: &str, description: &str, input_schema: Value) -> Value {
 
 pub fn tool_definitions() -> Vec<Value> {
     vec![
-        // ── Work tools (11) ─────────────────────────────────────────
+        // ── Work tools ───────────────────────────────────────────────
         tool_def("memory.search", "Semantic search over indexed project documentation chunks.", json!({
             "type": "object",
             "properties": {
@@ -66,6 +66,127 @@ pub fn tool_definitions() -> Vec<Value> {
                 "room": { "type": "string", "description": "Optional palace room" }
             },
             "required": ["project_root", "project_id", "path", "format"]
+        })),
+        tool_def("memory.aaak.compress", "Compress a transcript into the AAAK dialect with deterministic motif references and lossless payload output.", json!({
+            "type": "object",
+            "properties": {
+                "project_root": { "type": "string", "description": "Absolute path to the project root" },
+                "project_id": { "type": "string", "description": "Unique project identifier" },
+                "path": { "type": "string", "description": "Absolute or project-relative path to the transcript export" },
+                "format": { "type": "string", "description": "Transcript format", "enum": ["openai_messages", "claude_transcript", "generic_jsonl"] }
+            },
+            "required": ["project_root", "project_id", "path", "format"]
+        })),
+        tool_def("memory.aaak.teach", "Extract reusable AAAK patterns from a transcript and persist them as project lessons.", json!({
+            "type": "object",
+            "properties": {
+                "project_root": { "type": "string", "description": "Absolute path to the project root" },
+                "project_id": { "type": "string", "description": "Unique project identifier" },
+                "path": { "type": "string", "description": "Absolute or project-relative path to the transcript export" },
+                "format": { "type": "string", "description": "Transcript format", "enum": ["openai_messages", "claude_transcript", "generic_jsonl"] }
+            },
+            "required": ["project_root", "project_id", "path", "format"]
+        })),
+        tool_def("memory.aaak.list_lessons", "List persisted AAAK lessons for the current project.", json!({
+            "type": "object",
+            "properties": {
+                "project_root": { "type": "string", "description": "Absolute path to the project root" },
+                "project_id": { "type": "string", "description": "Unique project identifier" },
+                "limit": { "type": "integer", "description": "Maximum number of lessons to return (default 20)", "default": 20 }
+            },
+            "required": ["project_root", "project_id"]
+        })),
+        tool_def("memory.diary.add", "Create or refresh a structured diary memory entry with date, mood, tags, and freeform content.", json!({
+            "type": "object",
+            "properties": {
+                "project_root": { "type": "string", "description": "Absolute path to the project root" },
+                "project_id": { "type": "string", "description": "Unique project identifier" },
+                "entry_date": { "type": "string", "description": "Diary date in YYYY-MM-DD format" },
+                "mood": { "type": "string", "description": "Optional mood label for the entry" },
+                "tags": { "type": "array", "items": { "type": "string" }, "description": "Optional tags for later search and filtering" },
+                "content": { "type": "string", "description": "Diary entry body text" }
+            },
+            "required": ["project_root", "project_id", "entry_date", "content"]
+        })),
+        tool_def("memory.diary.list", "List diary entries for the current project, optionally filtered by an inclusive date range.", json!({
+            "type": "object",
+            "properties": {
+                "project_root": { "type": "string", "description": "Absolute path to the project root" },
+                "project_id": { "type": "string", "description": "Unique project identifier" },
+                "start_date": { "type": "string", "description": "Optional inclusive lower bound in YYYY-MM-DD format" },
+                "end_date": { "type": "string", "description": "Optional inclusive upper bound in YYYY-MM-DD format" },
+                "max_results": { "type": "integer", "description": "Maximum number of diary entries to return (default 20)", "default": 20 }
+            },
+            "required": ["project_root", "project_id"]
+        })),
+        tool_def("memory.diary.search", "Search diary entries by natural-language terms across content, mood, and tags.", json!({
+            "type": "object",
+            "properties": {
+                "project_root": { "type": "string", "description": "Absolute path to the project root" },
+                "project_id": { "type": "string", "description": "Unique project identifier" },
+                "query": { "type": "string", "description": "Search query for diary content, mood, or tags" },
+                "start_date": { "type": "string", "description": "Optional inclusive lower bound in YYYY-MM-DD format" },
+                "end_date": { "type": "string", "description": "Optional inclusive upper bound in YYYY-MM-DD format" },
+                "max_results": { "type": "integer", "description": "Maximum number of results to return (default 20)", "default": 20 }
+            },
+            "required": ["project_root", "project_id", "query"]
+        })),
+        tool_def("memory.diary.summarize", "Build a compact summary of recent diary entries using deterministic fact extraction.", json!({
+            "type": "object",
+            "properties": {
+                "project_root": { "type": "string", "description": "Absolute path to the project root" },
+                "project_id": { "type": "string", "description": "Unique project identifier" },
+                "start_date": { "type": "string", "description": "Optional inclusive lower bound in YYYY-MM-DD format" },
+                "end_date": { "type": "string", "description": "Optional inclusive upper bound in YYYY-MM-DD format" },
+                "max_summary_items": { "type": "integer", "description": "Maximum summary highlight count (default 12)", "default": 12 }
+            },
+            "required": ["project_root", "project_id"]
+        })),
+        tool_def("memory.navigation.upsert_node", "Create or update a MemPalace navigation node such as a drawer, closet, or room.", json!({
+            "type": "object",
+            "properties": {
+                "project_root": { "type": "string", "description": "Absolute path to the project root" },
+                "project_id": { "type": "string", "description": "Unique project identifier" },
+                "node_id": { "type": "string", "description": "Stable navigation node identifier" },
+                "kind": { "type": "string", "description": "Navigation node type", "enum": ["drawer", "closet", "room"] },
+                "label": { "type": "string", "description": "Human-readable node label" },
+                "parent_node_id": { "type": "string", "description": "Optional parent node identifier" },
+                "wing": { "type": "string", "description": "Optional wing metadata for compatibility with existing palace filters" },
+                "hall": { "type": "string", "description": "Optional hall metadata for compatibility with existing palace filters" },
+                "room": { "type": "string", "description": "Optional room metadata for compatibility with existing palace filters" }
+            },
+            "required": ["project_root", "project_id", "node_id", "kind", "label"]
+        })),
+        tool_def("memory.navigation.link_tunnel", "Create or refresh a tunnel link between two existing navigation nodes.", json!({
+            "type": "object",
+            "properties": {
+                "project_root": { "type": "string", "description": "Absolute path to the project root" },
+                "project_id": { "type": "string", "description": "Unique project identifier" },
+                "from_node_id": { "type": "string", "description": "One end of the tunnel" },
+                "to_node_id": { "type": "string", "description": "The other end of the tunnel" }
+            },
+            "required": ["project_root", "project_id", "from_node_id", "to_node_id"]
+        })),
+        tool_def("memory.navigation.list", "List navigation nodes and nearby tunnel metadata for the current project.", json!({
+            "type": "object",
+            "properties": {
+                "project_root": { "type": "string", "description": "Absolute path to the project root" },
+                "project_id": { "type": "string", "description": "Unique project identifier" },
+                "parent_node_id": { "type": "string", "description": "Optional parent node filter" },
+                "kind": { "type": "string", "description": "Optional node kind filter", "enum": ["drawer", "closet", "room"] },
+                "limit": { "type": "integer", "description": "Maximum number of nodes to return (default 100)", "default": 100 }
+            },
+            "required": ["project_root", "project_id"]
+        })),
+        tool_def("memory.navigation.traverse", "Traverse the MemPalace navigation graph from a starting node using deterministic path ordering.", json!({
+            "type": "object",
+            "properties": {
+                "project_root": { "type": "string", "description": "Absolute path to the project root" },
+                "project_id": { "type": "string", "description": "Unique project identifier" },
+                "start_node_id": { "type": "string", "description": "Starting node identifier" },
+                "max_depth": { "type": "integer", "description": "Maximum traversal depth (default 8)", "default": 8 }
+            },
+            "required": ["project_root", "project_id", "start_node_id"]
         })),
         tool_def("memory.wake_up", "Build a compact context pack from recent high-signal conversation memory.", json!({
             "type": "object",
@@ -186,13 +307,13 @@ pub fn tool_definitions() -> Vec<Value> {
             },
             "required": ["action", "params"]
         })),
-        tool_def("config", "Configuration, custom tools, and embedding models. Actions: 'export', 'update', 'tool.add', 'tool.remove', 'models.list', 'models.check'.", json!({
+        tool_def("config", "Configuration, custom tools, embedding models, and MemPalace profiles. Actions: 'export', 'update', 'profile.set', 'tool.add', 'tool.remove', 'models.list', 'models.check'.", json!({
             "type": "object",
             "properties": {
-                "action": { "type": "string", "description": "Operation to perform", "enum": ["export", "update", "tool.add", "tool.remove", "models.list", "models.check"] },
+                "action": { "type": "string", "description": "Operation to perform", "enum": ["export", "update", "profile.set", "tool.add", "tool.remove", "models.list", "models.check"] },
                 "params": {
                     "type": "object",
-                    "description": "Action-specific parameters. 'export': {project_root}. 'update': {project_root, update}. 'tool.add': {id, name, description, install_command, run_command, ...}. 'tool.remove': {tool_id}. 'models.list': {filter?}. 'models.check': {}."
+                    "description": "Action-specific parameters. 'export': {project_root}. 'update': {project_root, update}. 'profile.set': {project_root, profile} where profile is one of off, core, full (aliases mempalace_off, mempalace_core, mempalace_full also accepted). 'tool.add': {id, name, description, install_command, run_command, ...}. 'tool.remove': {tool_id}. 'models.list': {filter?}. 'models.check': {}."
                 }
             },
             "required": ["action"]
@@ -235,6 +356,17 @@ mod tests {
             .collect();
 
         assert!(names.contains(&"memory.ingest_conversation".to_string()));
+        assert!(names.contains(&"memory.aaak.compress".to_string()));
+        assert!(names.contains(&"memory.aaak.teach".to_string()));
+        assert!(names.contains(&"memory.aaak.list_lessons".to_string()));
+        assert!(names.contains(&"memory.diary.add".to_string()));
+        assert!(names.contains(&"memory.diary.list".to_string()));
+        assert!(names.contains(&"memory.diary.search".to_string()));
+        assert!(names.contains(&"memory.diary.summarize".to_string()));
+        assert!(names.contains(&"memory.navigation.upsert_node".to_string()));
+        assert!(names.contains(&"memory.navigation.link_tunnel".to_string()));
+        assert!(names.contains(&"memory.navigation.list".to_string()));
+        assert!(names.contains(&"memory.navigation.traverse".to_string()));
         assert!(names.contains(&"memory.wake_up".to_string()));
     }
 
@@ -252,9 +384,37 @@ mod tests {
     }
 
     #[test]
+    fn navigation_tool_definitions_expose_graph_tools() {
+        let tools = tool_definitions();
+        let names = tools
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect::<Vec<_>>();
+
+        assert!(names.contains(&"memory.navigation.upsert_node"));
+        assert!(names.contains(&"memory.navigation.link_tunnel"));
+        assert!(names.contains(&"memory.navigation.list"));
+        assert!(names.contains(&"memory.navigation.traverse"));
+    }
+
+    #[test]
+    fn diary_tool_definitions_expose_diary_tools() {
+        let tools = tool_definitions();
+        let names = tools
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect::<Vec<_>>();
+
+        assert!(names.contains(&"memory.diary.add"));
+        assert!(names.contains(&"memory.diary.list"));
+        assert!(names.contains(&"memory.diary.search"));
+        assert!(names.contains(&"memory.diary.summarize"));
+    }
+
+    #[test]
     fn test_tool_definitions_count() {
         let tools = tool_definitions();
-        assert_eq!(tools.len(), 19); // 15 work + 4 admin (setup, config, maintain, observe)
+        assert_eq!(tools.len(), 30); // 26 work + 4 admin (setup, config, maintain, observe)
     }
 
     #[test]

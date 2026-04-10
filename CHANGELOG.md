@@ -17,6 +17,21 @@ All notable changes to this project are documented in this file.
     - `wing = project_id`
     - `hall = hook:<event>`
     - `room = event:<event>`
+- **MemPalace profile presets** exposed end-to-end:
+  - `config` action `profile.set` accepts `off`, `core`, `full`
+  - profile presets map deterministically to all MemPalace subfeature flags
+- **AAAK dialect and auto-teach flow**:
+  - `memory.aaak.compress`, `memory.aaak.teach`, `memory.aaak.list_lessons`
+  - persisted AAAK lessons with project isolation and ingest auto-teach wiring
+- **Navigation primitives** for drawers/closets/tunnels:
+  - `memory.navigation.upsert_node`, `memory.navigation.link_tunnel`,
+    `memory.navigation.list_nodes`, `memory.navigation.traverse`
+  - project-scoped integrity for node/tunnel links
+- **Diary memory tools**:
+  - `memory.diary.add`, `memory.diary.list`, `memory.diary.search`,
+    `memory.diary.summarize`
+  - refresh semantics preserve logical identity (`project_id` + `entry_date`) and
+    keep `created_at` stable
 
 ### Changed
 
@@ -29,12 +44,21 @@ All notable changes to this project are documented in this file.
   - `memory_palace_enabled`
   - `memory_palace_hooks_enabled`
 - **Tool schema + JSON-RPC dispatch** updated for `maintain: memory.capture_hook`.
+- **Admin UI MemPalace controls** now surface the active profile plus the
+  resolved flag matrix, and accept `off` / `core` / `full` profile updates from
+  the config page.
+
+### Documentation
+
+- Updated `README.md`, `docs/guides/conversation-memory.md`, and
+  `docs/guides/api-reference.md` with exact `config: profile.set`,
+  `maintain: memory.capture_hook`, AAAK, diary, and navigation examples.
 
 ### Verification
 
 - `cargo fmt --check` ✅
 - `cargo clippy --workspace --all-targets -- -D warnings` ✅
-- `cargo test --workspace` ✅ (`340` passed, `1` ignored)
+- `cargo test --workspace` ✅ (`387` passed, `1` ignored)
 
 ## [0.14.2] - 2026-04-10
 
