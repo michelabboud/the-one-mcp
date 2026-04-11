@@ -52,3 +52,13 @@ tree-sitter-java = "0.23"
 tree-sitter-kotlin-ng = "1.1"
 tree-sitter-zig = "1.1"
 tree-sitter-php = "0.24"
+# v0.16.0 Phase 2 — pgvector backend deps are declared directly in
+# `crates/the-one-memory/Cargo.toml` under the `pg-vectors` optional
+# feature, NOT via [workspace.dependencies]. Reason: cargo's links-
+# conflict check evaluates workspace deps eagerly, and sqlx-sqlite
+# (sqlx's optional sqlite driver) links `libsqlite3-sys ^0.30.1`
+# while this workspace already links `libsqlite3-sys ^0.37.0` via
+# rusqlite 0.39. Inlining the sqlx spec inside `optional = true`
+# lets cargo's resolver skip sqlx-sqlite entirely when pg-vectors
+# is not the active build. See the `pg-vectors` feature in
+# `crates/the-one-memory/Cargo.toml` for the version + feature set.

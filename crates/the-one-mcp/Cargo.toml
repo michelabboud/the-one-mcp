@@ -15,6 +15,13 @@ local-embeddings-dynamic = ["the-one-memory/local-embeddings-dynamic"]
 image-embeddings = ["the-one-memory/image-embeddings", "dep:image"]
 image-ocr = ["the-one-memory/image-ocr"]
 redis-vectors = ["the-one-memory/redis-vectors", "local-embeddings"]
+# v0.16.0 Phase 2 — pgvector backend. Passthrough to the-one-memory's
+# `pg-vectors` feature. Off by default; operators opt in via
+# `cargo build --features pg-vectors` when building the binary. The
+# compile gate on `PgVectorBackend` uses `#[cfg(feature = "pg-vectors")]`
+# in `the-one-memory` so the broker's factory branch degrades to a
+# clean `InvalidProjectConfig` error when the feature is off.
+pg-vectors = ["the-one-memory/pg-vectors"]
 
 [[bin]]
 name = "the-one-mcp"

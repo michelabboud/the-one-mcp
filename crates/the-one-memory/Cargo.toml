@@ -35,6 +35,35 @@ image-embeddings = ["local-embeddings", "dep:image"]
 image-ocr = ["image-embeddings", "dep:tesseract"]
 redis-vectors = ["dep:fred"]
 
+# v0.16.0 Phase 2 — pgvector backend. Off by default; operators opt in via
+# `cargo build --features pg-vectors` (or by enabling it on the binary
+# crate). Pulls in sqlx (Postgres driver) and the `pgvector` crate for
+# `Vec<f32>` ↔ pgvector round-trip.
+#
+# ## Why the sqlx feature set is minimal
+#
+# Decision B in the Phase 2 plan originally specified the features list
+# `[runtime-tokio, tls-rustls, postgres, macros, migrate, chrono]`. The
+# `migrate` and `chrono` features were dropped after `cargo check`
+# bisection proved that both transitively evaluate `sqlx-sqlite?/xxx`
+# weak-dep references, which cargo's `links` conflict check treats as
+# "possibly activates" and pulls `sqlx-sqlite` into the resolution
+# graph. `sqlx-sqlite 0.8.x` requires `libsqlite3-sys ^0.30.1`, which
+# is disjoint from `rusqlite 0.39`'s `libsqlite3-sys ^0.37.0` required
+# by `the-one-core`. Result: every build of the workspace with these
+# two sqlx features enabled fails before any Rust code compiles.
+#
+# Replacements:
+#   - `migrate` → hand-rolled migration runner in `pg_vector::migrations`.
+#     Reads `include_str!()`'d SQL files, tracks applied versions in
+#     the `the_one.pgvector_migrations` table, applies missing
+#     migrations in order. ~80 LOC, covered in `pg_vector.rs` tests.
+#   - `chrono`  → deferred to Phase 3 (`PostgresStateStore`) where
+#     `TIMESTAMPTZ` columns actually exist. Phase 2's pgvector tables
+#     use `created_at_epoch_ms BIGINT` throughout, which sqlx handles
+#     natively without the feature.
+pg-vectors = ["dep:sqlx", "dep:pgvector"]
+
 # Tree-sitter code-aware chunker. Enables AST-based chunking for 13
 # programming languages. Adds ~3-5MB to the binary (per-language ~100-400KB
 # compiled C grammar + bindings). Disable for lean builds via
@@ -87,6 +116,22 @@ tree-sitter-java = { workspace = true, optional = true }
 tree-sitter-kotlin-ng = { workspace = true, optional = true }
 tree-sitter-zig = { workspace = true, optional = true }
 tree-sitter-php = { workspace = true, optional = true }
+# v0.16.0 Phase 2 — pgvector VectorBackend. Optional, gated on
+# the `pg-vectors` feature.
+#
+# Declared directly (not via [workspace.dependencies]) because the
+# `migrate` and `chrono` features were dropped from Decision B after
+# bisection proved they both transitively reference `sqlx-sqlite?/…`
+# which cargo's `links` conflict check pulls into the graph even with
+# `optional = true`. See the `pg-vectors` feature comment above for
+# the full explanation and the hand-rolled replacements.
+sqlx = { version = "0.8.6", default-features = false, features = [
+    "runtime-tokio",
+    "tls-rustls",
+    "postgres",
+    "macros",
+], optional = true }
+pgvector = { version = "0.4", default-features = false, features = ["sqlx"], optional = true }
 
 [dev-dependencies]
 httpmock = "0.7"

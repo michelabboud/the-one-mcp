@@ -6,6 +6,107 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- **v0.16.0 Phase 2 — pgvector `VectorBackend` + env var parser +
+  startup validator** (pending commit, tag `v0.16.0-phase2`). First
+  real alternative vector backend after the Phase A trait extraction:
+  operators running managed Postgres can now co-locate their vectors
+  with their relational data instead of standing up a separate
+  Qdrant service.
+  - New `crates/the-one-memory/src/pg_vector.rs` (~850 LOC) with
+    `PgVectorBackend` implementing the full chunk + entity + relation
+    trait surface (dense-only; hybrid search is Decision D, deferred
+    to Phase 2.5 with benchmark comparison of tsvector+GIN vs
+    sparse-array rewrites). Batched upserts via multi-row
+    `INSERT ... SELECT * FROM UNNEST(...)` — one round trip per
+    batch, no N-query loop. Per-search `SET LOCAL hnsw.ef_search`
+    inside a transaction keeps the HNSW query-time recall knob
+    scoped and pool-safe.
+  - Defensive pgvector extension preflight (`preflight_vector_extension`)
+    with targeted error messages for Supabase / AWS RDS / Cloud SQL /
+    Azure Flexible Server / self-hosted Postgres. Three probe queries
+    (`pg_extension`, `pg_available_extensions`, `CREATE EXTENSION`)
+    cover every managed-Postgres permission model cleanly.
+  - **Hand-rolled migration runner** at `pg_vector::migrations` —
+    replaces `sqlx::migrate!` because sqlx's `migrate` and `chrono`
+    features both contain `sqlx-sqlite?/…` weak-dep references that
+    cargo's `links` conflict check pulls into the resolution graph,
+    colliding with `rusqlite 0.39`'s `libsqlite3-sys 0.37`. Bisection
+    + full rationale in `crates/the-one-memory/Cargo.toml` comment.
+    Runner uses `include_str!` to embed `.sql` files at compile time,
+    SHA-256 checksum drift detection, `the_one.pgvector_migrations`
+    tracking table, and idempotent re-apply. Five migrations ship:
+    `0000_migrations_table`, `0001_extension_and_schema`,
+    `0002_chunks_table`, `0003_entities_table`, `0004_relations_table`.
+    **Decision C** (vector dimension hardcoded to 1024 in the
+    migration SQL, matching BGE-large-en-v1.5 quality tier) is
+    enforced by a provider-dim check in `PgVectorBackend::new` that
+    refuses to boot if the active embedding provider reports a
+    different dim. Changing the dim later is a new migration, not a
+    runtime setting.
+  - New `the_one_core::config::backend_selection` submodule implementing
+    `BackendSelection::from_env` — parses the four-variable surface
+    `THE_ONE_{STATE,VECTOR}_{TYPE,URL}` and enforces every § 3 rule
+    from the backend selection scheme: all-unset → sqlite+qdrant
+    default, one-side-set → asymmetry error, unknown TYPE → enum-list
+    error, URL-missing → targeted error, combined-mismatch → combined
+    matching error, combined-URL-mismatch → byte-identical error.
+    First-match fail (not collect-all) to keep the v0.15.0
+    "one `corr=<id>` per error" envelope invariant. Twelve unit tests
+    (eight negative + four positive controls, all `temp_env::with_vars`
+    isolated).
+  - New `VectorPgvectorConfig` in `the_one_core::config` — schema
+    name, HNSW tunables (m / ef_construction / ef_search), and sqlx
+    pool sizing (max/min connections, acquire/idle/max-lifetime
+    timeouts). Production-sane defaults: `min_connections = 2`
+    (avoid cold-start handshake), `max_lifetime = 30 min` (force
+    credential rotation). Two tests verify defaults and partial
+    overrides.
+  - Broker wiring: `McpBroker` gains a `backend_selection` field
+    parsed once at construction via `try_new_with_policy` (fail-loud)
+    or `new_with_policy` (fall back to default on parse failure with
+    a `tracing::error`). New `build_pgvector_memory_engine` fast-path
+    fires when `BackendSelection.vector == Pgvector`, routing through
+    `MemoryEngine::new_with_pgvector` / `new_api_with_pgvector`
+    instead of the legacy `config.vector_backend` string branch.
+    Legacy Qdrant/Redis paths remain 100% untouched when pgvector
+    isn't selected.
+  - New Cargo feature `pg-vectors` on `the-one-memory` and a
+    passthrough on `the-one-mcp`. Off by default; operators opt in
+    via `cargo build --features pg-vectors`. sqlx 0.8.6 + pgvector
+    0.4.1 with feature set `[runtime-tokio, tls-rustls, postgres,
+    macros]`. **Dropped from original Decision B**: `migrate` and
+    `chrono` (see hand-rolled migration runner note above).
+  - Integration test suite `crates/the-one-memory/tests/pgvector_roundtrip.rs`
+    — eight tests gated on `THE_ONE_VECTOR_TYPE=pgvector` +
+    `THE_ONE_VECTOR_URL`, covering bootstrap idempotence, chunk CRUD
+    + search, upsert idempotency, delete-by-source-path, entity +
+    relation roundtrip, provider-dim mismatch, migration tracking
+    table contents. No `_TEST`-suffixed shadow vars — the test
+    harness reads the same production env surface per § 1 of the
+    backend selection scheme. Tests skip gracefully via `return`
+    when the DB isn't available; no panic, no error.
+  - New bench `crates/the-one-memory/examples/pgvector_bench.rs` —
+    chunk upsert throughput (batch 50/200/1000) and dense search
+    latency (p50/p95/p99 over 100 queries). Feature-gated and
+    env-gated; prints `SKIPPED` banner if pgvector env vars absent.
+    The core bench `production_hardening_bench.rs` stays SQLite-
+    scoped (deliberate architectural layering — core doesn't depend
+    on memory); new bench cross-references it.
+  - **Test count**: 450 → 464 baseline (no pgvector feature), 450 →
+    469 with `--features pg-vectors`. Breakdown:
+    - +12 in `config::backend_selection::tests` (§ 4)
+    - +2 in `config::tests::pgvector_config_*` (§ 5)
+    - +5 in `pg_vector::tests` (§ 3, feature-gated)
+    - +8 in `tests/pgvector_roundtrip.rs` (§ 7, feature-gated,
+      graceful skip)
+  - **Docs**: new § 15 in `docs/guides/production-hardening-v0.15.md`
+    covering pgvector setup, HNSW tuning, managed-Postgres quirks,
+    and connection-pool rationale. Updated
+    `docs/guides/multi-backend-operations.md` with a pgvector
+    subsection in the config-reference section and an updated
+    backend matrix in § 1. Phase 2 marked DONE in
+    `docs/plans/2026-04-11-resume-phase1-onwards.md`.
+
 - **v0.16.0 Phase 1 — broker `state_by_project` cache via `StateStore`
   trait** (commit `7666439`, tag `v0.16.0-phase1`). Mechanical refactor
   landing the broker-side piece of the multi-backend roadmap: every

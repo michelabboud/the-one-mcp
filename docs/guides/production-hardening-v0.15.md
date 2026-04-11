@@ -537,6 +537,237 @@ see:
 
 ---
 
+## 15. v0.16.0 Phase 2 — pgvector backend setup + tuning
+
+Phase 2 ships `PgVectorBackend` as the first real alternative
+vector backend after the Phase A trait extraction. This section
+covers the operational surface: installing the extension, sizing
+the sqlx pool, tuning HNSW, and the migration-ownership model.
+
+### Installing pgvector on managed Postgres
+
+`PgVectorBackend::new` runs `preflight_vector_extension` before any
+migration, which performs three defensive checks and produces a
+targeted error message for each of the five common managed-Postgres
+environments when it can't find the extension:
+
+1. **Supabase** — pgvector is pre-installed on every project. No
+   action required. The preflight query sees `vector` in
+   `pg_extension` and returns `Ok(())`.
+2. **AWS RDS / Aurora Postgres** — `vector` ships with RDS Postgres
+   ≥ 15.3 but is not installed by default. Add it to the instance
+   parameter group's `shared_preload_libraries`, reboot the
+   instance, then connect as `rds_superuser` once so
+   `CREATE EXTENSION` succeeds. Subsequent broker startups see the
+   installed extension and skip the `CREATE`.
+3. **Google Cloud SQL Postgres** — set the database flag
+   `cloudsql.enable_pgvector` to `on` on the instance. Unlike RDS,
+   Cloud SQL doesn't require a separate `CREATE EXTENSION` step
+   once the flag is set.
+4. **Azure Database for PostgreSQL Flexible Server** — add `vector`
+   to the server parameter `azure.extensions`, then connect as any
+   member of `azure_pg_admin` for the one-time `CREATE EXTENSION`.
+5. **Self-hosted Postgres** — install the pgvector package for
+   your distribution (`apt install postgresql-16-pgvector` on
+   Debian/Ubuntu, `brew install pgvector` on macOS, or build from
+   source per the upstream README), restart Postgres, then connect
+   as a superuser once to `CREATE EXTENSION vector`.
+
+The preflight's three probe queries (`pg_extension`,
+`pg_available_extensions`, `CREATE EXTENSION`) cover every
+permission model without needing operator-specific code paths.
+
+### Migration-ownership model
+
+Phase 2 uses a hand-rolled migration runner at
+`the_one_memory::pg_vector::migrations` instead of `sqlx::migrate!`.
+The bisection that led to this decision is in the
+`crates/the-one-memory/Cargo.toml` `pg-vectors` feature comment —
+short version: sqlx's `migrate` and `chrono` features both
+transitively reference `sqlx-sqlite?/…`, cargo's `links` conflict
+check pulls `sqlx-sqlite` into the resolution graph even though
+it's optional, and `sqlx-sqlite`'s `libsqlite3-sys 0.30.1` collides
+with `rusqlite 0.39`'s `libsqlite3-sys 0.37.0`. Dropping `migrate`
+sidesteps the entire conflict.
+
+The hand-rolled runner:
+
+- Embeds every `.sql` file in `crates/the-one-memory/migrations/pgvector/`
+  via `include_str!` at compile time.
+- Applies migration 0 (the tracking table itself) unconditionally —
+  the body is `CREATE TABLE IF NOT EXISTS`, so re-running it is
+  safe.
+- For migrations 1..N, checks the `the_one.pgvector_migrations`
+  table for an existing row at that version. If present, it
+  verifies the stored `SHA-256 BYTEA` checksum against the live
+  `include_str!`'d file contents; drift (i.e. someone edited the
+  migration file post-ship) refuses to continue and logs the
+  mismatch. If absent, it applies the migration in one
+  `raw_sql().execute()` call and inserts a tracking row.
+- Exposes `list_applied(&pool)` for observability and tests.
+
+Checksum drift detection is the guarantee that `sqlx::migrate!`
+provides for free and that hand-rolled runners most often lose.
+Phase 2 catches it with one extra `SELECT checksum` per migration
+per startup — negligible cost for the safety it buys.
+
+### Vector dimension is migration-bound
+
+**Decision C** (locked in during the Phase 2 brainstorm) hardcodes
+`dim=1024` into every `vector(...)` literal in
+`migrations/pgvector/000[234]_*.sql`. This matches the default
+quality-tier embedding provider (BGE-large-en-v1.5). The backend
+constructor reads `EmbeddingProvider::dimensions()` and refuses to
+start if the live provider reports a different dim — **you cannot
+silently swap embedding providers and keep the schema.**
+
+Reasons this is a feature, not a limitation:
+
+1. Changing an embedding provider changes the vector space. Even
+   if the dim matched, re-using old vectors with a new provider
+   produces semantically incoherent search results. Forcing a
+   schema migration makes the rebuild deliberate.
+2. Phase 4 (combined Postgres+pgvector) will want migration-managed
+   schemas for transactional consistency between state writes and
+   vector writes. Starting Phase 2 with migration tracking means
+   Phase 4 doesn't have to retrofit it.
+3. If operators need multi-dim support later, that's a new
+   migration file (`0006_reshape_chunks_dim.sql`) with a documented
+   downtime step — not a silent config toggle.
+
+### HNSW tuning
+
+Phase 2 ships HNSW indexes with `m = 16` and `ef_construction = 100`
+baked into the migration SQL. These are the pgvector defaults and
+the Qdrant defaults — a safe starting point for corpora up to
+~10 million chunks on 1024-dim vectors.
+
+**Three tunables, three ownership models:**
+
+| Parameter | When applied | How to change |
+|---|---|---|
+| `hnsw_m` (graph connectivity) | Migration time, in `CREATE INDEX ... WITH (m = 16, ef_construction = 100)` | DROP INDEX + CREATE INDEX with new value. Config field exists in `[vector.pgvector]` but only takes effect on a fresh schema. |
+| `hnsw_ef_construction` (build quality) | Migration time, same as `m` | Same DROP + CREATE recipe. |
+| `hnsw_ef_search` (query-time recall) | **Per-query** via `SET LOCAL hnsw.ef_search = N` inside the transaction wrapping the `SELECT ... ORDER BY dense_vector <=> $1`. | Change the config field in `[vector.pgvector]` and restart the broker. No DDL required. |
+
+The per-query `SET LOCAL` approach keeps `ef_search` scoped to the
+current transaction — important because pgvector treats it as a
+session GUC that otherwise leaks to other users of the same pool
+connection after it's returned.
+
+**Manual retune recipe** for `m` / `ef_construction`:
+
+```sql
+-- Inside `psql`, connected as the schema owner:
+BEGIN;
+DROP INDEX the_one.chunks_dense_hnsw;
+CREATE INDEX chunks_dense_hnsw
+    ON the_one.chunks
+    USING hnsw (dense_vector vector_cosine_ops)
+    WITH (m = 32, ef_construction = 200);  -- your new tuning
+COMMIT;
+```
+
+Running this on a large index is minutes-to-hours depending on
+row count and will block INSERTs; plan for it during a
+maintenance window.
+
+### HNSW vs IVFFlat
+
+pgvector supports two index types: HNSW (default, higher recall)
+and IVFFlat (lower memory, worse recall on small datasets). Phase 2
+ships HNSW only because:
+
+- **Recall matters more than memory** at the-one-mcp scale — even
+  a "big" codebase is < 10M chunks, well inside HNSW's sweet spot.
+- **IVFFlat needs a pre-built trained list** — you seed it with a
+  sample of vectors, which complicates the zero-setup deployment
+  story. HNSW builds incrementally.
+- **Operators who genuinely need IVFFlat** can swap the index
+  manually (DROP INDEX + CREATE INDEX USING ivfflat). The broker
+  never inspects the index type, only the column type, so this
+  works without a binary rebuild.
+
+### sqlx connection pool sizing
+
+`VectorPgvectorConfig` exposes five pool fields with defaults
+aimed at managed-Postgres deployments:
+
+| Field | Default | Rationale |
+|---|---|---|
+| `max_connections` | 10 | Same as sqlx's default. Bumps up for high-QPS broker instances. |
+| `min_connections` | **2** | **Non-zero**. sqlx's default 0 means the first query after a restart pays full TCP + TLS + auth handshake latency (100–300 ms on RDS). Keeping 2 connections warm pays ≈ 2 × handshake once at startup in exchange for no cold-start tail latency. |
+| `acquire_timeout_ms` | 30_000 | How long a broker handler waits for a free connection. 30s is aggressive-but-not-insane; tune down on latency-sensitive setups. |
+| `idle_timeout_ms` | 600_000 | 10 min. Idle connections get reaped so long-idle broker instances don't hold pool slots indefinitely. |
+| `max_lifetime_ms` | **1_800_000** | 30 min. **Non-infinite**. Forces periodic reconnect to pick up: IAM credential rotation (AWS RDS dynamic secrets), Vault lease expiry, PGBouncer reshards, upstream load-balancer connection draining. sqlx's default `None` is fine for dev, wrong for production. |
+
+### Monitoring queries
+
+Three useful queries when diagnosing pgvector performance:
+
+```sql
+-- How big is the HNSW index? (Rule of thumb: bytes ≈ 4 * dim * rows * m / 2.)
+SELECT pg_size_pretty(pg_relation_size('the_one.chunks_dense_hnsw'));
+
+-- How many chunks per project?
+SELECT project_id, count(*) FROM the_one.chunks GROUP BY project_id ORDER BY count(*) DESC;
+
+-- Is a query hitting the HNSW index?
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT id, (1 - (dense_vector <=> '[0.1, 0.2, ...]'::vector)) AS score
+FROM the_one.chunks
+ORDER BY dense_vector <=> '[0.1, 0.2, ...]'::vector
+LIMIT 10;
+```
+
+The `EXPLAIN` output should contain `Index Scan using chunks_dense_hnsw`
+— if it shows `Seq Scan` instead, the query isn't routing through
+the index (common causes: missing `ORDER BY distance_op`, missing
+`LIMIT`, or the index not yet built).
+
+### Running the bench
+
+```bash
+# 1. Start pgvector-enabled Postgres:
+docker run --rm -d --name pgvector-bench \
+    -e POSTGRES_PASSWORD=pw -e POSTGRES_DB=bench \
+    -p 55432:5432 ankane/pgvector
+
+# 2. Run the bench in release mode:
+THE_ONE_VECTOR_TYPE=pgvector \
+THE_ONE_VECTOR_URL=postgres://postgres:pw@localhost:55432/bench \
+cargo run --release --example pgvector_bench \
+    -p the-one-memory --features pg-vectors
+```
+
+The bench prints chunk upsert throughput at batch sizes 50/200/1000
+and dense search latency percentiles (p50/p95/p99) over 100
+queries. Results go to the Phase 2 commit message body.
+
+### Migration from Qdrant
+
+**Not automated in Phase 2.** Switching from Qdrant to pgvector
+requires re-ingesting every source document against the pgvector
+backend — there's no "dump Qdrant + load pgvector" tooling, and
+there won't be, because the two backends use different internal
+representations and the reprocessing path is the same as a fresh
+ingest.
+
+Steps:
+
+1. Stand up a Postgres instance with pgvector extension installed
+   (see § above).
+2. Export the operator config: `THE_ONE_VECTOR_TYPE=pgvector` and
+   `THE_ONE_VECTOR_URL=<dsn>`.
+3. Restart the broker. It boots against the new backend, which
+   applies migrations on first connect.
+4. Re-run `project.init` on every project to trigger re-ingest
+   against the new backend. Qdrant data is left untouched — you
+   can delete the collection manually once you're confident the
+   pgvector backend is good.
+
+---
+
 ## 16. v0.16.0-rc1 — Phase A trait extraction
 
 Released alongside v0.15.1 as the architectural unlock for

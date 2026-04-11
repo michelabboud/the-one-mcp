@@ -21,6 +21,21 @@
 //!
 //! The benchmark uses a throwaway tempdir SQLite DB so it's safe to run
 //! anywhere. Expected runtime: ~10s in release mode, ~60s in debug.
+//!
+//! # See also (v0.16.0 Phase 2)
+//!
+//! The pgvector backend has its own throughput/latency bench at
+//! `crates/the-one-memory/examples/pgvector_bench.rs`. It lives in
+//! `the-one-memory` because `the-one-core` deliberately does not
+//! depend on the vector crate (the dependency arrow points the other
+//! way). Run it with:
+//!
+//! ```bash
+//! THE_ONE_VECTOR_TYPE=pgvector \
+//! THE_ONE_VECTOR_URL=postgres://... \
+//! cargo run --release --example pgvector_bench \
+//!     -p the-one-memory --features pg-vectors
+//! ```
 
 use std::collections::HashSet;
 use std::time::Instant;

@@ -8,7 +8,8 @@ use tokio::sync::RwLock;
 use tracing::instrument;
 
 use the_one_core::config::{
-    update_project_config, AppConfig, NanoProviderKind, ProjectConfigUpdate, RuntimeOverrides,
+    update_project_config, AppConfig, BackendSelection, NanoProviderKind, ProjectConfigUpdate,
+    RuntimeOverrides, VectorTypeChoice,
 };
 use the_one_core::contracts::{
     AaakCompressionResult, AaakLesson, AaakPattern, AaakTeachOutcome, ApprovalScope, Capability,
@@ -99,6 +100,13 @@ pub struct McpBroker {
     /// a fresh `ProjectDatabase` connection on every broker method call.
     /// See [`StateStoreCacheEntry`] for the concurrency rationale.
     state_by_project: RwLock<HashMap<String, StateStoreCacheEntry>>,
+    /// v0.16.0 Phase 2 — parsed once at broker construction from the
+    /// four `THE_ONE_{STATE,VECTOR}_{TYPE,URL}` env vars. Every
+    /// factory call site reads this instead of re-parsing the env
+    /// on every request. Panic path: if `BackendSelection::from_env`
+    /// fails at construction time the broker refuses to boot with
+    /// `InvalidProjectConfig` — see `try_new_with_policy`.
+    backend_selection: BackendSelection,
     global_registry_path: Option<PathBuf>,
     policy: PolicyEngine,
     session_approvals: RwLock<HashSet<String>>,
@@ -154,6 +162,41 @@ impl McpBroker {
     }
 
     pub fn new_with_policy(policy: PolicyEngine) -> Self {
+        // v0.16.0 Phase 2: parse the backend-selection env vars once
+        // at construction. `new_with_policy` is sync and infallible
+        // by its existing signature, so parser failures fall back to
+        // the sqlite+qdrant default with a `tracing::error` — the
+        // broker still boots but every backend-specific branch will
+        // see the default and route through Qdrant. Operators who
+        // want fail-loud startup should call `try_new_with_policy`
+        // instead (added below).
+        let backend_selection = match BackendSelection::from_env() {
+            Ok(sel) => sel,
+            Err(err) => {
+                tracing::error!(
+                    target: "the_one_mcp::broker",
+                    error = %err,
+                    "BackendSelection::from_env failed at broker construction; falling back to \
+                     sqlite + qdrant default. Use `McpBroker::try_new_with_policy` for \
+                     fail-loud startup."
+                );
+                BackendSelection::default_sqlite_qdrant()
+            }
+        };
+        Self::with_resolved_selection(policy, backend_selection)
+    }
+
+    /// v0.16.0 Phase 2 — fail-loud construction. Returns
+    /// `InvalidProjectConfig` if the backend selection env vars are
+    /// inconsistent. Callers (notably `bin/the-one-mcp.rs`) should
+    /// prefer this over `new_with_policy` so misconfigurations
+    /// surface before the broker starts accepting traffic.
+    pub fn try_new_with_policy(policy: PolicyEngine) -> Result<Self, CoreError> {
+        let backend_selection = BackendSelection::from_env()?;
+        Ok(Self::with_resolved_selection(policy, backend_selection))
+    }
+
+    fn with_resolved_selection(policy: PolicyEngine, backend_selection: BackendSelection) -> Self {
         let (registry, global_registry_path) = match CapabilityRegistry::default_catalog_path() {
             Ok(path) => {
                 let registry = CapabilityRegistry::load_from_path(&path).unwrap_or_default();
@@ -168,6 +211,7 @@ impl McpBroker {
             memory_by_project: Arc::new(RwLock::new(HashMap::new())),
             docs_by_project: RwLock::new(HashMap::new()),
             state_by_project: RwLock::new(HashMap::new()),
+            backend_selection,
             global_registry_path,
             policy,
             session_approvals: RwLock::new(HashSet::new()),
@@ -347,6 +391,18 @@ impl McpBroker {
 
         let max_chunk_tokens = config.limits.max_chunk_tokens;
         let vector_backend = config.vector_backend.to_ascii_lowercase();
+
+        // v0.16.0 Phase 2 — pgvector fast path. When the parsed
+        // `BackendSelection` (from `THE_ONE_VECTOR_TYPE=pgvector` at
+        // broker startup) says pgvector, route through the new
+        // constructor and short-circuit the legacy Qdrant/Redis
+        // branching below. Keeps the legacy `config.vector_backend`
+        // field as the default when the env var is unset.
+        if self.backend_selection.vector == VectorTypeChoice::Pgvector {
+            return self
+                .build_pgvector_memory_engine(&config, project_id, max_chunk_tokens)
+                .await;
+        }
 
         let mut engine = if vector_backend == "redis" {
             let redis_url = config.redis_url.as_deref().ok_or_else(|| {
@@ -547,6 +603,178 @@ impl McpBroker {
         }
 
         Ok(engine)
+    }
+
+    /// v0.16.0 Phase 2 — build a `MemoryEngine` backed by pgvector.
+    ///
+    /// Only reachable when the broker was started with
+    /// `THE_ONE_VECTOR_TYPE=pgvector` + `THE_ONE_VECTOR_URL=<dsn>`.
+    /// The URL comes from the parsed `BackendSelection` (not
+    /// `config.json`) because connection strings carry credentials.
+    /// All non-secret tuning (HNSW, pool sizing, schema name) reads
+    /// from `config.vector_pgvector` populated via the standard
+    /// 5-layer config stack.
+    ///
+    /// When `pg-vectors` is NOT compiled in, this method returns
+    /// `InvalidProjectConfig` immediately — the operator asked for
+    /// a backend this binary doesn't ship.
+    async fn build_pgvector_memory_engine(
+        &self,
+        config: &AppConfig,
+        project_id: &str,
+        max_chunk_tokens: usize,
+    ) -> Result<MemoryEngine, CoreError> {
+        #[cfg(not(feature = "pg-vectors"))]
+        {
+            let _ = (config, project_id, max_chunk_tokens);
+            Err(CoreError::InvalidProjectConfig(
+                "THE_ONE_VECTOR_TYPE=pgvector requires the `pg-vectors` Cargo feature; this \
+                 binary was built without it. Rebuild with `--features pg-vectors` or unset \
+                 THE_ONE_VECTOR_TYPE to use the default Qdrant backend."
+                    .to_string(),
+            ))
+        }
+
+        #[cfg(feature = "pg-vectors")]
+        {
+            let url = self
+                .backend_selection
+                .vector_url
+                .as_deref()
+                .ok_or_else(|| {
+                    CoreError::InvalidProjectConfig(
+                        "THE_ONE_VECTOR_TYPE=pgvector requires THE_ONE_VECTOR_URL to be set"
+                            .to_string(),
+                    )
+                })?;
+
+            // Mirror the config's flat `VectorPgvectorConfig` into
+            // the memory crate's `PgVectorConfig` — the two structs
+            // are deliberately parallel so the memory crate doesn't
+            // need to depend on core's config module. Any drift
+            // between the two is caught at compile time because
+            // every field is explicitly assigned here.
+            let pg_config = the_one_memory::pg_vector::PgVectorConfig {
+                schema: config.vector_pgvector.schema.clone(),
+                hnsw_m: config.vector_pgvector.hnsw_m,
+                hnsw_ef_construction: config.vector_pgvector.hnsw_ef_construction,
+                hnsw_ef_search: config.vector_pgvector.hnsw_ef_search,
+                max_connections: config.vector_pgvector.max_connections,
+                min_connections: config.vector_pgvector.min_connections,
+                acquire_timeout_ms: config.vector_pgvector.acquire_timeout_ms,
+                idle_timeout_ms: config.vector_pgvector.idle_timeout_ms,
+                max_lifetime_ms: config.vector_pgvector.max_lifetime_ms,
+            };
+
+            let mut engine = if config.embedding_provider == "api" {
+                // API embeddings + pgvector. No local-embeddings
+                // feature required.
+                MemoryEngine::new_api_with_pgvector(
+                    the_one_memory::ApiEngineConfig {
+                        embedding_base_url: config.embedding_api_base_url.as_deref().unwrap_or(""),
+                        embedding_api_key: config.embedding_api_key.as_deref(),
+                        embedding_model: &config.embedding_model,
+                        embedding_dims: config.embedding_dimensions,
+                        // Qdrant URL + options are unused on the
+                        // pgvector path but `ApiEngineConfig` carries
+                        // them. Pass empty placeholders.
+                        qdrant_url: "",
+                        project_id,
+                        qdrant_options: the_one_memory::qdrant::QdrantOptions {
+                            api_key: None,
+                            ca_cert_path: None,
+                            tls_insecure: false,
+                        },
+                        max_chunk_tokens,
+                    },
+                    &pg_config,
+                    url,
+                )
+                .await
+                .map_err(CoreError::Embedding)?
+            } else {
+                // Local fastembed + pgvector. Gated on both
+                // `local-embeddings` AND `pg-vectors`.
+                #[cfg(feature = "local-embeddings")]
+                {
+                    MemoryEngine::new_with_pgvector(
+                        &config.embedding_model,
+                        max_chunk_tokens,
+                        &pg_config,
+                        url,
+                        project_id,
+                    )
+                    .await
+                    .map_err(CoreError::Embedding)?
+                }
+                #[cfg(not(feature = "local-embeddings"))]
+                {
+                    return Err(CoreError::Embedding(
+                        "pgvector + local embeddings requires both `pg-vectors` and \
+                         `local-embeddings` Cargo features; rebuild the broker with \
+                         `--features pg-vectors,local-embeddings` or set \
+                         embedding_provider=\"api\" in config.json"
+                            .to_string(),
+                    ));
+                }
+            };
+
+            engine.set_project_id(project_id.to_string());
+
+            // Mirror the legacy build_memory_engine post-setup:
+            // reranker, sparse provider, knowledge graph. These are
+            // backend-agnostic so they attach the same way.
+            #[cfg(feature = "local-embeddings")]
+            if config.reranker_enabled {
+                match the_one_memory::reranker::FastEmbedReranker::new(&config.reranker_model) {
+                    Ok(reranker) => {
+                        tracing::info!(
+                            "reranker enabled: {} (model: {})",
+                            reranker.name(),
+                            config.reranker_model
+                        );
+                        engine.set_reranker(Box::new(reranker));
+                    }
+                    Err(e) => {
+                        tracing::warn!("failed to init reranker, continuing without: {e}");
+                    }
+                }
+            }
+
+            if config.hybrid_search_enabled {
+                // Hybrid search on pgvector is Decision D (deferred).
+                // The trait's default `search_chunks_hybrid` returns
+                // Err so the caller falls back to dense-only search.
+                // Log a warning so the operator knows hybrid config
+                // is being ignored on this backend.
+                tracing::warn!(
+                    target: "the_one_mcp::broker",
+                    "hybrid_search_enabled=true but pgvector hybrid semantics are deferred to \
+                     Phase 2.5 (Decision D); search_chunks will use dense-only path"
+                );
+            }
+
+            let graph_path = config.project_state_dir.join("knowledge_graph.json");
+            match the_one_memory::graph::KnowledgeGraph::load_from_file(&graph_path) {
+                Ok(graph) => {
+                    let entity_count = graph.entity_count();
+                    let relation_count = graph.relation_count();
+                    if entity_count > 0 {
+                        tracing::info!(
+                            "loaded knowledge graph: {} entities, {} relations",
+                            entity_count,
+                            relation_count
+                        );
+                    }
+                    *engine.graph_mut() = graph;
+                }
+                Err(e) => {
+                    tracing::warn!("failed to load knowledge graph: {e}");
+                }
+            }
+
+            Ok(engine)
+        }
     }
 
     fn resolve_request_path(project_root: &Path, raw_path: &str) -> PathBuf {

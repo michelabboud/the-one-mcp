@@ -42,6 +42,8 @@ pub mod image_ingest;
 pub mod models_registry;
 pub mod ocr;
 pub mod palace;
+#[cfg(feature = "pg-vectors")]
+pub mod pg_vector;
 pub mod qdrant;
 #[cfg(feature = "redis-vectors")]
 pub mod redis_vectors;
@@ -260,6 +262,62 @@ impl MemoryEngine {
             Box::new(provider),
             Some(Box::new(qdrant)),
             config.max_chunk_tokens,
+        ))
+    }
+
+    /// v0.16.0 Phase 2 — fastembed local embeddings + pgvector backend.
+    ///
+    /// Gated on both `local-embeddings` and `pg-vectors`. The pgvector
+    /// constructor takes a `&dyn EmbeddingProvider` to verify the
+    /// live dim matches the migration-baked dim (1024 per Decision C).
+    /// We construct the provider first, let the backend borrow it for
+    /// the preflight check, then transfer ownership into the engine
+    /// via `new_with_backend`.
+    #[cfg(all(feature = "local-embeddings", feature = "pg-vectors"))]
+    pub async fn new_with_pgvector(
+        model_name: &str,
+        max_chunk_tokens: usize,
+        config: &crate::pg_vector::PgVectorConfig,
+        url: &str,
+        project_id: &str,
+    ) -> Result<Self, String> {
+        let provider = crate::embeddings::FastEmbedProvider::new(model_name)?;
+        let backend =
+            crate::pg_vector::PgVectorBackend::new(config, url, project_id, &provider).await?;
+        Ok(Self::new_with_backend(
+            Box::new(provider),
+            Some(Box::new(backend)),
+            max_chunk_tokens,
+        ))
+    }
+
+    /// v0.16.0 Phase 2 — API embeddings + pgvector backend.
+    ///
+    /// Operators using an OpenAI-compatible embedding API get the same
+    /// pgvector path — no local-embeddings dependency required.
+    #[cfg(feature = "pg-vectors")]
+    pub async fn new_api_with_pgvector(
+        api_config: ApiEngineConfig<'_>,
+        pg_config: &crate::pg_vector::PgVectorConfig,
+        pg_url: &str,
+    ) -> Result<Self, String> {
+        let provider = crate::embeddings::ApiEmbeddingProvider::new(
+            api_config.embedding_base_url,
+            api_config.embedding_api_key,
+            api_config.embedding_model,
+            api_config.embedding_dims,
+        );
+        let backend = crate::pg_vector::PgVectorBackend::new(
+            pg_config,
+            pg_url,
+            api_config.project_id,
+            &provider,
+        )
+        .await?;
+        Ok(Self::new_with_backend(
+            Box::new(provider),
+            Some(Box::new(backend)),
+            api_config.max_chunk_tokens,
         ))
     }
 

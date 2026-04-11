@@ -8,6 +8,13 @@ use serde::{Deserialize, Serialize};
 use crate::error::CoreError;
 use crate::limits::ConfigurableLimits;
 
+// v0.16.0 Phase 2 — backend selection env var parser. Lives in a
+// submodule file `config/backend_selection.rs` per the Phase 2 plan's
+// "new submodule of `the_one_core::config`" direction.
+pub mod backend_selection;
+
+pub use backend_selection::{BackendSelection, StateTypeChoice, VectorTypeChoice};
+
 const DEFAULT_PROVIDER: &str = "local";
 const DEFAULT_LOG_LEVEL: &str = "info";
 const DEFAULT_QDRANT_URL: &str = "http://127.0.0.1:6334";
@@ -35,6 +42,152 @@ const DEFAULT_MEMORY_PALACE_HOOKS_ENABLED: bool = false;
 const DEFAULT_MEMORY_PALACE_AAAK_ENABLED: bool = false;
 const DEFAULT_MEMORY_PALACE_DIARY_ENABLED: bool = false;
 const DEFAULT_MEMORY_PALACE_NAVIGATION_ENABLED: bool = false;
+
+// ── v0.16.0 Phase 2 pgvector defaults ────────────────────────────────
+//
+// Every field on `VectorPgvectorConfig` has a serde `default = "..."`
+// pointing at one of these constants. Splitting the literals into
+// constants keeps the defaults greppable and lets tests assert against
+// the same values the serde derive uses.
+const DEFAULT_PGVECTOR_SCHEMA: &str = "the_one";
+const DEFAULT_PGVECTOR_HNSW_M: i32 = 16;
+const DEFAULT_PGVECTOR_HNSW_EF_CONSTRUCTION: i32 = 100;
+const DEFAULT_PGVECTOR_HNSW_EF_SEARCH: i32 = 40;
+const DEFAULT_PGVECTOR_MAX_CONNECTIONS: u32 = 10;
+// Non-zero so the first query after a broker restart doesn't pay full
+// TCP + TLS + auth handshake latency. Two connections kept warm on
+// managed Postgres (RDS, Cloud SQL, Azure, Supabase) is a cheap
+// insurance policy against cold-start tail latency.
+const DEFAULT_PGVECTOR_MIN_CONNECTIONS: u32 = 2;
+const DEFAULT_PGVECTOR_ACQUIRE_TIMEOUT_MS: u64 = 30_000;
+const DEFAULT_PGVECTOR_IDLE_TIMEOUT_MS: u64 = 600_000;
+// 30 min lifetime forces periodic reconnect to pick up IAM credential
+// rotation (AWS RDS), dynamic secrets (Vault), PGBouncer reshards.
+// Unlimited lifetime is fine for dev, wrong for production.
+const DEFAULT_PGVECTOR_MAX_LIFETIME_MS: u64 = 1_800_000;
+
+fn default_pgvector_schema() -> String {
+    DEFAULT_PGVECTOR_SCHEMA.to_string()
+}
+fn default_pgvector_hnsw_m() -> i32 {
+    DEFAULT_PGVECTOR_HNSW_M
+}
+fn default_pgvector_hnsw_ef_construction() -> i32 {
+    DEFAULT_PGVECTOR_HNSW_EF_CONSTRUCTION
+}
+fn default_pgvector_hnsw_ef_search() -> i32 {
+    DEFAULT_PGVECTOR_HNSW_EF_SEARCH
+}
+fn default_pgvector_max_connections() -> u32 {
+    DEFAULT_PGVECTOR_MAX_CONNECTIONS
+}
+fn default_pgvector_min_connections() -> u32 {
+    DEFAULT_PGVECTOR_MIN_CONNECTIONS
+}
+fn default_pgvector_acquire_timeout_ms() -> u64 {
+    DEFAULT_PGVECTOR_ACQUIRE_TIMEOUT_MS
+}
+fn default_pgvector_idle_timeout_ms() -> u64 {
+    DEFAULT_PGVECTOR_IDLE_TIMEOUT_MS
+}
+fn default_pgvector_max_lifetime_ms() -> u64 {
+    DEFAULT_PGVECTOR_MAX_LIFETIME_MS
+}
+
+/// Tuning knobs for the pgvector backend (v0.16.0 Phase 2).
+///
+/// Secrets live in env vars (`THE_ONE_VECTOR_URL`) per § 1 of the
+/// backend selection scheme. This struct holds everything else: schema
+/// name, HNSW parameters, and sqlx pool sizing.
+///
+/// Every field has a serde `default = "..."` so operators can override
+/// a subset without having to write the whole block. Missing file
+/// entirely → every field uses the default.
+///
+/// ## HNSW tunables and migration boundaries
+///
+/// `hnsw_m` and `hnsw_ef_construction` are **migration-time** settings
+/// — they're baked into the index at `CREATE INDEX` time and can only
+/// be changed by DROP + CREATE. Setting these fields on an existing
+/// install has NO effect on the live index; the operator has to run
+/// the DROP INDEX / CREATE INDEX manually. Documented in
+/// `docs/guides/production-hardening-v0.15.md` § 15.
+///
+/// `hnsw_ef_search` is the only runtime-tunable HNSW parameter —
+/// applied per-transaction via `SET LOCAL hnsw.ef_search` on every
+/// search query in `PgVectorBackend`.
+///
+/// ## Pool sizing rationale
+///
+/// sqlx's library defaults are dev-friendly but production-wrong:
+/// - `min_connections = 0` → first query pays full handshake latency
+/// - `max_lifetime = None` → IAM credential rotation never takes effect
+/// - `idle_timeout = None` → idle connections linger forever
+///
+/// The defaults below (min=2, max_lifetime=30min, idle_timeout=10min)
+/// are deliberately opinionated for managed-Postgres deployments.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct VectorPgvectorConfig {
+    /// Schema name the migrations write into. Defaults to `the_one`.
+    /// Changing this field at runtime only affects NEW installs —
+    /// the migration SQL hardcodes `the_one` and cross-schema
+    /// migration is out of scope for Phase 2.
+    #[serde(default = "default_pgvector_schema")]
+    pub schema: String,
+
+    /// HNSW graph connectivity (m parameter). Migration-time only.
+    #[serde(default = "default_pgvector_hnsw_m")]
+    pub hnsw_m: i32,
+
+    /// HNSW build-time quality (ef_construction). Migration-time only.
+    #[serde(default = "default_pgvector_hnsw_ef_construction")]
+    pub hnsw_ef_construction: i32,
+
+    /// HNSW query-time recall (ef_search). Runtime-tunable — applied
+    /// per-query via `SET LOCAL hnsw.ef_search`.
+    #[serde(default = "default_pgvector_hnsw_ef_search")]
+    pub hnsw_ef_search: i32,
+
+    /// Max connections in the sqlx pool.
+    #[serde(default = "default_pgvector_max_connections")]
+    pub max_connections: u32,
+
+    /// Min connections held warm. Non-zero to avoid cold-start
+    /// handshake latency — see struct doc comment.
+    #[serde(default = "default_pgvector_min_connections")]
+    pub min_connections: u32,
+
+    /// Max milliseconds to wait for a free connection before erroring
+    /// out of a broker handler.
+    #[serde(default = "default_pgvector_acquire_timeout_ms")]
+    pub acquire_timeout_ms: u64,
+
+    /// Max milliseconds an idle connection lingers before being
+    /// closed.
+    #[serde(default = "default_pgvector_idle_timeout_ms")]
+    pub idle_timeout_ms: u64,
+
+    /// Max milliseconds any connection lives before being forcibly
+    /// recycled. Forces periodic reconnect for credential rotation.
+    #[serde(default = "default_pgvector_max_lifetime_ms")]
+    pub max_lifetime_ms: u64,
+}
+
+impl Default for VectorPgvectorConfig {
+    fn default() -> Self {
+        Self {
+            schema: default_pgvector_schema(),
+            hnsw_m: default_pgvector_hnsw_m(),
+            hnsw_ef_construction: default_pgvector_hnsw_ef_construction(),
+            hnsw_ef_search: default_pgvector_hnsw_ef_search(),
+            max_connections: default_pgvector_max_connections(),
+            min_connections: default_pgvector_min_connections(),
+            acquire_timeout_ms: default_pgvector_acquire_timeout_ms(),
+            idle_timeout_ms: default_pgvector_idle_timeout_ms(),
+            max_lifetime_ms: default_pgvector_max_lifetime_ms(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NanoProviderKind {
@@ -277,6 +430,10 @@ pub struct AppConfig {
     pub memory_palace_diary_enabled: bool,
     /// Enable drawers / closets / tunnels navigation primitives.
     pub memory_palace_navigation_enabled: bool,
+    /// v0.16.0 Phase 2 — pgvector backend tuning (schema, HNSW, pool
+    /// sizing). Always present with defaults filled in; operators
+    /// override via the `vector_pgvector` key in `config.json`.
+    pub vector_pgvector: VectorPgvectorConfig,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -322,6 +479,12 @@ struct FileConfig {
     memory_palace_aaak_enabled: Option<bool>,
     memory_palace_diary_enabled: Option<bool>,
     memory_palace_navigation_enabled: Option<bool>,
+    // v0.16.0 Phase 2 — pgvector tuning. Optional so operators who
+    // never configure pgvector don't have to include an empty
+    // `vector_pgvector: {}` block in their `config.json`. The loader
+    // fills in `VectorPgvectorConfig::default()` when this field is
+    // `None`.
+    vector_pgvector: Option<VectorPgvectorConfig>,
 }
 
 impl AppConfig {
@@ -372,6 +535,12 @@ impl AppConfig {
             memory_palace_aaak_enabled: Some(DEFAULT_MEMORY_PALACE_AAAK_ENABLED),
             memory_palace_diary_enabled: Some(DEFAULT_MEMORY_PALACE_DIARY_ENABLED),
             memory_palace_navigation_enabled: Some(DEFAULT_MEMORY_PALACE_NAVIGATION_ENABLED),
+            // v0.16.0 Phase 2 — defaults get filled in at resolution
+            // time (see `vector_pgvector:` line in the `AppConfig`
+            // construction below). Start with `None` so the overlay
+            // / merge path correctly detects "operator-supplied" vs
+            // "use defaults."
+            vector_pgvector: None,
         };
 
         apply_file_layer(&global_state_dir.join("config.json"), &mut merged)?;
@@ -479,6 +648,11 @@ impl AppConfig {
             memory_palace_navigation_enabled: merged
                 .memory_palace_navigation_enabled
                 .unwrap_or(DEFAULT_MEMORY_PALACE_NAVIGATION_ENABLED),
+            // v0.16.0 Phase 2 — if the operator never supplied a
+            // `vector_pgvector` block, use the struct-level defaults.
+            // This keeps the AppConfig always-complete invariant:
+            // the field is never Option on the resolved config.
+            vector_pgvector: merged.vector_pgvector.unwrap_or_default(),
         })
     }
 }
@@ -1173,6 +1347,15 @@ fn merge(base: &mut FileConfig, overlay: FileConfig) {
     if overlay.memory_palace_navigation_enabled.is_some() {
         base.memory_palace_navigation_enabled = overlay.memory_palace_navigation_enabled;
     }
+    // v0.16.0 Phase 2 — pgvector tuning block. Whole-block overlay:
+    // if the project config declares `vector_pgvector`, it replaces
+    // the global config's entry wholesale. Partial field-level
+    // overlay is NOT supported — operators pick one layer to own the
+    // pgvector block. This matches how `nano_providers` / `limits`
+    // handle their sub-structs.
+    if overlay.vector_pgvector.is_some() {
+        base.vector_pgvector = overlay.vector_pgvector;
+    }
 }
 
 fn parse_bool_env(value: &str) -> Option<bool> {
@@ -1698,6 +1881,72 @@ mod tests {
             assert!(config.memory_palace_aaak_enabled);
             assert!(config.memory_palace_diary_enabled);
             assert!(config.memory_palace_navigation_enabled);
+        });
+    }
+
+    // v0.16.0 Phase 2 — pgvector config tests.
+
+    #[test]
+    fn pgvector_config_defaults_populate_when_block_omitted() {
+        // Operator never mentions `vector_pgvector` in config.json;
+        // AppConfig.vector_pgvector should still be populated with
+        // the production-sane defaults from `VectorPgvectorConfig::default()`.
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let project_root = temp.path().join("repo");
+        let global_state_dir = temp.path().join("global");
+        fs::create_dir_all(&project_root).expect("project root");
+        fs::create_dir_all(&global_state_dir).expect("global dir");
+        let global_home = global_state_dir.display().to_string();
+
+        temp_env::with_vars([("THE_ONE_HOME", Some(global_home.as_str()))], || {
+            let config =
+                AppConfig::load(&project_root, RuntimeOverrides::default()).expect("config load");
+            let pg = &config.vector_pgvector;
+            assert_eq!(pg.schema, "the_one");
+            assert_eq!(pg.hnsw_m, 16);
+            assert_eq!(pg.hnsw_ef_construction, 100);
+            assert_eq!(pg.hnsw_ef_search, 40);
+            assert_eq!(pg.max_connections, 10);
+            assert_eq!(pg.min_connections, 2);
+            assert_eq!(pg.acquire_timeout_ms, 30_000);
+            assert_eq!(pg.idle_timeout_ms, 600_000);
+            assert_eq!(pg.max_lifetime_ms, 1_800_000);
+        });
+    }
+
+    #[test]
+    fn pgvector_config_project_override_replaces_whole_block() {
+        // Operator supplies a partial `vector_pgvector` block in
+        // config.json. Every MISSING field uses the struct-level
+        // default via serde's `#[serde(default = "...")]`; every
+        // EXPLICIT field reflects the override.
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let project_root = temp.path().join("repo");
+        let project_state_dir = project_root.join(".the-one");
+        let global_state_dir = temp.path().join("global");
+        fs::create_dir_all(&project_state_dir).expect("project state");
+        fs::create_dir_all(&global_state_dir).expect("global dir");
+
+        // Operator overrides only `hnsw_ef_search` and `max_connections`;
+        // everything else should fall back to struct defaults.
+        fs::write(
+            project_state_dir.join("config.json"),
+            r#"{"vector_pgvector":{"hnsw_ef_search":80,"max_connections":25}}"#,
+        )
+        .expect("project config write");
+
+        let global_home = global_state_dir.display().to_string();
+        temp_env::with_vars([("THE_ONE_HOME", Some(global_home.as_str()))], || {
+            let config =
+                AppConfig::load(&project_root, RuntimeOverrides::default()).expect("config load");
+            let pg = &config.vector_pgvector;
+            // Overridden.
+            assert_eq!(pg.hnsw_ef_search, 80);
+            assert_eq!(pg.max_connections, 25);
+            // Defaulted.
+            assert_eq!(pg.schema, "the_one");
+            assert_eq!(pg.hnsw_m, 16);
+            assert_eq!(pg.min_connections, 2);
         });
     }
 }

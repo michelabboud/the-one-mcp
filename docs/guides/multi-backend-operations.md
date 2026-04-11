@@ -21,12 +21,12 @@ combination.
 
 ### Vector backends
 
-| Backend        | Status (v0.16.0-rc1) | Capabilities                        | Feature flag       |
-|----------------|----------------------|-------------------------------------|--------------------|
-| **Qdrant**     | First-class          | chunks, hybrid, entities, relations, images | default       |
-| **Redis-Vector** | Second-class        | chunks only (+ persistence check)   | `redis-vectors`    |
-| **pgvector**   | Planned (Phase B1)   | chunks, hybrid, entities, relations, images | `pg-vectors` (future) |
-| **In-memory**  | Fallback             | keyword search only                 | always available   |
+| Backend        | Status (v0.16.0-phase2) | Capabilities                                             | Feature flag       |
+|----------------|-------------------------|----------------------------------------------------------|--------------------|
+| **Qdrant**     | First-class             | chunks, hybrid, entities, relations, images              | default            |
+| **pgvector**   | **First-class (v0.16.0 Phase 2)** | chunks, entities, relations (hybrid = Decision D, deferred) | `pg-vectors`       |
+| **Redis-Vector** | Second-class          | chunks only (+ persistence check)                        | `redis-vectors`    |
+| **In-memory**  | Fallback                | keyword search only                                      | always available   |
 
 ### State store backends
 
@@ -82,22 +82,93 @@ Requirements:
   have AOF enabled (`appendonly yes`) or the broker refuses to start
   the memory engine for that project.
 
-### Planned: Postgres + pgvector (combined)
+### SQLite + pgvector (v0.16.0 Phase 2, split-pool)
+
+Operators running managed Postgres can use pgvector for vector
+storage while keeping the v0.15.x SQLite state store. This is the
+simplest pgvector deployment: no state migration, no combined-
+transaction semantics.
+
+Set the env vars (per § 1 of the backend selection scheme —
+secrets live in env, tuning in config.json):
+
+```bash
+export THE_ONE_VECTOR_TYPE=pgvector
+export THE_ONE_VECTOR_URL=postgres://user:password@db.internal:5432/the_one
+# STATE_TYPE/STATE_URL intentionally unset → defaults to sqlite
+```
+
+Then tune via `<project>/.the-one/config.json`:
 
 ```json
 {
-  "vector_backend": "pgvector",
-  "state_backend": "postgres",
-  "postgres_url": "postgres://user:pass@localhost/the_one",
-  "postgres_schema": "the_one",
-  "postgres_hnsw_m": 16,
-  "postgres_hnsw_ef_construction": 100
+  "vector_pgvector": {
+    "schema": "the_one",
+    "hnsw_m": 16,
+    "hnsw_ef_construction": 100,
+    "hnsw_ef_search": 40,
+    "max_connections": 10,
+    "min_connections": 2,
+    "acquire_timeout_ms": 30000,
+    "idle_timeout_ms": 600000,
+    "max_lifetime_ms": 1800000
+  }
 }
 ```
 
-When both `vector_backend` and `state_backend` point at the same
-Postgres instance, the broker will construct a single shared
-connection pool so state writes and vector writes commit atomically.
+Every field has a production-sane default — the block above is
+only needed if you want to override specific values. Rebuild the
+broker with `cargo build --release -p the-one-mcp --bin the-one-mcp
+--features pg-vectors` (the feature is off by default).
+
+**Startup sequence on first boot:**
+
+1. `BackendSelection::from_env` parses `THE_ONE_VECTOR_TYPE=pgvector`
+   + `THE_ONE_VECTOR_URL=...`. If either is missing or asymmetric
+   (only one side set), startup fails loud with a targeted error.
+2. `PgVectorBackend::new` opens the sqlx pool with the configured
+   min/max/lifetime settings.
+3. `preflight_vector_extension` checks `pg_extension` for the
+   `vector` extension. If absent and available, it runs
+   `CREATE EXTENSION`. If absent and unavailable, it refuses to
+   start with per-provider installation instructions (see
+   production-hardening-v0.15.md § 15).
+4. The hand-rolled migration runner applies
+   `migrations/pgvector/000[0-4]_*.sql` in order, tracking applied
+   versions in `the_one.pgvector_migrations` with SHA-256 checksums
+   for drift detection.
+5. The backend verifies `EmbeddingProvider::dimensions() == 1024`
+   (Decision C) — mismatched dim means wrong embedding provider
+   and refuses to start.
+
+**What you'll see in Postgres after boot:**
+
+```sql
+\dn the_one                              -- schema exists
+\dt the_one.*                            -- chunks, entities, relations, pgvector_migrations
+\di the_one.chunks_dense_hnsw            -- HNSW index present
+SELECT * FROM the_one.pgvector_migrations ORDER BY version;
+-- → 5 rows, versions 0..4, one SHA-256 checksum each
+```
+
+Everything else (search, upsert, delete-by-source-path) is
+transparent — the broker routes through the same `VectorBackend`
+trait calls the existing Qdrant path uses.
+
+### Planned: Postgres + pgvector (combined, Phase 4)
+
+```bash
+# Planned Phase 4:
+export THE_ONE_STATE_TYPE=postgres-combined
+export THE_ONE_STATE_URL=postgres://user:password@db.internal/the_one
+export THE_ONE_VECTOR_TYPE=postgres-combined
+export THE_ONE_VECTOR_URL=postgres://user:password@db.internal/the_one  # byte-identical
+```
+
+When both TYPEs are `postgres-combined` and the URLs match
+byte-for-byte, the broker constructs a single `sqlx::PgPool` that
+serves both `StateStore` and `VectorBackend` — writes to state
+and vectors can commit in one transaction. Available in Phase 4.
 
 ### Planned: Redis + RediSearch + AOF (combined)
 

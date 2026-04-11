@@ -290,7 +290,25 @@ Execute EVERYTHING. Do not stop at checkpoints unless you hit an actual blocker.
 
 ---
 
-### Phase 2 — pgvector VectorBackend + env var parser + startup validator
+### Phase 2 — DONE ☑ (pgvector VectorBackend + env var parser + startup validator)
+
+Landing in the commit tagged `v0.16.0-phase2`. Summary of what shipped vs what the original deliverable list called for:
+
+- **Decision B was narrowed** after `cargo check` bisection: the sqlx feature set dropped `migrate` and `chrono`. Both features transitively reference `sqlx-sqlite?/…` which cargo's `links` conflict check pulls into the resolution graph, colliding with `rusqlite 0.39`'s `libsqlite3-sys 0.37`. The bisection + full rationale lives in `crates/the-one-memory/Cargo.toml`'s `pg-vectors` feature comment. Replacement: a hand-rolled migration runner at `pg_vector::migrations` (~80 LOC) with `include_str!`-embedded SQL files, SHA-256 checksum drift detection, and a `the_one.pgvector_migrations` tracking table. `chrono` was deferred to Phase 3 where `PostgresStateStore` will need `TIMESTAMPTZ` — Phase 2's chunks use `BIGINT epoch_ms` throughout.
+- **Decision C** (hardcoded `dim=1024` per BGE-large-en-v1.5 quality tier) landed as-specified. Every migration `.sql` file has `vector(1024)` literals; the backend constructor refuses to start if `EmbeddingProvider::dimensions() != 1024`.
+- **Decision D** (hybrid search semantics: tsvector+GIN vs sparse-array rewrite) remains deferred. `PgVectorBackend::upsert_hybrid_chunks` returns `Err("…deferred to Phase 2.5")` and `capabilities().hybrid = false`. When the broker sees `hybrid_search_enabled=true` with pgvector active, it logs a warning and falls back to dense-only search. Phase 2.5 will land hybrid once benchmarks inform the α vs β choice.
+- **Image operations** were NOT implemented. The `VectorBackend` trait as landed in Phase A has no image methods (only chunks/hybrid/entities/relations/verify_persistence) — images go through separate standalone functions in `image_ingest.rs`. The Phase 2 prompt mentioned images in § 3's deliverable list; that was aspirational relative to the actual trait surface. No new images table in the pgvector schema.
+- **`config.json` vs `config.toml`**: the plan described the tuning section as TOML (`[vector.pgvector]`), but the existing config file is JSON (`config.json`). `VectorPgvectorConfig` lives as a nested `vector_pgvector` field on the flat `FileConfig` struct; operators override via `{"vector_pgvector": {...}}` in `config.json`. Semantic intent is identical to the plan's TOML layout.
+- **Test coverage shipped:**
+  - +12 in `the_one_core::config::backend_selection::tests` (8 negative + 4 positive controls, all `temp_env::with_vars` isolated)
+  - +2 in `the_one_core::config::tests::pgvector_config_*` (default round-trip + partial override)
+  - +5 in `the_one_memory::pg_vector::tests` (feature-gated pure-Rust: migration count, HNSW defaults, pool sizing defaults, schema name, dim constant)
+  - +8 in `the_one_memory/tests/pgvector_roundtrip.rs` (feature-gated + env-gated: bootstrap idempotence, chunk roundtrip, upsert idempotency, delete-by-source-path, entity roundtrip, relation roundtrip, provider-dim mismatch, migration tracking table contents)
+  - **Test count: 450 → 464 baseline (no pgvector feature), 450 → 469 with `--features pg-vectors`.** Both runs green across `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test --workspace`.
+
+**Original deliverables for reference (not re-executed):**
+
+### Phase 2 (original plan text) — pgvector VectorBackend + env var parser + startup validator
 
 **Scope:** ~800 LOC across new files + env var parser introduction.
 
