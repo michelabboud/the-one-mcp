@@ -7,6 +7,8 @@ asked what the concrete next actions look like in detail; this
 document is the answer, preserved so it can be reviewed and refined
 without re-deriving from chat.
 
+> **Status update (2026-04-11, post-bundling):** the "shipped but uncommitted" work described below committed as `5ff9872` in a single bundled commit covering v0.15.0 + v0.15.1 + v0.16.0-rc1. Phases B/C described here are superseded for execution purposes by `docs/plans/2026-04-11-resume-phase1-onwards.md`, which contains concrete LOC estimates, commit message templates, the four-var `THE_ONE_{STATE,VECTOR}_{TYPE,URL}` backend selection scheme, and fail-loud startup validation rules decided in a subsequent brainstorming session. This document remains as the historical expansion of the roadmap at the time of the post-v0.15.1 planning session; consult the resume plan for anything you intend to execute.
+
 ---
 
 ## Where we are right now

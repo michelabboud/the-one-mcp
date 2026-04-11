@@ -2,6 +2,26 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- New plan `docs/plans/2026-04-11-resume-phase1-onwards.md` — self-
+  contained execution plan for Phases 1–7 of the multi-backend roadmap
+  through v0.16.0 release. Supersedes the Phase B/C notes in
+  `2026-04-11-next-steps-expansion.md` with concrete LOC estimates,
+  dependency additions, commit message templates, and STOP-before-next-
+  phase discipline. Includes the backend selection scheme decided in
+  the 2026-04-11 brainstorming session: four-var
+  `THE_ONE_{STATE,VECTOR}_{TYPE,URL}` env surface for selection +
+  secrets, `config.toml` for per-backend tuning knobs, explicit
+  `postgres-combined`/`redis-combined` TYPE values instead of URL-
+  equality inference, fail-loud startup validation on asymmetric
+  specification, `{project_id}`-derived Redis prefix defaults for
+  automatic multi-tenant isolation, and a unified test/production env
+  surface (no `_TEST`-suffixed shadow vars). The file is self-marked
+  for deletion in the same commit that ships Phase 7 / v0.16.0 release.
+
 ## [0.16.0-rc1] - 2026-04-11
 
 Multi-backend architecture Phase A: trait extraction. Pure refactor,

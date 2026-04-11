@@ -1,10 +1,11 @@
 # Multi-Backend Architecture — Phase A (Combined A1 + A2)
 
 **Date:** 2026-04-11
-**Status:** In progress (implementing in same session).
+**Status:** Phase A complete — shipped in commit `5ff9872` as part of the bundled v0.15.0 + v0.15.1 + v0.16.0-rc1 release. Phases B/C (the actual backend implementations) are tracked as Phases 1–7 in the execution plan (see **Related** below).
 **Target release:** v0.16.0 (trait refactor, no behaviour change).
 **Supersedes:** the Phase A section of `2026-04-11-next-steps-expansion.md`
 which only covered the vector layer.
+**Related:** `docs/plans/2026-04-11-resume-phase1-onwards.md` — self-contained execution plan for Phases 1–7 (broker call-site migration through v0.16.0 release), including the four-var `THE_ONE_{STATE,VECTOR}_{TYPE,URL}` backend selection scheme, fail-loud startup validation, and the `postgres-combined` / `redis-combined` single-pool dispatch pattern decided in a subsequent brainstorming session.
 **Authorisation:** user selected option B ("plan A1 + A2 together and
 implement both today") in session 2026-04-11.
 
