@@ -261,25 +261,32 @@ The defaults in § 4 give automatic isolation across three dimensions without an
 
 Execute EVERYTHING. Do not stop at checkpoints unless you hit an actual blocker. Each phase MUST be fully tested + documented before the next phase starts. After each phase: STOP, report to me, wait for "continue" before moving on.
 
-### Phase 1 — Broker state store cache + call-site migration
+### Phase 1 — DONE ☑ (landed in commit `7666439`, tag `v0.16.0-phase1`)
 
-**Scope:** ~200 LOC mechanical refactor in `broker.rs`. Turns the existing `ProjectDatabase::open(...)` call sites (~18 of them) into trait dispatch through a broker-held cache.
+**Original scope:** ~200 LOC mechanical refactor in `broker.rs`. Turned the existing `ProjectDatabase::open(...)` call sites (16 of them — plan estimated ~18) into trait dispatch through a broker-held cache.
 
-**Deliverables:**
+**Actual shape of what landed:**
 
-- Add field to `McpBroker`:
-  ```rust
-  state_by_project: RwLock<HashMap<String, Arc<Mutex<Box<dyn StateStore + Send>>>>>
-  ```
-- New factory method `state_store_factory(project_root: &Path, project_id: &str) -> Result<Box<dyn StateStore + Send>, CoreError>`. Currently returns only `Box::new(SqliteStateStore::open(...)?)` but is structured so Phase 2 can add branches without touching call sites.
-- Replace every `let db = ProjectDatabase::open(project_root, project_id)?;` in `crates/the-one-mcp/src/broker.rs` with a helper `with_state_store(project_root, project_id, |store| ...)` that looks up / constructs / caches.
-- Add `McpBroker::shutdown()` that drains the cache and closes every connection cleanly. This is load-bearing for Phase 3+ because Postgres/Redis pools need explicit teardown.
-- All 449+ existing tests must still pass unchanged. This is a pure refactor.
-- New test: `broker_state_store_cache_reuses_connections` — verify that two back-to-back calls for the same `(project_root, project_id)` reuse the same cached store.
+- New field `McpBroker::state_by_project: RwLock<HashMap<String, Arc<std::sync::Mutex<Box<dyn StateStore + Send>>>>>` with a named type alias `StateStoreCacheEntry` carrying a load-bearing doc comment on the `std::sync::Mutex` choice.
+- New factory `state_store_factory(&self, project_root, project_id) -> Result<Box<dyn StateStore + Send>, CoreError>`. Today returns `Box::new(ProjectDatabase::open(...)?)`; `&self` is kept in the signature so Phase 2 can read the parsed `BackendSelection` enum without changing the call sites.
+- New private `get_or_init_state_store(...)` implements compute-if-absent with the construct-outside-write-lock pattern: fast path takes only a read lock + Arc clone, cold path constructs the new store outside the write lock then double-checks under it. This is forward-proofing for Phase 3+ where the factory becomes async (Postgres pool warm-up, Redis AOF verification) — without this pattern, concurrent cache-miss traffic for *different* projects would serialize through the factory call.
+- `with_state_store(&self, project_root, project_id, |store| Result<R, CoreError>) -> Result<R, CoreError>` is the single chokepoint. The closure is intentionally synchronous because the inner `std::sync::Mutex` guard is `!Send` — the compiler refuses to hold a backend connection across `.await`. That restriction is the forward-compatible anti-deadlock guard for Phase 3+ pools.
+- `pub async fn McpBroker::shutdown(&self)` drains the cache. Async today for Phase 3+ (when the trait grows a `shutdown(&self).await` method and combined-backend adapters need explicit teardown ordering).
+- Every `ProjectDatabase::open` call site in `broker.rs` is migrated. The only remaining reference is inside `state_store_factory` itself — by design.
+- **Two handlers were structurally reshaped** because they previously held `db` across `.await`:
+  - `memory_ingest_conversation`: existing-sources read pulled into an early `with_state_store` call; all post-ingest writes (conversation source, optional navigation sync, AAAK lessons, audit) bundled into **one** closure instead of four interleaved `db.method()` calls. The bundle is strictly better than the v0.15.x shape.
+  - `tool_run`: session-approvals check (tokio async `RwLock`) moved **before** entering the state-store closure; interactive/headless approval flow splits cleanly between async session mutation and sync DB persistence.
+- `sync_navigation_nodes_from_palace_metadata(&ProjectDatabase, ...)` → `&dyn StateStore` so the helper can be invoked through the closure. Un-listed in the original plan deliverables but necessary.
+- New test `broker_state_store_cache_reuses_connections` verifies:
+  - `Arc::ptr_eq` identity on repeated `get_or_init_state_store` for the same project
+  - Distinct projects get distinct entries
+  - `with_state_store` actually routes through the cached entry (via `store.project_id()` round-trip)
+  - `shutdown()` drains every cache entry cleanly
+  - Two separate project roots are used (a single `project_root` is bound to a single `project_id` by the init manifest — test caught this invariant the hard way)
 
-**Commit message:** `feat(mcp): broker state_by_project cache via StateStore trait`
+**Test count: 449 → 450** (+1 new, 0 regressions). `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings`, `bash scripts/release-gate.sh` all green. Release binary `target/release/the-one-mcp` builds cleanly.
 
-**STOP and report to me before starting Phase 2.**
+**Original commit message:** `feat(mcp): broker state_by_project cache via StateStore trait` — landed verbatim.
 
 ---
 

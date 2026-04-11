@@ -6,6 +6,31 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- **v0.16.0 Phase 1 — broker `state_by_project` cache via `StateStore`
+  trait** (commit `7666439`, tag `v0.16.0-phase1`). Mechanical refactor
+  landing the broker-side piece of the multi-backend roadmap: every
+  broker method that previously called `ProjectDatabase::open(...)`
+  inline (~16 call sites) now goes through a per-project cache of
+  `Box<dyn StateStore + Send>` values guarded by `std::sync::Mutex`.
+  New private helpers `state_store_factory`, `get_or_init_state_store`,
+  and `with_state_store` form the single chokepoint; new
+  `pub async fn McpBroker::shutdown()` drains the cache. The
+  `std::sync::Mutex` choice (not tokio) is deliberate — its guard is
+  `!Send`, so the compiler refuses to hold a backend connection across
+  `.await`, preventing the #1 Postgres/Redis pool deadlock pattern.
+  The `get_or_init_state_store` helper constructs new entries OUTSIDE
+  the outer write lock (double-checks under it) — load-bearing for
+  Phase 3+ when factories become async. Two handlers (`memory_ingest_
+  conversation`, `tool_run`) were restructured to move all DB writes
+  into one sync closure with async memory/session work happening
+  outside; both are strictly better than the v0.15.x interleaving.
+  `sync_navigation_nodes_from_palace_metadata` now takes `&dyn
+  StateStore` instead of `&ProjectDatabase`. New test
+  `broker_state_store_cache_reuses_connections` verifies `Arc::ptr_eq`
+  identity across repeated lookups, per-project isolation, and clean
+  `shutdown()` drain. Zero user-visible behaviour change; 449 → 450
+  passing workspace tests. Completes the call-site migration the
+  v0.16.0-rc1 release notes explicitly deferred.
 - New plan `docs/plans/2026-04-11-resume-phase1-onwards.md` — self-
   contained execution plan for Phases 1–7 of the multi-backend roadmap
   through v0.16.0 release. Supersedes the Phase B/C notes in
