@@ -43,6 +43,100 @@ const DEFAULT_MEMORY_PALACE_AAAK_ENABLED: bool = false;
 const DEFAULT_MEMORY_PALACE_DIARY_ENABLED: bool = false;
 const DEFAULT_MEMORY_PALACE_NAVIGATION_ENABLED: bool = false;
 
+// ── v0.16.0 Phase 3 Postgres state-store defaults ────────────────────
+//
+// Mirror of Phase 2's pgvector defaults in shape. The PostgresStateStore
+// backend shares sqlx's pool-sizing defaults with pgvector so combined
+// deployments (Phase 4 `postgres-combined`) land on one consistent
+// tuning surface instead of two subtly-different ones.
+
+const DEFAULT_POSTGRES_STATE_SCHEMA: &str = "the_one";
+const DEFAULT_POSTGRES_STATE_STATEMENT_TIMEOUT_MS: u64 = 30_000;
+const DEFAULT_POSTGRES_STATE_MAX_CONNECTIONS: u32 = 10;
+const DEFAULT_POSTGRES_STATE_MIN_CONNECTIONS: u32 = 2;
+const DEFAULT_POSTGRES_STATE_ACQUIRE_TIMEOUT_MS: u64 = 30_000;
+const DEFAULT_POSTGRES_STATE_IDLE_TIMEOUT_MS: u64 = 600_000;
+const DEFAULT_POSTGRES_STATE_MAX_LIFETIME_MS: u64 = 1_800_000;
+
+fn default_postgres_state_schema() -> String {
+    DEFAULT_POSTGRES_STATE_SCHEMA.to_string()
+}
+fn default_postgres_state_statement_timeout_ms() -> u64 {
+    DEFAULT_POSTGRES_STATE_STATEMENT_TIMEOUT_MS
+}
+fn default_postgres_state_max_connections() -> u32 {
+    DEFAULT_POSTGRES_STATE_MAX_CONNECTIONS
+}
+fn default_postgres_state_min_connections() -> u32 {
+    DEFAULT_POSTGRES_STATE_MIN_CONNECTIONS
+}
+fn default_postgres_state_acquire_timeout_ms() -> u64 {
+    DEFAULT_POSTGRES_STATE_ACQUIRE_TIMEOUT_MS
+}
+fn default_postgres_state_idle_timeout_ms() -> u64 {
+    DEFAULT_POSTGRES_STATE_IDLE_TIMEOUT_MS
+}
+fn default_postgres_state_max_lifetime_ms() -> u64 {
+    DEFAULT_POSTGRES_STATE_MAX_LIFETIME_MS
+}
+
+/// Tuning knobs for the PostgresStateStore backend (v0.16.0 Phase 3).
+///
+/// Secrets (DSN, credentials) live in the `THE_ONE_STATE_URL` env var
+/// per § 1 of the backend selection scheme. This struct carries
+/// everything else: schema name, statement timeout, and sqlx pool
+/// sizing. Field shapes parallel [`VectorPgvectorConfig`] so operators
+/// who already tuned the pgvector pool don't have to relearn the
+/// semantics for the state pool.
+///
+/// ## Statement timeout
+///
+/// `statement_timeout_ms` is applied per-connection via
+/// `SET statement_timeout = '<N>ms'` in sqlx's `after_connect` hook.
+/// Non-zero values enforce per-query wall-clock deadlines — important
+/// on managed Postgres where a runaway query can monopolize a
+/// connection slot. `0` disables the timeout (Postgres default).
+/// Default: 30_000 ms (30s) matches the pgvector acquire timeout so
+/// a query exhausting its statement budget and a handler exhausting
+/// its acquire budget fail at roughly the same moment under load.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct StatePostgresConfig {
+    #[serde(default = "default_postgres_state_schema")]
+    pub schema: String,
+
+    #[serde(default = "default_postgres_state_statement_timeout_ms")]
+    pub statement_timeout_ms: u64,
+
+    #[serde(default = "default_postgres_state_max_connections")]
+    pub max_connections: u32,
+
+    #[serde(default = "default_postgres_state_min_connections")]
+    pub min_connections: u32,
+
+    #[serde(default = "default_postgres_state_acquire_timeout_ms")]
+    pub acquire_timeout_ms: u64,
+
+    #[serde(default = "default_postgres_state_idle_timeout_ms")]
+    pub idle_timeout_ms: u64,
+
+    #[serde(default = "default_postgres_state_max_lifetime_ms")]
+    pub max_lifetime_ms: u64,
+}
+
+impl Default for StatePostgresConfig {
+    fn default() -> Self {
+        Self {
+            schema: default_postgres_state_schema(),
+            statement_timeout_ms: default_postgres_state_statement_timeout_ms(),
+            max_connections: default_postgres_state_max_connections(),
+            min_connections: default_postgres_state_min_connections(),
+            acquire_timeout_ms: default_postgres_state_acquire_timeout_ms(),
+            idle_timeout_ms: default_postgres_state_idle_timeout_ms(),
+            max_lifetime_ms: default_postgres_state_max_lifetime_ms(),
+        }
+    }
+}
+
 // ── v0.16.0 Phase 2 pgvector defaults ────────────────────────────────
 //
 // Every field on `VectorPgvectorConfig` has a serde `default = "..."`
@@ -434,6 +528,11 @@ pub struct AppConfig {
     /// sizing). Always present with defaults filled in; operators
     /// override via the `vector_pgvector` key in `config.json`.
     pub vector_pgvector: VectorPgvectorConfig,
+    /// v0.16.0 Phase 3 — PostgresStateStore backend tuning (schema,
+    /// statement timeout, pool sizing). Always present with defaults
+    /// filled in; operators override via the `state_postgres` key in
+    /// `config.json`.
+    pub state_postgres: StatePostgresConfig,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -485,6 +584,11 @@ struct FileConfig {
     // fills in `VectorPgvectorConfig::default()` when this field is
     // `None`.
     vector_pgvector: Option<VectorPgvectorConfig>,
+    // v0.16.0 Phase 3 — same pattern as `vector_pgvector`. Optional
+    // so operators who never configure the PostgresStateStore
+    // backend don't carry an empty block. Filled in from
+    // `StatePostgresConfig::default()` on resolution.
+    state_postgres: Option<StatePostgresConfig>,
 }
 
 impl AppConfig {
@@ -541,6 +645,8 @@ impl AppConfig {
             // / merge path correctly detects "operator-supplied" vs
             // "use defaults."
             vector_pgvector: None,
+            // v0.16.0 Phase 3 — same pattern as vector_pgvector.
+            state_postgres: None,
         };
 
         apply_file_layer(&global_state_dir.join("config.json"), &mut merged)?;
@@ -653,6 +759,8 @@ impl AppConfig {
             // This keeps the AppConfig always-complete invariant:
             // the field is never Option on the resolved config.
             vector_pgvector: merged.vector_pgvector.unwrap_or_default(),
+            // v0.16.0 Phase 3 — same treatment.
+            state_postgres: merged.state_postgres.unwrap_or_default(),
         })
     }
 }
@@ -1356,6 +1464,10 @@ fn merge(base: &mut FileConfig, overlay: FileConfig) {
     if overlay.vector_pgvector.is_some() {
         base.vector_pgvector = overlay.vector_pgvector;
     }
+    // v0.16.0 Phase 3 — same whole-block overlay semantics.
+    if overlay.state_postgres.is_some() {
+        base.state_postgres = overlay.state_postgres;
+    }
 }
 
 fn parse_bool_env(value: &str) -> Option<bool> {
@@ -1947,6 +2059,62 @@ mod tests {
             assert_eq!(pg.schema, "the_one");
             assert_eq!(pg.hnsw_m, 16);
             assert_eq!(pg.min_connections, 2);
+        });
+    }
+
+    // v0.16.0 Phase 3 — PostgresStateStore config tests (mirror of
+    // the pgvector ones above).
+
+    #[test]
+    fn postgres_state_config_defaults_populate_when_block_omitted() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let project_root = temp.path().join("repo");
+        let global_state_dir = temp.path().join("global");
+        fs::create_dir_all(&project_root).expect("project root");
+        fs::create_dir_all(&global_state_dir).expect("global dir");
+        let global_home = global_state_dir.display().to_string();
+
+        temp_env::with_vars([("THE_ONE_HOME", Some(global_home.as_str()))], || {
+            let config =
+                AppConfig::load(&project_root, RuntimeOverrides::default()).expect("config load");
+            let pg = &config.state_postgres;
+            assert_eq!(pg.schema, "the_one");
+            assert_eq!(pg.statement_timeout_ms, 30_000);
+            assert_eq!(pg.max_connections, 10);
+            assert_eq!(pg.min_connections, 2);
+            assert_eq!(pg.acquire_timeout_ms, 30_000);
+            assert_eq!(pg.idle_timeout_ms, 600_000);
+            assert_eq!(pg.max_lifetime_ms, 1_800_000);
+        });
+    }
+
+    #[test]
+    fn postgres_state_config_project_override_replaces_whole_block() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let project_root = temp.path().join("repo");
+        let project_state_dir = project_root.join(".the-one");
+        let global_state_dir = temp.path().join("global");
+        fs::create_dir_all(&project_state_dir).expect("project state");
+        fs::create_dir_all(&global_state_dir).expect("global dir");
+
+        fs::write(
+            project_state_dir.join("config.json"),
+            r#"{"state_postgres":{"statement_timeout_ms":0,"max_connections":50}}"#,
+        )
+        .expect("project config write");
+
+        let global_home = global_state_dir.display().to_string();
+        temp_env::with_vars([("THE_ONE_HOME", Some(global_home.as_str()))], || {
+            let config =
+                AppConfig::load(&project_root, RuntimeOverrides::default()).expect("config load");
+            let pg = &config.state_postgres;
+            // Overridden.
+            assert_eq!(pg.statement_timeout_ms, 0);
+            assert_eq!(pg.max_connections, 50);
+            // Defaulted.
+            assert_eq!(pg.schema, "the_one");
+            assert_eq!(pg.min_connections, 2);
+            assert_eq!(pg.idle_timeout_ms, 600_000);
         });
     }
 }

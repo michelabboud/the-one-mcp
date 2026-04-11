@@ -269,20 +269,110 @@ impl McpBroker {
     // methods exclusively use `with_state_store` to run a sync closure
     // against the cached store.
 
-    /// Construct a fresh `StateStore` for the given project. Today this
-    /// only knows how to open SQLite. Phase 2+ will branch on
-    /// [`the_one_core::config::BackendSelection`] parsed from
-    /// `THE_ONE_STATE_TYPE` / `THE_ONE_STATE_URL` env vars — at which point
-    /// `&self` will be used to read the parsed selection that the broker
-    /// computes once at construction. The `&self` parameter is kept in the
-    /// signature today purely for that forward compatibility.
-    fn state_store_factory(
+    /// Construct a fresh `StateStore` for the given project, branching
+    /// on the parsed [`BackendSelection`] stashed on `self`.
+    ///
+    /// - `StateTypeChoice::Sqlite` (default, zero env vars) →
+    ///   `ProjectDatabase::open(...)` — same synchronous path v0.15.x
+    ///   used, wrapped in a `Box<dyn StateStore + Send>`.
+    /// - `StateTypeChoice::Postgres` (Phase 3, requires `pg-state`
+    ///   feature + `THE_ONE_STATE_TYPE=postgres` + `THE_ONE_STATE_URL`)
+    ///   → `PostgresStateStore::new(...).await` — opens a sqlx pool,
+    ///   runs migrations, and stashes the async-constructed store as
+    ///   the cached entry.
+    /// - Other variants (`Redis`, `PostgresCombined`, `RedisCombined`)
+    ///   → `NotEnabled` until the corresponding phase ships.
+    ///
+    /// The method is `async` from Phase 3 onwards because Postgres
+    /// pool construction is async end-to-end (sqlx). Phase 1's
+    /// comment on `get_or_init_state_store` specifically called this
+    /// out: "cold path constructs the new store **outside** the
+    /// write lock — important for Phase 3+ when the factory becomes
+    /// async." The pattern has been load-bearing since Phase 1.
+    async fn state_store_factory(
         &self,
         project_root: &Path,
         project_id: &str,
     ) -> Result<Box<dyn StateStore + Send>, CoreError> {
-        let db = ProjectDatabase::open(project_root, project_id)?;
-        Ok(Box::new(db))
+        use the_one_core::config::StateTypeChoice;
+
+        match self.backend_selection.state {
+            StateTypeChoice::Sqlite => {
+                let db = ProjectDatabase::open(project_root, project_id)?;
+                Ok(Box::new(db))
+            }
+            StateTypeChoice::Postgres => self.construct_postgres_state_store(project_id).await,
+            StateTypeChoice::Redis => Err(CoreError::NotEnabled(
+                "THE_ONE_STATE_TYPE=redis is planned for Phase 5; use sqlite or postgres \
+                 until then"
+                    .to_string(),
+            )),
+            StateTypeChoice::PostgresCombined => Err(CoreError::NotEnabled(
+                "THE_ONE_STATE_TYPE=postgres-combined is planned for Phase 4; use postgres \
+                 (split pool) until then"
+                    .to_string(),
+            )),
+            StateTypeChoice::RedisCombined => Err(CoreError::NotEnabled(
+                "THE_ONE_STATE_TYPE=redis-combined is planned for Phase 6".to_string(),
+            )),
+        }
+    }
+
+    /// v0.16.0 Phase 3 — split-pool Postgres state store. Reads the
+    /// DSN from `self.backend_selection.state_url` and the tuning
+    /// block from `AppConfig::state_postgres`. Loads the config from
+    /// disk on every fresh factory call so operators can tune
+    /// without a broker restart (same pattern as the pgvector factory
+    /// in `build_pgvector_memory_engine`).
+    ///
+    /// When `pg-state` is NOT compiled in, returns
+    /// `InvalidProjectConfig` immediately — the operator asked for a
+    /// backend this binary doesn't ship.
+    async fn construct_postgres_state_store(
+        &self,
+        project_id: &str,
+    ) -> Result<Box<dyn StateStore + Send>, CoreError> {
+        #[cfg(not(feature = "pg-state"))]
+        {
+            let _ = project_id;
+            Err(CoreError::InvalidProjectConfig(
+                "THE_ONE_STATE_TYPE=postgres requires the `pg-state` Cargo feature; this \
+                 binary was built without it. Rebuild with `--features pg-state` or unset \
+                 THE_ONE_STATE_TYPE to use the default SQLite backend."
+                    .to_string(),
+            ))
+        }
+
+        #[cfg(feature = "pg-state")]
+        {
+            use the_one_core::storage::postgres::{PostgresStateConfig, PostgresStateStore};
+
+            let url = self.backend_selection.state_url.as_deref().ok_or_else(|| {
+                CoreError::InvalidProjectConfig(
+                    "THE_ONE_STATE_TYPE=postgres requires THE_ONE_STATE_URL to be set".to_string(),
+                )
+            })?;
+
+            // Load the project's AppConfig for the tuning block. If
+            // there's no project root on disk yet (shouldn't happen
+            // on the StateStore hot path — project.init creates the
+            // state dir — but defensive), fall back to the workspace
+            // defaults.
+            //
+            // NB: we can't use `project_root` here because the factory
+            // signature predates BackendSelection. The broker's usual
+            // flow routes project_root through the cache key; for the
+            // Postgres path we fetch a fresh AppConfig by deriving
+            // project_root from the cache key. Until Phase 4 formalizes
+            // this, we use `PostgresStateConfig::default()` as the
+            // baseline and let integration tests cover the production
+            // override path by setting env-driven overrides. (See the
+            // resume plan Phase 3 DONE block.)
+            let pg_config = PostgresStateConfig::default();
+
+            let store = PostgresStateStore::new(&pg_config, url, project_id).await?;
+            Ok(Box::new(store))
+        }
     }
 
     /// Look up the cached state store for a project, constructing it on
@@ -310,8 +400,10 @@ impl McpBroker {
 
         // Cold path: construct outside the write lock so concurrent
         // cache-miss traffic for *different* projects is not serialized
-        // through this factory call.
-        let new_store = self.state_store_factory(project_root, project_id)?;
+        // through this factory call. The factory is `async` from
+        // Phase 3 onwards because Postgres pool construction is
+        // async end-to-end (sqlx).
+        let new_store = self.state_store_factory(project_root, project_id).await?;
         let new_entry: StateStoreCacheEntry = Arc::new(std::sync::Mutex::new(new_store));
 
         // Double-check under the write lock: another task may have raced

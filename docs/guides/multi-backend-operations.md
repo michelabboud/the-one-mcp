@@ -30,12 +30,12 @@ combination.
 
 ### State store backends
 
-| Backend        | Status (v0.16.0-rc1) | Capabilities                        | Feature flag       |
-|----------------|----------------------|-------------------------------------|--------------------|
-| **SQLite**     | First-class          | FTS5, transactions, WAL             | default            |
-| **Postgres**   | Planned (Phase B2)   | tsvector FTS, full ACID             | `pg-state` (future) |
-| **Redis-AOF**  | Planned (Phase B3)   | RedisJSON + persistence             | `redis-state` (future) |
-| **Redis cache**| Planned (Phase B3)   | volatile, fast                      | `redis-state` (future) |
+| Backend        | Status (v0.16.0-phase3)   | Capabilities                        | Feature flag       |
+|----------------|---------------------------|-------------------------------------|--------------------|
+| **SQLite**     | First-class               | FTS5, transactions, WAL             | default            |
+| **Postgres**   | **First-class (v0.16.0 Phase 3)** | tsvector FTS, full ACID, BIGINT epoch_ms | `pg-state` |
+| **Redis-AOF**  | Planned (Phase 5)         | RedisJSON + persistence             | `redis-state` (future) |
+| **Redis cache**| Planned (Phase 5)         | volatile, fast                      | `redis-state` (future) |
 
 ### Combined single-connection backends
 
@@ -154,6 +154,77 @@ SELECT * FROM the_one.pgvector_migrations ORDER BY version;
 Everything else (search, upsert, delete-by-source-path) is
 transparent — the broker routes through the same `VectorBackend`
 trait calls the existing Qdrant path uses.
+
+### Postgres state + Qdrant (v0.16.0 Phase 3, split-pool)
+
+Use the Phase 3 `PostgresStateStore` for state while keeping the
+default Qdrant backend for vectors. This gives operators an
+ACID-capable state store on managed Postgres without standing up
+pgvector yet — useful for teams that already have Postgres but
+are still evaluating vector-DB options.
+
+```bash
+# Env vars: pick Postgres for state, leave vector unset (defaults to qdrant).
+# Both TYPE+URL must be set together for the state axis per § 3 of
+# the backend selection scheme.
+export THE_ONE_STATE_TYPE=postgres
+export THE_ONE_STATE_URL=postgres://user:password@db.internal:5432/the_one
+# VECTOR_TYPE unset → defaults to qdrant.
+```
+
+```json
+{
+  "qdrant_url": "http://qdrant.internal:6334",
+  "state_postgres": {
+    "schema": "the_one",
+    "statement_timeout_ms": 30000,
+    "max_connections": 10,
+    "min_connections": 2,
+    "acquire_timeout_ms": 30000,
+    "idle_timeout_ms": 600000,
+    "max_lifetime_ms": 1800000
+  }
+}
+```
+
+Rebuild: `cargo build --release -p the-one-mcp --bin the-one-mcp
+--features pg-state` (off by default).
+
+**First-boot sequence**:
+
+1. `BackendSelection::from_env` parses
+   `THE_ONE_STATE_TYPE=postgres` and `THE_ONE_STATE_URL`. If either
+   is missing, startup fails loud with a targeted error.
+2. `PostgresStateStore::new` opens the sqlx pool with the
+   configured min/max/lifetime settings and runs `SET
+   statement_timeout` on every freshly-checked-out connection.
+3. The hand-rolled migration runner applies
+   `migrations/postgres-state/000[01]_*.sql`, tracking versions in
+   `the_one.state_migrations` with SHA-256 drift detection.
+4. The Qdrant path takes over for vectors, unchanged.
+
+### Postgres state + pgvector (v0.16.0 Phase 3, split-pool, two pools)
+
+Split-pool Postgres on **both** axes — separate pools for state and
+vectors, potentially different DSNs, different credentials, different
+statement timeouts. The combined single-pool variant lands in
+Phase 4.
+
+```bash
+export THE_ONE_STATE_TYPE=postgres
+export THE_ONE_STATE_URL=postgres://state_user:pw@db.internal/the_one_state
+export THE_ONE_VECTOR_TYPE=pgvector
+export THE_ONE_VECTOR_URL=postgres://vec_user:pw@db.internal/the_one_vec
+```
+
+Both `[state_postgres]` and `[vector_pgvector]` blocks in
+`config.json` apply. They're independent — tuning one doesn't
+affect the other. This is the deployment shape for operators who
+want Postgres-backed state AND pgvector but with **separate
+credential rotation and pool budgets** for each axis.
+
+Rebuild: `cargo build --release -p the-one-mcp --bin the-one-mcp
+--features pg-state,pg-vectors`.
 
 ### Planned: Postgres + pgvector (combined, Phase 4)
 

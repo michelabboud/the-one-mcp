@@ -6,6 +6,116 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- **v0.16.0 Phase 3 — `PostgresStateStore` impl** (pending commit,
+  tag `v0.16.0-phase3`). Ports every `StateStore` trait method to
+  Postgres so operators can run the-one-mcp with **zero SQLite on
+  the state axis**. Composes with Phase 2's pgvector: operators can
+  now split-pool across two Postgres databases, or — coming in
+  Phase 4 — share a single connection pool for transactional
+  consistency between state and vector writes.
+  - New `crates/the-one-core/src/storage/postgres.rs` (~1,300 LOC)
+    with `PostgresStateStore` implementing all 26 trait methods:
+    metadata, project profiles, approvals, audit (legacy +
+    structured), conversation sources, AAAK lessons, diary (with
+    FTS), navigation nodes + tunnels (including the BFS-backing
+    `list_navigation_tunnels_for_nodes`).
+  - **Sync-over-async bridge** via `tokio::task::block_in_place` +
+    `Handle::current().block_on` inside every trait method. The
+    `StateStore` trait is sync by design (rusqlite's `Connection`
+    is `!Sync` and Phase 1's `with_state_store` chokepoint holds
+    guards across sync closures to prevent pool deadlocks). sqlx
+    is async end-to-end, so the bridge is the canonical pattern
+    for calling async code from a sync callsite inside a
+    multi-threaded tokio runtime.
+  - **Hand-rolled migration runner** at `postgres::migrations` —
+    same pattern as Phase 2's `pg_vector::migrations`. Tracking
+    table is `the_one.state_migrations` (distinct from pgvector's
+    `the_one.pgvector_migrations` so Phase 4's combined
+    deployment can share one schema without collision). Two
+    migrations ship: `0000_state_migrations_table.sql` (the
+    tracking table itself) and `0001_state_schema_v7.sql` (the
+    full SQLite-v7-equivalent schema shipped in one pass because
+    Postgres has no v1..v6 history to migrate through).
+  - **FTS5 → tsvector translation**. SQLite's `diary_entries_fts`
+    virtual table becomes a `content_tsv TSVECTOR` column on
+    `diary_entries` + a GIN index. Search uses
+    `websearch_to_tsquery('simple', $1)` — `'simple'` (not
+    `'english'`) matches FTS5's default tokenization behaviour
+    most closely and works uniformly across languages. A LIKE
+    fallback runs when the tsquery produces zero tokens (common
+    with pure-punctuation input). `upsert_diary_entry` is wrapped
+    in a sqlx transaction so the main row and the derived
+    `content_tsv` column commit atomically — same atomicity
+    guarantee Phase 0 added to the SQLite side.
+  - **Schema v7 parity**. Postgres ships the `audit_events.outcome`
+    + `error_kind` columns from day one (no incremental migration
+    needed). `BIGSERIAL PRIMARY KEY` replaces SQLite's
+    `INTEGER PRIMARY KEY AUTOINCREMENT`; `BIGINT` for timestamps
+    matches the workspace's `BIGINT epoch_ms` convention;
+    `ON CONFLICT DO UPDATE SET … EXCLUDED.…` is syntactically
+    identical to SQLite (Postgres 9.5+).
+  - **BIGINT epoch_ms throughout**. Timestamps are generated at
+    bind time via `std::time::SystemTime::duration_since(UNIX_EPOCH)` —
+    no `chrono`, no `TIMESTAMPTZ`. Matches the Phase 2 pgvector
+    convention and side-steps the sqlx `chrono` feature's cargo
+    `links` conflict with rusqlite 0.39 entirely. Phase 3's
+    sqlx feature set stays at `[runtime-tokio, tls-rustls,
+    postgres, macros]`.
+  - New `CoreError::Postgres(String)` variant with a matching
+    `"postgres"` label in `error_kind_label`. Surgical addition:
+    3 small touches (enum, label, exhaustive test) — the v0.15.0
+    wire-level error sanitizer passes the short label to clients
+    and keeps the inner error text in `tracing::error!` logs only.
+  - New `StatePostgresConfig` in `the_one_core::config` exposing
+    schema name, `statement_timeout_ms` (applied per-connection
+    via sqlx's `after_connect` hook as `SET statement_timeout`),
+    and the same five sqlx pool-sizing fields as `VectorPgvectorConfig`.
+    Field shapes are deliberately parallel so Phase 4's combined
+    Postgres deployment has one consistent tuning surface.
+  - **Broker wiring**. `state_store_factory` is now `async`
+    (Phase 1's doc comment explicitly pre-announced this for
+    Phase 3). Branches on `BackendSelection.state`: `Sqlite`
+    (existing path, unchanged), `Postgres` (new, gated on
+    `#[cfg(feature = "pg-state")]`), `Redis` /
+    `PostgresCombined` / `RedisCombined` (return `NotEnabled`
+    until their phases ship). `get_or_init_state_store` now
+    `.await`s the factory — the cold-path construct-outside-the-
+    write-lock pattern Phase 1 put in place is now load-bearing.
+  - New Cargo feature `pg-state` on `the-one-core` (with sqlx
+    0.8.6 + tokio as optional deps) and passthrough on
+    `the-one-mcp`. Off by default. Composable with `pg-vectors`:
+    `cargo build --features pg-state,pg-vectors` ships a binary
+    that supports both axes (split pools, two URLs).
+  - **Integration test suite** `crates/the-one-core/tests/postgres_state_roundtrip.rs`
+    — 11 tests gated on `THE_ONE_STATE_TYPE=postgres` +
+    `THE_ONE_STATE_URL`, covering metadata + bootstrap +
+    migration idempotency, profiles, approvals (with scope
+    isolation), audit (record + legacy + paginated list),
+    conversation sources (filter by wing, upsert replaces),
+    AAAK lessons (list + delete), diary (upsert, list, FTS
+    search via tsvector, LIKE fallback), diary upsert
+    atomicity (old FTS row gone after re-upsert), navigation
+    nodes + tunnels + `list_navigation_tunnels_for_nodes`,
+    and cross-project upsert rejection. Skip gracefully via
+    `return` when the env vars aren't set; no `_TEST`-suffixed
+    shadow vars.
+  - **Test count**: 464 → 466 baseline (+2 from
+    `postgres_state_config_*`), 464 → 484 with both
+    `pg-state,pg-vectors` features (+18 additional: +2 config
+    + +5 pg_vector unit + +5 postgres unit + +8 pgvector
+    integration + +11 postgres integration tests — 13 already
+    shipped in Phase 2, 13 new in Phase 3 though the headline
+    diff is +2 on the base, +20 on the feature-on counts).
+    Monotonic increase preserved end-to-end.
+  - **Docs**: new § 16 in `docs/guides/production-hardening-v0.15.md`
+    covering Postgres setup, the sync-over-async bridge
+    rationale, FTS translation details, schema v7 parity, pool
+    sizing + statement timeout, and the Phase 4 combined
+    preview. `docs/guides/multi-backend-operations.md` gets a
+    new "Postgres + Qdrant (split-pool)" config subsection and
+    an updated state-backend matrix. Phase 3 marked DONE in
+    `docs/plans/2026-04-11-resume-phase1-onwards.md`.
+
 - **v0.16.0 Phase 2 — pgvector `VectorBackend` + env var parser +
   startup validator** (pending commit, tag `v0.16.0-phase2`). First
   real alternative vector backend after the Phase A trait extraction:

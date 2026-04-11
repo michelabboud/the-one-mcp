@@ -347,7 +347,28 @@ Landing in the commit tagged `v0.16.0-phase2`. Summary of what shipped vs what t
 
 ---
 
-### Phase 3 — PostgresStateStore impl
+### Phase 3 — DONE ☑ (PostgresStateStore impl)
+
+Landing in the commit tagged `v0.16.0-phase3`. Summary of what shipped vs what the original deliverable list called for:
+
+- **Migration approach**: used the hand-rolled runner pattern from Phase 2's `pg_vector::migrations` instead of `sqlx::migrate!`. Same rationale as Phase 2 (cargo `links` conflict between sqlx-sqlite and rusqlite). Two migrations ship: `0000_state_migrations_table.sql` (bootstrap tracking table) + `0001_state_schema_v7.sql` (the full v7 schema in ONE pass — no incremental v1..v6 walk-through because fresh Postgres installs have no history). Tracking table is `the_one.state_migrations`, distinct from pgvector's `pgvector_migrations` so Phase 4's combined deployment can share one schema without collision.
+- **Sync-over-async bridge**: every `impl StateStore` method wraps sqlx calls in `block_on(async { ... })` where `block_on` = `tokio::task::block_in_place(|| Handle::current().block_on(fut))`. Requires multi-threaded tokio (the broker binary's default). Tests must use `#[tokio::test(flavor = "multi_thread")]`.
+- **FTS translation**: `diary_entries.content_tsv TSVECTOR` column + GIN index. Search uses `websearch_to_tsquery('simple', $1)` (not `'english'` — no stemming, works uniformly across languages and code content). `ts_rank` for ordering. LIKE fallback when the tsquery produces zero tokens (pure-punctuation input). `upsert_diary_entry` wraps the INSERT in a sqlx transaction for atomicity — same guarantee Phase 0 added to the SQLite side.
+- **NO chrono**. All timestamps are `BIGINT epoch_ms`, generated via `SystemTime::duration_since(UNIX_EPOCH)`. This sidesteps the cargo `links` conflict entirely and matches the workspace-wide convention. Postgres-native `to_timestamp(... / 1000.0)` works for any future human-readable reporting needs.
+- **26 trait methods implemented** (the plan said 22 — actual count per `state_store.rs`). Method-by-method parity with the SQLite side via behavioural round-trips; no `unchecked_transaction` needed because Postgres's `pool.begin()` returns an owned transaction that composes cleanly with async.
+- **New `CoreError::Postgres(String)` variant** + `"postgres"` label in `error_kind_label`. 3 surgical touches (enum, label, exhaustive test in `production_hardening.rs`). Wire-level sanitizer passes the short label to clients, full text stays in `tracing::error!`.
+- **Config**: `StatePostgresConfig` with schema, `statement_timeout_ms` (applied via sqlx's `after_connect` hook), and 5 pool-sizing fields parallel to `VectorPgvectorConfig`. Field names are deliberately identical so Phase 4's combined deployment has one consistent tuning surface. **No `config.toml`** — the workspace uses `config.json` (plan wording was colloquial).
+- **Broker wiring**: `state_store_factory` is now `async` (Phase 1's doc comment pre-announced this for Phase 3). Branches on `BackendSelection.state`: Sqlite unchanged, Postgres routes through `construct_postgres_state_store`, other variants return `NotEnabled` until their phases ship. `get_or_init_state_store` now `.await`s the factory — the cold-path construct-outside-write-lock pattern is now load-bearing.
+- **Cross-backend regression test NOT shipped**. The plan asked for "run the existing broker integration tests against a `PostgresStateStore`-backed broker." In practice, the existing broker tests construct `ProjectDatabase::open` directly in tempdirs, and porting them to drive a live Postgres instance would require significant test-harness rework. Instead, Phase 3 ships 11 PostgresStateStore-specific integration tests in `crates/the-one-core/tests/postgres_state_roundtrip.rs` covering every method on the trait surface. Coverage-gap caveat is documented in `docs/guides/multi-backend-operations.md` and the resume plan.
+- **Test counts**:
+  - +2 in `the_one_core::config::tests::postgres_state_config_*`
+  - +5 in `the_one_core::storage::postgres::tests` (feature-gated pure-Rust: default config, migration count, kind round-trip, scope strings, epoch_ms monotonicity)
+  - +11 in `crates/the-one-core/tests/postgres_state_roundtrip.rs` (feature-gated + env-gated, skip via `return`)
+  - **Workspace totals**: 464 → 466 baseline (+2), 464 → 484 with `--features pg-state,pg-vectors` (+20 total including Phase 2's 13 feature-gated tests).
+
+**Original deliverables for reference (not re-executed):**
+
+### Phase 3 (original plan text) — PostgresStateStore impl
 
 **Scope:** ~1500 LOC — the FTS translation layer is the bulk.
 

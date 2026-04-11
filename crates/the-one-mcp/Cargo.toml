@@ -23,6 +23,15 @@ redis-vectors = ["the-one-memory/redis-vectors", "local-embeddings"]
 # clean `InvalidProjectConfig` error when the feature is off.
 pg-vectors = ["the-one-memory/pg-vectors"]
 
+# v0.16.0 Phase 3 — PostgresStateStore backend. Passthrough to
+# the-one-core's `pg-state` feature. Off by default; operators opt in
+# via `cargo build --features pg-state` when building the binary.
+# Composable with `pg-vectors`: `--features pg-state,pg-vectors`
+# gives you both split-pool Postgres state AND split-pool pgvector
+# (still separate pools — the combined-pool variant lands in Phase 4
+# as `postgres-combined`).
+pg-state = ["the-one-core/pg-state"]
+
 [[bin]]
 name = "the-one-mcp"
 path = "src/bin/the-one-mcp.rs"

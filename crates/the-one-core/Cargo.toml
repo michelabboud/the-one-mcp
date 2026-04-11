@@ -4,6 +4,25 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+# v0.16.0 Phase 3 — PostgresStateStore backend. Off by default; operators
+# opt in via `cargo build --features pg-state` (or through the-one-mcp's
+# passthrough). Same sqlx feature set as pg-vectors (Phase 2):
+# `[runtime-tokio, tls-rustls, postgres, macros]` — NO `migrate`, NO
+# `chrono`. Rationale for both drops lives in the pg-vectors feature
+# comment in `crates/the-one-memory/Cargo.toml`. Phase 3 uses BIGINT
+# epoch_ms timestamps end-to-end and a hand-rolled migration runner
+# that mirrors Phase 2's pg_vector::migrations module. The two
+# hand-rolled runners track their versions in *distinct* tables
+# (`the_one.pgvector_migrations` vs `the_one.state_migrations`) so
+# Phase 4's combined backend can share one schema without collision.
+# Also needs tokio's multi-thread runtime at the workspace level so
+# the sync StateStore trait can bridge to sqlx via
+# `tokio::task::block_in_place`; the broker binary already enables
+# that, so this feature assumes it.
+pg-state = ["dep:sqlx", "dep:tokio"]
+
 [dependencies]
 base64 = "0.22"
 rusqlite = { version = "0.39", features = ["bundled"] }
@@ -13,7 +32,21 @@ sha2 = "0.11"
 thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+# v0.16.0 Phase 3 — PostgresStateStore deps. Declared inline (not via
+# [workspace.dependencies]) for the same reason pg-vectors does: cargo's
+# `links` conflict check evaluates workspace deps eagerly and pulls
+# sqlx-sqlite into the graph, where its `libsqlite3-sys ^0.30.1`
+# collides with rusqlite 0.39's `^0.37.0`. Inlining + `optional = true`
+# keeps sqlx out of the graph when `pg-state` is off.
+sqlx = { version = "0.8.6", default-features = false, features = [
+    "runtime-tokio",
+    "tls-rustls",
+    "postgres",
+    "macros",
+], optional = true }
+tokio = { workspace = true, optional = true }
 
 [dev-dependencies]
 temp-env = "0.3"
 tempfile = "3.27"
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }

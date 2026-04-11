@@ -768,7 +768,249 @@ Steps:
 
 ---
 
-## 16. v0.16.0-rc1 — Phase A trait extraction
+## 16. v0.16.0 Phase 3 — PostgresStateStore backend
+
+Phase 3 ships `PostgresStateStore` as the second-axis complement to
+Phase 2's pgvector. Operators can now run the-one-mcp against a
+managed Postgres instance (RDS, Cloud SQL, Azure, Supabase,
+self-hosted) with zero SQLite in the persistence layer.
+
+### Setup
+
+Install Postgres ≥ 13. No extensions are required — PostgresStateStore
+only uses native features (`TSVECTOR`, GIN, `BIGSERIAL`, foreign keys,
+cascading deletes). pgvector is NOT a dependency of this backend; if
+you're only doing state (not vectors), any vanilla Postgres image
+works.
+
+```bash
+# Minimal local setup:
+docker run --rm -d --name the-one-pg-state \
+    -e POSTGRES_PASSWORD=pw -e POSTGRES_DB=the_one \
+    -p 5432:5432 postgres:16
+
+# Configure the broker:
+export THE_ONE_STATE_TYPE=postgres
+export THE_ONE_STATE_URL=postgres://postgres:pw@localhost:5432/the_one
+
+# Rebuild with the feature:
+cargo build --release -p the-one-mcp --bin the-one-mcp \
+    --features pg-state
+```
+
+On first boot the hand-rolled migration runner creates the `the_one`
+schema, the `the_one.state_migrations` tracking table, and the full
+v7-equivalent schema (`project_profiles`, `approvals`, `audit_events`,
+`conversation_sources`, `aaak_lessons`, `diary_entries` + `content_tsv`
++ GIN index, `navigation_nodes`, `navigation_tunnels`). Subsequent
+boots verify the tracking-table checksums and exit clean — idempotent.
+
+### Sync-over-async bridge
+
+The `StateStore` trait is sync (no async methods) — it inherited that
+constraint from `rusqlite::Connection`, which is `Send + !Sync`.
+Phase 1's broker chokepoint (`with_state_store`) holds the store's
+mutex guard across a sync closure specifically so the compiler
+refuses to hold a backend guard across an `.await`, preventing
+connection-pool deadlocks.
+
+sqlx is async top-to-bottom. The bridge:
+
+```rust
+fn block_on<F, R>(fut: F) -> R
+where
+    F: std::future::Future<Output = R>,
+{
+    tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::try_current()
+            .expect("PostgresStateStore methods must be called from a tokio runtime")
+            .block_on(fut)
+    })
+}
+```
+
+Every `impl StateStore for PostgresStateStore` method wraps its sqlx
+call chain in `block_on(async { ... })`. `block_in_place` tells tokio
+"this worker is about to do blocking work" so other async tasks
+migrate off; `Handle::current().block_on` drives the future to
+completion; the worker resumes async duty afterward.
+
+**Runtime requirement**: multi-threaded tokio runtime. The broker
+binary's `#[tokio::main]` default satisfies this. Tests must use
+`#[tokio::test(flavor = "multi_thread")]` — `current_thread` will
+panic at the `block_on` call.
+
+### FTS5 → tsvector translation
+
+SQLite's `diary_entries_fts` virtual table doesn't exist in Postgres.
+The Phase 3 schema replaces it with:
+
+```sql
+diary_entries.content_tsv TSVECTOR NOT NULL DEFAULT to_tsvector('simple', '')
+CREATE INDEX idx_diary_entries_content_tsv ON the_one.diary_entries USING GIN (content_tsv);
+```
+
+The `content_tsv` column is populated by the Rust layer in
+`upsert_diary_entry` as part of the same INSERT statement:
+
+```sql
+INSERT INTO the_one.diary_entries (..., content_tsv)
+VALUES (..., to_tsvector('simple', $N))
+ON CONFLICT ... DO UPDATE SET ..., content_tsv = EXCLUDED.content_tsv;
+```
+
+The tsvector input string is `COALESCE(mood, '') || ' ' || tags_join ||
+' ' || content` — same three fields FTS5 indexed, concatenated.
+
+Search uses `websearch_to_tsquery('simple', $1)`:
+
+```sql
+SELECT ... FROM the_one.diary_entries
+WHERE project_id = $1
+  AND content_tsv @@ websearch_to_tsquery('simple', $2)
+ORDER BY ts_rank(content_tsv, websearch_to_tsquery('simple', $2)) DESC, ...;
+```
+
+`websearch_to_tsquery` accepts plain user input ("quoted phrases",
+`-negation`, spaces-as-AND) and never panics. When the input
+produces zero tokens (common with pure-punctuation queries like
+`!@#`), the Rust layer falls through to a LIKE-based fallback:
+
+```sql
+SELECT ... FROM the_one.diary_entries
+WHERE project_id = $1
+  AND (content ILIKE $2 OR COALESCE(mood, '') ILIKE $2 OR tags_json ILIKE $2)
+ORDER BY entry_date DESC, ...;
+```
+
+### Why `'simple'` and not `'english'`
+
+`to_tsvector('english', 'running shoes')` applies the Snowball
+stemmer and produces the tokens `run` + `shoe`. Searching for
+`running` matches `run`, and searching for `shoes` matches `shoe`.
+That's fine for English prose — and catastrophic for code or
+non-English content:
+
+- Code snippets: `const DEFAULT_SCHEMA_VERSION` → stemmer emits
+  `default`, `schema`, `version` as if they were three English
+  words. Exact-match searches fail.
+- Korean / Japanese / Chinese: stemmer has no dictionary, tokens
+  get corrupted.
+- Mixed-language diaries: per-entry language detection isn't
+  possible.
+
+`'simple'` applies no stemming and no stop-words — just whitespace
+and punctuation tokenization. You get exact-word matching
+uniformly across languages and across prose/code content. Matches
+FTS5's default behaviour more closely than `'english'`.
+
+### Schema version parity
+
+Postgres ships the v7 shape in **one** migration (`0001_state_schema_v7.sql`)
+because a fresh install has no v1..v6 history to walk through.
+`PostgresStateStore::schema_version()` returns `1` (the highest
+applied migration version), NOT `7`. That's intentional —
+`schema_version()` is a per-backend concept, not a cross-backend
+parity number. The `CURRENT_SCHEMA_VERSION = 7` constant in
+`sqlite.rs` is SQLite-internal.
+
+Broker code that needs cross-backend behaviour should inspect
+`StateStoreCapabilities` instead of comparing version numbers.
+
+### Migration runner (reprise)
+
+Same hand-rolled pattern as `pg_vector::migrations` — see § 15 for
+the full rationale. Short version:
+
+- `sqlx::migrate!` was dropped from Decision B because sqlx's
+  `migrate` feature transitively references `sqlx-sqlite?/migrate`,
+  and cargo's `links` conflict check pulls `sqlx-sqlite` into the
+  resolution graph where it collides with `rusqlite 0.39`'s
+  `libsqlite3-sys 0.37`.
+- Phase 3's runner uses `include_str!` to embed the `.sql` files,
+  SHA-256 to detect drift, a `the_one.state_migrations` tracking
+  table, idempotent re-apply.
+- Phase 4's combined backend can share a single schema with
+  pgvector because the two tracking tables are distinct
+  (`pgvector_migrations` vs `state_migrations`).
+
+### Statement timeout and pool sizing
+
+`StatePostgresConfig.statement_timeout_ms` is applied at connection
+time via sqlx's `after_connect` hook:
+
+```rust
+pool_options = pool_options.after_connect(move |conn, _meta| {
+    Box::pin(async move {
+        let sql = format!("SET statement_timeout = '{timeout_ms}ms'");
+        sqlx::query(&sql).execute(conn).await.map(|_| ())
+    })
+});
+```
+
+Non-zero values enforce per-query wall-clock deadlines. Default 30s
+matches the pgvector backend's `acquire_timeout_ms` so a query that
+exhausts its statement budget and a handler that exhausts its
+acquire budget fail at roughly the same moment under load. `0`
+disables the timeout entirely.
+
+Pool sizing fields (`max_connections`, `min_connections`,
+`acquire_timeout_ms`, `idle_timeout_ms`, `max_lifetime_ms`) match
+the pgvector defaults field-for-field. Run two features together
+(`--features pg-state,pg-vectors`) and you get split pools with
+identical tuning, which is the right default for production.
+
+### BIGINT epoch_ms, no chrono
+
+Every timestamp column in the Phase 3 schema is `BIGINT` holding
+milliseconds since the Unix epoch. Timestamps are generated at
+bind time via `SystemTime::duration_since(UNIX_EPOCH)` — no
+`chrono`, no `TIMESTAMPTZ`. This is a workspace-wide convention
+(pgvector already did it) and sidesteps the sqlx `chrono` feature's
+cargo `links` conflict entirely. If you later need wall-clock-
+aware types on the Postgres side, do the conversion in the query
+layer (`to_timestamp(created_at_epoch_ms / 1000.0)`) — never add
+chrono to the dep graph.
+
+### Migration from SQLite
+
+**Not automated in Phase 3.** Switching from SQLite to Postgres
+requires re-running `project.init` against the new backend. The
+broker picks up the new `StateStore` on boot; existing
+audit/profile/diary history in the old SQLite DB is NOT migrated.
+If you need the history, export it with `sqlite3 state.db .dump`
+before the cutover and re-apply manually — there's no
+cross-backend migration tool and there won't be, because schema
+drift between backends is fine for a greenfield install but
+unsafe for a data migration.
+
+Typical cutover:
+
+```bash
+# 1. Stand up Postgres, stop the broker.
+# 2. Rebuild with the feature.
+# 3. Export the env vars:
+export THE_ONE_STATE_TYPE=postgres
+export THE_ONE_STATE_URL=postgres://...
+# 4. Restart the broker. First boot applies migrations.
+# 5. Re-run project.init on every project.
+```
+
+### Combined Postgres (Phase 4 preview)
+
+Phase 4 will add `THE_ONE_STATE_TYPE=postgres-combined` +
+`THE_ONE_VECTOR_TYPE=postgres-combined` with byte-identical URLs,
+and the broker will construct ONE `sqlx::PgPool` that serves both
+`StateStore` and `VectorBackend`. Transactional writes spanning
+state + vectors become possible (e.g. "ingest conversation AND
+record the audit row atomically"). The Phase 3 `state_postgres`
+config block and the Phase 2 `vector_pgvector` block stay as-is
+— Phase 4 just adds a dispatcher that reads both and spins up one
+pool.
+
+---
+
+## 17. v0.16.0-rc1 — Phase A trait extraction
 
 Released alongside v0.15.1 as the architectural unlock for
 multi-backend support. This is a **pure refactor** — zero behaviour
@@ -843,7 +1085,7 @@ until you opt into a new backend.
 
 ---
 
-## 17. See also
+## 18. See also
 
 - **Findings report:** `docs/reviews/2026-04-10-mempalace-comparative-audit.md`
 - **Operational runbook:** `docs/guides/mempalace-operations.md`

@@ -28,4 +28,13 @@ pub enum CoreError {
     NotEnabled(String),
     #[error("invalid request: {0}")]
     InvalidRequest(String),
+    /// v0.16.0 Phase 3 — `PostgresStateStore` operation failed. Covers
+    /// sqlx connection/pool errors, query errors, migration failures,
+    /// and any other runtime backend error. Constructed as a `String`
+    /// because sqlx's error types are not `#[from]`-friendly without
+    /// adding sqlx as an unconditional dep of this crate. The wire-
+    /// level sanitizer maps this to the short label `"postgres"` so
+    /// internal error text never leaks to clients.
+    #[error("postgres failure: {0}")]
+    Postgres(String),
 }

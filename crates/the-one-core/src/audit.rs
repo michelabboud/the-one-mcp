@@ -114,6 +114,7 @@ pub fn error_kind_label(err: &CoreError) -> &'static str {
         CoreError::Catalog(_) => "catalog",
         CoreError::NotEnabled(_) => "not_enabled",
         CoreError::InvalidRequest(_) => "invalid_request",
+        CoreError::Postgres(_) => "postgres",
     }
 }
 
