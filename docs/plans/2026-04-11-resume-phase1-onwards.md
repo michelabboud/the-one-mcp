@@ -1,0 +1,519 @@
+# Resume: the-one-mcp multi-backend — Phase 1 onwards
+
+**Date:** 2026-04-11
+**Baseline commit:** `5ff9872` (v0.16.0-rc1 — Phase A trait extraction, bundled)
+**Target release:** v0.16.0
+**Status:** Ready for a fresh session to execute Phases 1–7
+**Delete this file in:** the same commit that ships Phase 7 / v0.16.0 release
+
+**Provenance:** this file supersedes the pasted full-feature resume prompt from the 2026-04-11 session. That prompt was written before the Phase-0 commits landed and assumed a dirty tree + four separate commits. Reality: Phase 0 shipped as one bundled commit (`5ff9872`), working tree is clean. Everything from Phase 1 onwards is preserved byte-for-byte from the original plan, plus a new `## Backend selection scheme` section (derived from a brainstorming session that converged on the env var + config.toml two-layer design) that the original didn't contain.
+
+---
+
+## Who I am
+
+I'm Michel. You're continuing a multi-session refactor that will land full multi-backend support for both vectors and state: Qdrant, pgvector, Redis-Vector (today), plus Postgres, Redis-with-AOF, Redis cache-only, and combined single-connection backends for Postgres+pgvector and Redis+RediSearch.
+
+## Global rules (non-negotiable)
+
+- Do what I say, full production grade, no shortcuts, no stubs, no placeholders, no "good enough". Every phase ships complete or doesn't ship.
+- NEVER defer, skip, or descope a task without explicit approval.
+- NEVER bump `Cargo.toml` version (stays `"0.1.0"`). Real versioning lives in git tags + commit subjects + `CHANGELOG.md` entries.
+- NEVER commit anything without explicit authorisation.
+- After a phase is fully complete (design + impl + tests + docs), suggest `/compact` or `/clear` before starting the next.
+- If a spec is ambiguous, ASK — don't pick the minimal interpretation.
+
+## Read FIRST (in this exact order)
+
+1. `docs/reviews/2026-04-10-mempalace-comparative-audit.md`
+2. `docs/plans/2026-04-11-multi-backend-architecture.md` ← CRITICAL (the architectural plan this resume executes)
+3. `docs/plans/2026-04-11-next-steps-expansion.md`
+4. `docs/guides/production-hardening-v0.15.md`
+5. `docs/guides/multi-backend-operations.md`
+6. `CLAUDE.md` (project conventions — note the v0.15.0 / v0.15.1 / v0.16.0-rc1 sections that describe what Phase 0 shipped)
+7. `CHANGELOG.md` — the per-version entries for v0.15.0, v0.15.1, and v0.16.0-rc1 are the ground truth for what Phase 0 delivered
+8. **This file's `## Backend selection scheme` section below** — load-bearing for Phases 2–6, read it BEFORE writing any sqlx code
+
+Skim only if needed:
+- `docs/plans/2026-04-10-audit-batching-lever2.md` (v2, for Lever 2 context — not implementing this roadmap)
+- `docs/plans/draft-2026-04-10-audit-batching-lever2.md` (superseded draft, kept as teaching artefact)
+
+---
+
+## Phase 0 — DONE ☑ (landed in commit `5ff9872`)
+
+This section exists for traceability back to the original pasted resume. **Do NOT try to recreate this phase.** It is already shipped.
+
+### What landed (one bundled commit, not four)
+
+The original plan called for four separate commits (v0.15.0 hardening, v0.15.1 Lever 1, v0.16.0-rc1 trait extraction, docs). Reality: all three code units shipped as a single commit `5ff9872` with CHANGELOG.md carrying the per-version sections. This was a deliberate choice — three of the files (`sqlite.rs`, `lib.rs`, `CLAUDE.md`) carried interleaved changes from all three versions, and splitting would have required temp branches without producing individually-green intermediate commits.
+
+**v0.15.0** — production hardening pass addressing every finding from `docs/reviews/2026-04-10-mempalace-comparative-audit.md` (C1–C5, H1–H5, M1–M6):
+- New modules: `the_one_core::{naming, pagination, audit}`
+- Schema v7: `audit_events` gains `outcome` / `error_kind` columns + indexes
+- Cursor pagination replaces silent truncation across every list/search endpoint. Over-limit requests return `InvalidRequest`.
+- Input sanitization at every broker write entry point
+- Error envelope sanitization via `public_error_message` with correlation IDs
+- Navigation digest widened 12 → 32 hex chars (48 → 128 bits)
+- 23 new tests (13 production_hardening + 9 stdio_write_path + 1 lever1 guard)
+- New benchmark: `production_hardening_bench.rs`
+- New guide: `docs/guides/production-hardening-v0.15.md`
+
+**v0.15.1** — Lever 1 audit-write speedup:
+- `ProjectDatabase::open` sets `PRAGMA synchronous=NORMAL` in WAL mode
+- Measured 67× speedup on audit writes (5.56 ms → 83 µs per row)
+- Durability trade-off: safe against process crash, exposed to < 1 s on OS crash. Standard production setting.
+- 2 regression tests (throughput smoke + cross-cutting guard)
+- Lever 2 async batching designed but NOT shipped (plans preserved in `docs/plans/2026-04-10-audit-batching-lever2.md`)
+
+**v0.16.0-rc1** — Phase A multi-backend trait extraction:
+- New trait `the_one_memory::vector_backend::VectorBackend` (chunks / hybrid / entities / relations / images / persistence)
+- New trait `the_one_core::state_store::StateStore` (all 22 broker-called methods on `ProjectDatabase`)
+- `MemoryEngine` refactored to hold `Option<Box<dyn VectorBackend>>`; all 16 dispatch sites migrated to trait calls
+- Canonical constructor `MemoryEngine::new_with_backend(embedding_provider, backend, max_chunk_tokens)`
+- `impl VectorBackend for AsyncQdrantBackend` (full capabilities)
+- `impl VectorBackend for RedisVectorStore` (chunks-only, feature-gated)
+- `impl StateStore for ProjectDatabase` (thin forwarding, zero behaviour change)
+- Diary upsert atomicity fix: main INSERT + DELETE FTS + INSERT FTS wrapped in a single `unchecked_transaction`
+- `BackendCapabilities` / `StateStoreCapabilities` for capability reporting
+
+### Why Phase 0 matters for Phase 1
+
+The broker still calls `ProjectDatabase::open(...)` directly in ~18 sites rather than going through the `StateStore` trait. This is intentional — the Phase 0 refactor was strictly additive and left the broker unchanged. Phase 1 is the mechanical call-site migration that takes advantage of what Phase 0 built.
+
+---
+
+## Baseline to verify before touching anything
+
+Run in this exact order. If ANY step fails or shows unexpected state, STOP and report to me. Do NOT proceed with Phase 1 execution until the baseline is green.
+
+```bash
+# 1. Confirm we're on the right commit and the tree is clean
+git log --oneline -3
+# Expected first line: "5ff9872 feat: v0.16.0-rc1 — production hardening + Lever 1 + multi-backend traits"
+git status
+# Expected: "nothing to commit, working tree clean"
+
+# 2. Formatting + lints
+cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings
+
+# 3. Full workspace test suite
+cargo test --workspace 2>&1 | tee /tmp/baseline-tests.log
+grep "test result:" /tmp/baseline-tests.log | awk '{sum+=$4;f+=$6} END {print "BASELINE:",sum,"passing,",f,"failing"}'
+# Expected: 0 failing. Record the passing count as the BASELINE for regression checks.
+# Do NOT assert a specific passing count — the count is a moving target across Phase 0 shipping
+# and Phases 1–7 adding tests. Record what you see and use it as your tripwire.
+
+# 4. Release gate
+bash scripts/release-gate.sh
+# Expected: exit 0
+```
+
+**If any of these fail, STOP and report to me.** Do not "fix" a failing baseline by editing production code. A failing baseline means either (a) someone else modified the repo between sessions, (b) you're on the wrong branch / wrong machine, or (c) the environment changed (Rust version, dependency yank, etc). All three require me to diagnose before work continues.
+
+**Record the baseline test count** as a file you'll reference throughout Phases 1–7:
+
+```bash
+echo "Baseline at 5ff9872: <NNN> passing, 0 failing" > /tmp/the-one-baseline.txt
+```
+
+Every phase MUST keep the passing count monotonically increasing. Any phase that drops the count (even by one) has introduced a regression and must STOP.
+
+---
+
+## Backend selection scheme
+
+**This section is load-bearing for Phases 2–6.** Read it once in full before writing any sqlx code or adding any env var parser. The decisions here came from a brainstorming session on 2026-04-11; do not re-derive them from scratch.
+
+### § 1 — Env var surface (selection + secrets only)
+
+Four env vars, two per axis, parallel naming:
+
+```bash
+THE_ONE_STATE_TYPE=<sqlite|postgres|redis|postgres-combined|redis-combined>
+THE_ONE_STATE_URL=<connection string, may carry credentials>
+THE_ONE_VECTOR_TYPE=<qdrant|pgvector|redis-vectors|postgres-combined|redis-combined>
+THE_ONE_VECTOR_URL=<connection string, may carry credentials>
+```
+
+**Naming rationale.** `STATE` and `VECTOR` are the two axis names used throughout `docs/plans/2026-04-11-multi-backend-architecture.md`. Env vars inherit those terms directly. `_TYPE` denotes a closed enum parsed at startup; `_URL` denotes a connection string that may contain credentials. No `DB_URL` (ambiguous), no `BACKEND` (verbose).
+
+**What lives in env vars:** selection (which backend), credentials (via URL), and nothing else. Env vars are the right place for secrets because container orchestrators, systemd `EnvironmentFile=`, and secrets managers all target the env surface.
+
+**What does NOT live in env vars:** tuning knobs, HNSW parameters, schema names, Redis prefixes, AOF verification flags. Those all live in `config.toml` — see § 4 below.
+
+### § 2 — Combined-backend encoding (explicit combined TYPE values)
+
+Phases 4 and 6 ship "combined" backends where ONE connection pool serves BOTH trait roles (state + vectors) for transactional consistency. This is expressed via explicit combined TYPE values:
+
+```bash
+# Combined Postgres — state + vectors in ONE pool, transactional consistency
+THE_ONE_STATE_TYPE=postgres-combined
+THE_ONE_STATE_URL=postgres://user:pw@db.internal/the_one
+THE_ONE_VECTOR_TYPE=postgres-combined
+THE_ONE_VECTOR_URL=postgres://user:pw@db.internal/the_one
+```
+
+**Startup validation rules (all fail loud on violation):**
+
+1. If `STATE_TYPE` ends in `-combined`, `VECTOR_TYPE` MUST be the same value. Mismatch → `InvalidProjectConfig` with the expected value named in the error.
+2. When both TYPEs are `*-combined`, URLs MUST be byte-identical. Different URLs → `InvalidProjectConfig` with both URLs echoed in the error message.
+3. The broker constructs ONE connection pool (`sqlx::PgPool` for `postgres-combined`, `fred::Client` for `redis-combined`) and passes it to both trait impls via the combined backend adapter (Phase 4 / Phase 6).
+4. The broker factory is a single closed `match`: `"sqlite" | "postgres" | "postgres-combined" | "redis" | "redis-combined"` for state, analogous for vectors. No URL-equality inference. No separate "combined" flag.
+
+**Why explicit combined TYPEs beat URL-equality inference:** URL equality is fragile (`postgres://host:5432/db` vs `postgres://host/db` are the same target but non-equal strings). Explicit values make operator intent visible in `env | grep THE_ONE`, and the closed enum catches typos at startup.
+
+### § 3 — Default and failure behavior
+
+| Env var state | Broker behavior |
+|---|---|
+| **All four unset** | Current default: SQLite state + Qdrant vectors. Zero behaviour change from v0.15.x. This is the 95% deployment. |
+| **One TYPE set, other TYPE unset** | **FAIL LOUD at startup.** `"THE_ONE_STATE_TYPE=postgres set but THE_ONE_VECTOR_TYPE is unset; both axes must be explicit when either is overridden."` |
+| **TYPE set but matching URL unset** | **FAIL LOUD.** `"THE_ONE_STATE_TYPE=postgres requires THE_ONE_STATE_URL to be set."` |
+| **Unknown TYPE value** | **FAIL LOUD with the enum list.** `"Unknown THE_ONE_STATE_TYPE=pgsql; expected one of: sqlite, postgres, redis, postgres-combined, redis-combined"` |
+| **Combined TYPEs with mismatched URLs** | **FAIL LOUD** per § 2 rule 2. |
+| **Both TYPEs non-combined, same URL** | **Allowed, silent.** Interpretation: operator wants split pools sharing a host (separate credential rotation, statement-timeout isolation, etc.). |
+| **One side `postgres-combined`, other side `redis-combined`** | **FAIL LOUD.** `"Combined backends must match: THE_ONE_STATE_TYPE=postgres-combined requires THE_ONE_VECTOR_TYPE=postgres-combined"` |
+
+**Failure philosophy.** Every failure mode is startup failure, never runtime failure. Backend misconfiguration producing partial data is the worst possible outcome, so the broker refuses to boot on any ambiguity.
+
+**Correlation with v0.15.0 error sanitization.** These startup errors surface as `InvalidProjectConfig`, which passes through `public_error_message` verbatim (per v0.15.0 rules). The operator sees the full human-readable message; internal parser details stay in `tracing::error!` with a `corr=<id>`.
+
+### § 4 — Config.toml tuning surface
+
+Secrets stay in env vars. Tuning knobs live in `config.toml`. Clean separation.
+
+```toml
+# config.toml — per-backend tuning (secrets live in THE_ONE_* env vars, not here)
+
+[state.sqlite]
+# No tuning knobs. Path derived from THE_ONE_PROJECT_ROOT.
+# journal_mode = "WAL" and synchronous = "NORMAL" are HARDCODED
+# per v0.15.1 Lever 1 guarantees — not configurable.
+
+[state.postgres]
+schema = "the_one"                # default; override if sharing a DB with other apps
+statement_timeout_ms = 30000      # default 30s; 0 disables
+
+[state.redis]
+mode = "persistent"               # "persistent" | "cache" — selects durability semantics
+prefix = "the_one_state_{project_id}:"   # {project_id} substituted at runtime
+require_aof = true                # enforced only when mode = "persistent"
+db_number = 0                     # Redis logical DB (0–15)
+
+[vector.qdrant]
+collection_name = "the_one_{project_id}"   # {project_id} substituted at runtime
+# API key (if any) read from THE_ONE_QDRANT_API_KEY env var, NOT this file.
+
+[vector.pgvector]
+schema = "the_one"                # default; can diverge from state.postgres.schema if desired
+hnsw_m = 16                       # HNSW graph connectivity
+hnsw_ef_construction = 100        # HNSW build-time quality
+hnsw_ef_search = 40               # HNSW query-time recall
+
+[vector.redis]
+index_name = "the_one_{project_id}"   # RediSearch FT index name AND hash key prefix
+require_aof = true                # fail startup if Redis reports no persistence
+db_number = 0
+```
+
+**Notes on defaults and edge cases:**
+
+1. **`redis-cache` is a tuning knob, not a TYPE value.** Setting `THE_ONE_STATE_TYPE=redis` + `[state.redis].mode = "cache"` opts into volatile state storage. "Cache vs persistent" is a durability decision, not a tech choice — elevating it to a TYPE value would force two-way branching in every caller.
+2. **`{project_id}` substitution** happens at startup in `AppConfig::load()`, reading `THE_ONE_PROJECT_ID`. Simple literal replacement — no Jinja, no expressions, no `{env:FOO}` escape hatches. YAGNI. If future features need more substitution they add it deliberately with a new plan. Unset `THE_ONE_PROJECT_ID` when a templated field is active → startup fails with an explicit error.
+3. **Single schema default for combined Postgres.** Both `state.postgres.schema` and `vector.pgvector.schema` default to `"the_one"`, so a combined-Postgres deployment has state and vector tables in the same schema by default. Operators who want schema isolation within one database override one of them explicitly. Rationale: less surprise for new adopters, easier to `DROP SCHEMA the_one CASCADE` cleanly if abandoning.
+4. **Combined backends reuse existing sections.** `THE_ONE_STATE_TYPE=postgres-combined` reads from `[state.postgres]` AND `[vector.pgvector]`. There is NO `[combined.postgres]` section. The combined adapter is a dispatch optimization, not a new config surface. Same for `redis-combined`.
+5. **Qdrant API key secret handling.** Qdrant's optional API key reads directly from `THE_ONE_QDRANT_API_KEY` — no config-file indirection like `api_key_env = "..."`. Single responsibility: env var holds the secret, config.toml holds nothing sensitive.
+6. **`[state.sqlite]` has no knobs on purpose.** WAL journal mode and `synchronous=NORMAL` are hardcoded. Exposing them as tunable fields would let operators accidentally reverse the v0.15.1 Lever 1 67× audit speedup. Deployments that need stricter durability pick a different backend.
+
+### § 5 — Prefix / namespace defaults (multi-tenant isolation for free)
+
+The defaults in § 4 give automatic isolation across three dimensions without any operator config:
+
+| Isolation dimension | Default |
+|---|---|
+| **Multiple the-one-mcp projects on one Redis** | `the_one_{project_id}` and `the_one_state_{project_id}:` substitute distinct project IDs |
+| **the-one-mcp coexisting with another app on one Redis** | the-one-mcp uses `the_one_*` prefixes exclusively; other apps (e.g. `mem:`, `oracle:*`) don't collide |
+| **the-one-mcp coexisting with an app that already claims `the_one_*`** | Operator overrides `[state.redis].prefix` and `[vector.redis].index_name` in config.toml explicitly |
+
+**Why prefix lives in config.toml, not env vars:** it's not a secret, it's deployment-topology config, it has a meaningful default (so most deployments don't touch it), and overriding it is a per-deployment decision reviewable in version control. Prefix changes also mean keyspace migration (old keys become orphaned), which is a planned operation — not a `export THE_ONE_PREFIX=...` from a shell.
+
+### § 6 — Phase sequencing (which phase adds what)
+
+| Phase | Env vars introduced | Config sections added | Validation activated |
+|---|---|---|---|
+| **1** (broker call-site migration) | None | None | None — pure refactor |
+| **2** (pgvector) | `THE_ONE_VECTOR_TYPE=pgvector` + `THE_ONE_VECTOR_URL` | `[vector.pgvector]` | **ALL of § 3 rules activate here.** See the critical sequencing note below. |
+| **3** (PostgresStateStore) | `THE_ONE_STATE_TYPE=postgres` + `THE_ONE_STATE_URL` | `[state.postgres]` | § 3 unchanged (already active from Phase 2) |
+| **4** (combined Postgres) | `postgres-combined` added to both TYPE enums | None new (reuses `[state.postgres]` + `[vector.pgvector]`) | § 2 combined-matching rules 1, 2, 7 |
+| **5** (Redis state, three modes) | `THE_ONE_STATE_TYPE=redis` | `[state.redis]` with `mode` field | `require_aof` enforced when `mode = "persistent"` |
+| **6** (combined Redis) | `redis-combined` added to both TYPE enums | None new (reuses `[state.redis]` + `[vector.redis]`) | Combined-matching applies to Redis pair |
+| **7** (Redis-Vector parity) | None | None | None — capability expansion only |
+
+**CRITICAL sequencing note for Phase 2.** The § 3 validation rules activate the MOMENT the env var parser exists, which is Phase 2. Before Phase 2, there is no parser at all — unset env vars are the only code path. Phase 2's first test MUST exercise the "operator set only `VECTOR_TYPE=pgvector`, expected startup failure" case, even though pgvector is the only new backend shipping. Getting validation right at introduction prevents a "we'll tighten it later" regression loop. Once deployed operators have a mental model of "setting one side silently defaults the other," undoing that is a breaking change.
+
+**Relationship to existing 5-layer config** (`defaults → global file → project file → env vars → runtime overrides`): the `THE_ONE_*_TYPE` / `_URL` env vars live at layer 4. The config.toml tuning sections live at layers 2–3. Runtime overrides (layer 5) still work for everything. The only new thing is that layer 4's TYPE fields are parsed as a closed enum at startup rather than raw `Option<String>`.
+
+---
+
+## The FULL feature roadmap (execute in order)
+
+Execute EVERYTHING. Do not stop at checkpoints unless you hit an actual blocker. Each phase MUST be fully tested + documented before the next phase starts. After each phase: STOP, report to me, wait for "continue" before moving on.
+
+### Phase 1 — Broker state store cache + call-site migration
+
+**Scope:** ~200 LOC mechanical refactor in `broker.rs`. Turns the existing `ProjectDatabase::open(...)` call sites (~18 of them) into trait dispatch through a broker-held cache.
+
+**Deliverables:**
+
+- Add field to `McpBroker`:
+  ```rust
+  state_by_project: RwLock<HashMap<String, Arc<Mutex<Box<dyn StateStore + Send>>>>>
+  ```
+- New factory method `state_store_factory(project_root: &Path, project_id: &str) -> Result<Box<dyn StateStore + Send>, CoreError>`. Currently returns only `Box::new(SqliteStateStore::open(...)?)` but is structured so Phase 2 can add branches without touching call sites.
+- Replace every `let db = ProjectDatabase::open(project_root, project_id)?;` in `crates/the-one-mcp/src/broker.rs` with a helper `with_state_store(project_root, project_id, |store| ...)` that looks up / constructs / caches.
+- Add `McpBroker::shutdown()` that drains the cache and closes every connection cleanly. This is load-bearing for Phase 3+ because Postgres/Redis pools need explicit teardown.
+- All 449+ existing tests must still pass unchanged. This is a pure refactor.
+- New test: `broker_state_store_cache_reuses_connections` — verify that two back-to-back calls for the same `(project_root, project_id)` reuse the same cached store.
+
+**Commit message:** `feat(mcp): broker state_by_project cache via StateStore trait`
+
+**STOP and report to me before starting Phase 2.**
+
+---
+
+### Phase 2 — pgvector VectorBackend + env var parser + startup validator
+
+**Scope:** ~800 LOC across new files + env var parser introduction.
+
+**Deliverables:**
+
+- Add workspace dependencies:
+  ```toml
+  sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "macros"] }
+  pgvector = { version = "0.4", features = ["sqlx"] }
+  ```
+- New Cargo feature `pg-vectors` on `crates/the-one-memory/Cargo.toml`.
+- New file `crates/the-one-memory/src/pg_vector.rs`:
+  - `PgVectorBackend` struct holding `sqlx::PgPool` + `schema: String` + `project_id: String`
+  - Schema bootstrap: `CREATE EXTENSION IF NOT EXISTS vector; CREATE SCHEMA IF NOT EXISTS <schema>; CREATE TABLE <schema>.chunks / entities / relations / images` with HNSW indexes
+  - Full `impl VectorBackend` covering ALL operations (chunks dense + hybrid, entities, relations, images, persistence verification)
+  - Batched upserts via multi-row `INSERT ... ON CONFLICT DO UPDATE`
+- New env var parser + startup validator in `the_one_core::config::backend_selection` (new submodule):
+  - Reads all four env vars (`THE_ONE_STATE_TYPE`, `THE_ONE_STATE_URL`, `THE_ONE_VECTOR_TYPE`, `THE_ONE_VECTOR_URL`)
+  - Enforces ALL § 3 rules from the backend selection scheme above
+  - Returns a typed `BackendSelection { state: StateTypeChoice, vector: VectorTypeChoice }` enum
+  - On any failure, returns `CoreError::InvalidProjectConfig` with the exact error messages specified in § 3
+- New config.toml section parser for `[vector.pgvector]` with fields: `schema`, `hnsw_m`, `hnsw_ef_construction`, `hnsw_ef_search`
+- New broker factory branch: when `BackendSelection.vector == VectorTypeChoice::Pgvector`, construct `PgVectorBackend::new(config, url)?`
+- `{project_id}` substitution in `AppConfig::load()` — literal `.replace("{project_id}", ...)` only
+- Integration test gated on the unified scheme: runs only when `THE_ONE_VECTOR_TYPE == "pgvector"` AND `THE_ONE_VECTOR_URL` is set. Skip gracefully otherwise. No separate `_TEST`-suffixed env var — the test harness reads the same production env surface per § 1. Covers full CRUD + hybrid-search round trip.
+- Negative tests for the validator:
+  - `only_vector_type_set_fails_loud` — sets `THE_ONE_VECTOR_TYPE=pgvector` without state-side, expects `InvalidProjectConfig` with the exact § 3 error message
+  - `unknown_type_fails_with_enum_list` — sets `THE_ONE_VECTOR_TYPE=pgsql`, expects error listing all valid values
+  - `type_without_url_fails` — sets type but no URL, expects specific error
+- Bench: extend `production_hardening_bench.rs` with pgvector throughput numbers (gated on env var)
+- Docs: new section in `docs/guides/production-hardening-v0.15.md` on pgvector setup, HNSW vs IVFFlat trade-offs, index tuning
+
+**Commit message:** `feat(memory): v0.16.0 — pgvector VectorBackend + env var parser + startup validator`
+
+**STOP and report to me before starting Phase 3.**
+
+---
+
+### Phase 3 — PostgresStateStore impl
+
+**Scope:** ~1500 LOC — the FTS translation layer is the bulk.
+
+**Deliverables:**
+
+- New Cargo feature `pg-state` on `crates/the-one-core/Cargo.toml`
+- New file `crates/the-one-core/src/storage/postgres.rs`:
+  - `PostgresStateStore` struct holding `sqlx::PgPool` + `schema: String` + `project_id: String`
+  - Schema migrations via `sqlx::migrate!` OR hand-written `run_migrations_postgres` mirroring `sqlite.rs`
+  - FTS translation: SQLite FTS5 virtual table → Postgres `tsvector` column with GIN index, `to_tsquery` for match, `ts_rank` for ordering, LIKE fallback mirroring sqlite's existing fallback
+  - Timestamp translation: `strftime('%s','now') * 1000` → `(extract(epoch from now()) * 1000)::bigint`
+  - `INSERT OR REPLACE ... ON CONFLICT DO UPDATE` is portable — Postgres 9.5+ supports identical syntax
+  - Full `impl StateStore` — all 22 trait methods
+  - Transaction wrapping for `upsert_diary_entry` (mirrors the SQLite atomicity fix from Phase 0)
+- New broker factory branch: when `BackendSelection.state == StateTypeChoice::Postgres`, construct `PostgresStateStore::new(config, url)?`
+- New config.toml section parser for `[state.postgres]` with fields: `schema`, `statement_timeout_ms`
+- Integration tests gated on the unified scheme: `THE_ONE_STATE_TYPE == "postgres"` AND `THE_ONE_STATE_URL` is set. Skip gracefully otherwise. Full round-trip for all 22 `StateStore` methods.
+- Cross-backend regression test: run the existing broker integration tests against a `PostgresStateStore`-backed broker and verify every test passes byte-for-byte. If the existing broker tests are too SQLite-specific to port directly, ship `PostgresStateStore`-specific equivalents instead and document the coverage gap in `docs/guides/multi-backend-operations.md`.
+
+**Commit message:** `feat(core): v0.16.0 — PostgresStateStore impl`
+
+**STOP and report to me before starting Phase 4.**
+
+---
+
+### Phase 4 — Combined Postgres+pgvector backend
+
+**Scope:** ~300 LOC.
+
+**Deliverables:**
+
+- New submodule `crates/the-one-core/src/backend/` (create if needed) with file `postgres_combined.rs`
+- `PostgresCombinedBackend` struct holding ONE `sqlx::PgPool` that serves BOTH `impl StateStore` AND `impl VectorBackend`
+- Transactional consistency: broker methods that write to both state AND vectors (e.g. `memory_ingest_conversation` writes `conversation_sources` + chunk vectors) can optionally run them in one `tx.commit()`. Expose this via a new trait method `StateStore::begin_combined_tx()` that returns a transaction handle implementing `impl StateStore + VectorBackend` scoped to the transaction — OR via a simpler "combined adapter wraps both traits in one struct" approach. **Decision point**: pick the simpler of the two after reading the actual broker call site that would benefit. Ask me if ambiguous.
+- Broker dispatch: when `BackendSelection.state == StateTypeChoice::PostgresCombined` (which means `vector == VectorTypeChoice::PostgresCombined` per § 2 rules and URLs are validated identical), the broker constructs ONE `PostgresCombinedBackend` instance and uses it for both trait roles.
+- Integration test: upsert in a single transaction, verify rollback discards both state AND vector writes atomically.
+- Docs update in `docs/guides/multi-backend-operations.md`: new subsection on combined Postgres, when to pick it vs split, credential-rotation considerations.
+
+**Commit message:** `feat: v0.16.0 — combined Postgres+pgvector backend`
+
+**STOP and report to me before starting Phase 5.**
+
+---
+
+### Phase 5 — Redis StateStore (three durability modes)
+
+**Scope:** ~1500 LOC.
+
+Three modes:
+- **Cache-only (volatile)** — `[state.redis].mode = "cache"`. No AOF check. Explicitly accepts data loss.
+- **Persistent (AOF required)** — `[state.redis].mode = "persistent"`. Calls `verify_persistence()` at startup; refuses to boot if Redis reports no AOF.
+- **Combined with RediSearch** — handled in Phase 6, not this phase. Phase 5 introduces modes 1 and 2 only.
+
+**Deliverables:**
+
+- Expand fred features in workspace Cargo.toml to include `i-redisjson`, `i-scripting`, `i-streams` if not already present
+- New Cargo feature `redis-state` on `crates/the-one-core/Cargo.toml`
+- New file `crates/the-one-core/src/storage/redis.rs`:
+  - `RedisStateStore` holding `fred::Client` + `mode: RedisStateMode` enum + `prefix: String` + `project_id: String`
+  - Persistent mode calls `verify_persistence()` on construction, refuses to boot if AOF disabled
+  - Cache mode skips durability check (explicitly accepts data loss)
+  - Schema: Redis data structures — hashes for entries, sorted sets for time-range queries, RedisJSON for structured data, streams for audit log ordering
+  - All 22 `impl StateStore` methods
+  - FTS via `FT.SEARCH` (RediSearch) on diary fields — the same machinery `RedisVectorStore` already uses but targeted at state, not vectors
+- New broker factory branch: `StateTypeChoice::Redis` → `RedisStateStore::new(config, url)?`
+- New config.toml section parser for `[state.redis]` with fields: `mode`, `prefix`, `require_aof`, `db_number`
+- Integration tests gated on the unified scheme: `THE_ONE_STATE_TYPE == "redis"` AND `THE_ONE_STATE_URL` is set. Skip gracefully otherwise. The mode under test (cache / persistent) is set programmatically in the test's in-memory `AppConfig` builder — not via a separate env var. This lets a single `cargo test` run exercise BOTH modes sequentially against the same Redis URL, rather than requiring the operator to re-export env vars between test runs.
+- Negative test: `persistent_mode_rejects_redis_without_aof` — builds an `AppConfig` with `[state.redis].mode = "persistent"`, points at a Redis with AOF disabled, expects startup failure.
+
+**Commit message:** `feat(core): v0.16.0 — Redis StateStore (cache + persistent modes)`
+
+**STOP and report to me before starting Phase 6.**
+
+---
+
+### Phase 6 — Combined Redis+RediSearch backend
+
+**Scope:** ~300 LOC.
+
+**Deliverables:**
+
+- New file `crates/the-one-core/src/backend/redis_combined.rs`
+- `RedisCombinedBackend` implementing BOTH `StateStore` AND `VectorBackend` via ONE `fred::Client`
+- Shared transaction semantics via MULTI/EXEC where possible (note: Redis transactions are less powerful than Postgres — document the limits clearly in the combined adapter)
+- Broker dispatch: `StateTypeChoice::RedisCombined` + `VectorTypeChoice::RedisCombined` + validated matching URLs → one `RedisCombinedBackend` instance used for both roles
+- Tests gated on the unified scheme: `THE_ONE_STATE_TYPE == "redis-combined"` AND `THE_ONE_VECTOR_TYPE == "redis-combined"` AND matching URLs. Skip gracefully otherwise. The test harness constructs an `AppConfig` asserting `[state.redis].require_aof = true` — if the target Redis doesn't have AOF enabled, the combined backend's startup verification should refuse to boot, which is itself a tested behaviour.
+- Docs update: combined Redis subsection in `docs/guides/multi-backend-operations.md`
+
+**Commit message:** `feat: v0.16.0 — combined Redis+RediSearch backend`
+
+**STOP and report to me before starting Phase 7.**
+
+---
+
+### Phase 7 — Redis-Vector parity + v0.16.0 release
+
+**Scope:** ~400 LOC for parity work + final validation + release notes.
+
+**Parity work:**
+- Update `crates/the-one-memory/src/redis_vectors.rs` to support entity, relation, image vector operations via additional RediSearch indexes (`{prefix}_entities`, `{prefix}_relations`, `{prefix}_images`)
+- Update `BackendCapabilities::chunks_only` → `full` for Redis-Vector
+- Delete the trait default `Ok(())` / `Vec::new()` fallbacks that were preserving v0.14.x silent-skip semantics — Redis now supports everything
+- New tests covering entity/relation/image operations on Redis-Vector
+
+**Final validation (before the release commit):**
+- `cargo fmt --check`
+- `cargo clippy --workspace --all-targets -- -D warnings`
+- `cargo test --workspace` — record the final passing count. Must be monotonically greater than the Phase 0 baseline.
+- `bash scripts/release-gate.sh`
+- Run `production_hardening_bench.rs` under every backend permutation (SQLite+Qdrant, pgvector+Postgres, Postgres-combined, Redis-combined); record the numbers in the release notes
+
+**Release documentation:**
+- Write v0.16.0 section in `docs/guides/production-hardening-v0.15.md` covering: new backend options, selection matrix, benchmark results, migration paths from v0.15.x
+- Update `docs/guides/multi-backend-operations.md` with: complete backend selection matrix, config examples for every combo (SQLite+Qdrant, Postgres split, Postgres combined, Redis split, Redis combined, mix-and-match), trade-off table (latency / durability / cost / operational complexity), migration paths
+- Update `docs/guides/mempalace-operations.md` to reference the new backend modes
+- Update `CLAUDE.md` conventions block — append a `Phase B/C multi-backends (v0.16.0)` bullet describing what shipped
+- Prepend new v0.16.0 entry to `CHANGELOG.md` in Keep-a-Changelog format matching v0.16.0-rc1
+
+**Final commits:**
+1. `feat(memory): v0.16.0 — Redis-Vector entity/relation/image parity`
+2. `docs: v0.16.0 release notes + multi-backend ops guide`
+3. `release: v0.16.0 — multi-backend support (vectors + state)`
+
+**After the release commit lands:**
+- Delete this file (`docs/plans/2026-04-11-resume-phase1-onwards.md`) in a follow-up commit OR include its deletion in the release commit itself
+- Suggest `/compact` or `/clear` per Michel's post-completion token management rule
+
+---
+
+## Execution discipline (applies to every phase)
+
+For every phase:
+
+1. Read the relevant phase section above AND the corresponding section of `docs/plans/2026-04-11-multi-backend-architecture.md` first
+2. Implement fully — no stubs, no placeholders, no "good enough"
+3. Write tests: unit + integration, positive + negative
+4. Run full validation: `cargo fmt --check` + `cargo clippy --workspace --all-targets -- -D warnings` + `cargo test --workspace` + `bash scripts/release-gate.sh`
+5. Update docs in the same commit as the code change
+6. Ask me for commit authorization BEFORE running `git commit` (per global rule "NEVER commit anything without explicit authorisation")
+7. STOP and report to me after every phase — do not start the next phase until I say "continue"
+
+**If you hit a real blocker** (external API ambiguity, test harness failure, unexpected dependency conflict, sqlx version incompatibility, anything unexpected), STOP and ask me rather than working around it. Shortcuts break the trade-off math that went into this roadmap.
+
+---
+
+## Acceptance criteria for v0.16.0 (the whole feature)
+
+1. Every backend combination works via config alone, zero code changes required to switch:
+   - SQLite + Qdrant (unchanged default)
+   - SQLite + pgvector (mix-and-match)
+   - Postgres + Qdrant (mix-and-match)
+   - Postgres + pgvector (split pools, two URLs)
+   - **Postgres combined** (one pool, `postgres-combined`)
+   - Postgres + Redis-Vectors (cross-tech)
+   - Redis + Qdrant
+   - Redis + pgvector
+   - **Redis combined** (one client, `redis-combined`)
+   - Redis cache + Redis-Vectors (mixed durability)
+2. `cargo test --workspace` passes. Count monotonically greater than the Phase 0 baseline. Tests requiring live Postgres/Redis are gated on the unified scheme (the same `THE_ONE_STATE_TYPE` + `THE_ONE_STATE_URL` / `THE_ONE_VECTOR_TYPE` + `THE_ONE_VECTOR_URL` env vars production reads), and skip gracefully when those vars aren't set to the relevant backend. No `_TEST`-suffixed env vars exist in the workspace — the test harness shares the production env surface per § 1's unified-scheme decision.
+3. `production_hardening_bench.rs` produces comparable numbers across all backends; results recorded in release notes.
+4. Every backend has operator-facing docs in `docs/guides/multi-backend-operations.md` with: selection matrix, config examples, migration paths, trade-off table.
+5. `CHANGELOG.md` has a complete v0.16.0 entry in Keep-a-Changelog format.
+6. Zero regressions on existing behaviour. Every test that passed at the Phase 0 baseline still passes at v0.16.0.
+7. § 3 validation rules are fully enforced — negative tests exist for every failure mode in the table.
+
+---
+
+## Non-goals for this roadmap (do NOT do these)
+
+- **No new user-facing MCP tools.** This is infrastructure — no MCP endpoint gains, loses, or changes a parameter.
+- **No performance optimization beyond what the backends naturally give.** SQLite+Qdrant remains the default because it's fast enough for most use cases. This phase is about options, not speed.
+- **No cross-backend migration tooling.** "Dump from SQLite, load into Postgres" is out of scope for v0.16.0. Operators choose a backend at init time; switching later requires manual re-ingestion.
+- **No Lever 2 async audit batching.** Designed in parallel (`docs/plans/2026-04-10-audit-batching-lever2.md`) but explicitly deferred — separate post-v0.16.0 ticket.
+- **No `Cargo.toml` version bump.** Stays at `"0.1.0"`. Real version lives in tags + commit subject + CHANGELOG.
+- **No extended `{project_id}` substitution syntax.** Literal `.replace("{project_id}", ...)` only. No `{env:FOO}`, no expressions, no Jinja.
+
+---
+
+## First action
+
+1. Run the baseline verification block above in full
+2. Record the test count into `/tmp/the-one-baseline.txt`
+3. Report results to me
+4. **Wait for my "continue" before starting Phase 1.** Do not begin Phase 1 on your own.
+
+Do NOT:
+- Skip any phase
+- Batch phases into single commits
+- Commit without explicit authorization per phase
+- Assume any § 3 validation rule can be "tightened later"
+- Extend `{project_id}` substitution beyond the literal pattern
+- Take shortcuts around real blockers — ask me instead
+
+Phase 0 is already landed in `5ff9872`. Begin at Phase 1.
