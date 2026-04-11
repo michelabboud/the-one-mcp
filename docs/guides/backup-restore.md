@@ -3,6 +3,15 @@
 > v0.12.0 introduced `maintain: action: backup` and `maintain: action: restore`
 > for moving project state between machines. This guide covers what's included,
 > how to use it, and what you're responsible for backing up separately.
+>
+> **v0.16.0 multi-backend note:** `maintain: backup` captures SQLite state
+> and local Qdrant collection data. It does NOT snapshot Postgres
+> (pgvector or `PostgresStateStore`) or Redis. When running against those
+> backends, use the native provider tooling (`pg_dump`, `redis-cli BGSAVE`,
+> managed-provider PITR snapshots) on a schedule you control. See the
+> standalone [pgvector-backend.md](pgvector-backend.md) and
+> [postgres-state-backend.md](postgres-state-backend.md) for per-backend
+> operational details.
 
 ## When to use this
 

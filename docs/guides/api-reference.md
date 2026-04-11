@@ -1,6 +1,8 @@
 # The-One MCP API Reference
 
-> Complete reference for all 30 MCP tools + 3 MCP resource types exposed by the-one-mcp v0.12.0.
+> Complete reference for all 30 MCP tools + 3 MCP resource types exposed by
+> the-one-mcp. Current version: v0.16.0-phase3. Tool and resource shapes are
+> unchanged since v0.12.0 — v0.15/v0.16 work is additive and backend-internal.
 >
 > Tools are invoked via JSON-RPC 2.0 over stdio/SSE/stream. Every tool call uses
 > `method: "tools/call"` with `params.name` and `params.arguments`. Results are
@@ -9,6 +11,14 @@
 > **Resources** (new in v0.10.0) are invoked via `resources/list` and
 > `resources/read` methods directly — not wrapped in `tools/call`. See the
 > [Resources section](#mcp-resources) below.
+>
+> **Backend-agnostic:** every tool below works identically against the
+> default SQLite + Qdrant backend and against the v0.16.0 alternatives
+> (pgvector, PostgresStateStore). The broker dispatches through the
+> `VectorBackend` and `StateStore` traits, so tool behaviour is
+> invariant across backend choice. See the
+> [multi-backend operations guide](multi-backend-operations.md) for
+> operator-level deployment details.
 
 ---
 

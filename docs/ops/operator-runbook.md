@@ -1,37 +1,85 @@
 # The-One MCP Operator Runbook
 
-Last updated: 2026-04-05
-Applies to: v0.6.0 (`v1beta` schema)
+Last updated: 2026-04-11
+Applies to: v0.16.0-phase3 (`v1beta` schema, multi-backend v0.16.0)
 
 ## 1. Service Health Checklist
 
 ```bash
-# Verify workspace builds and tests pass
+# Verify workspace builds and tests pass (default: SQLite + Qdrant)
 cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+# Expected: 466 passing, 0 failing, 1 ignored (v0.16.0-phase3 baseline)
 
-# Verify binary builds
+# With Phase 2 + Phase 3 feature-gated backends (pgvector + Postgres state)
+cargo clippy --workspace --all-targets --features pg-state,pg-vectors -- -D warnings
+cargo test --workspace --features pg-state,pg-vectors
+# Expected: 495 passing, 0 failing, 1 ignored
+
+# Verify binary builds — default and feature-gated
 cargo build --release -p the-one-mcp --bin the-one-mcp
+cargo build --release -p the-one-mcp --bin the-one-mcp --features pg-state,pg-vectors
 
-# Run release gate
+# Run release gate (fmt + clippy + test + build, SQLite path)
 bash scripts/release-gate.sh
 ```
 
-### Verify Project State
+### Verify Project State (SQLite default)
 
 After `setup` (action: `init`), check these files exist:
+
 - `<project>/.the-one/project.json`
 - `<project>/.the-one/overrides.json`
 - `<project>/.the-one/fingerprint.json`
 - `<project>/.the-one/pointers.json`
-- `<project>/.the-one/state.db`
+- `<project>/.the-one/state.db` (SQLite — schema v7 with `outcome` + `error_kind` columns)
 - `<project>/.the-one/docs/` (managed docs folder)
+
+### Verify Project State (Postgres backend — v0.16.0 Phase 3)
+
+When `THE_ONE_STATE_TYPE=postgres` is set, `state.db` does NOT
+exist. Instead verify in Postgres:
+
+```sql
+\dn the_one                              -- schema exists
+\dt the_one.*                            -- 8 tables + state_migrations
+\di the_one.*                            -- includes diary_entries_content_tsv GIN
+SELECT * FROM the_one.state_migrations ORDER BY version;
+-- → 2 rows, versions 0..1, SHA-256 checksums
+```
+
+When `THE_ONE_VECTOR_TYPE=pgvector` is set, also check:
+
+```sql
+SELECT * FROM the_one.pgvector_migrations ORDER BY version;
+-- → 5 rows, versions 0..4 (extension + chunks + entities + relations)
+SELECT extname FROM pg_extension WHERE extname = 'vector';
+-- → 'vector' row must exist
+```
 
 ### Verify Global State
 
 - `${THE_ONE_HOME:-$HOME/.the-one}/config.json` (global config)
 - `${THE_ONE_HOME:-$HOME/.the-one}/registry/capabilities.json` (capability catalog)
+
+### Verify Backend Selection
+
+When any `THE_ONE_{STATE,VECTOR}_{TYPE,URL}` env var is set, the
+broker parses them once at startup via
+`the_one_core::config::backend_selection::BackendSelection::from_env`
+and fails loud on any inconsistency. Startup failure modes
+covered by the parser (all produce
+`CoreError::InvalidProjectConfig` at broker construction time):
+
+- One TYPE set, the other unset
+- TYPE set but matching URL unset
+- Unknown TYPE value (returns the enum list)
+- Combined TYPEs with mismatched values
+- Combined TYPEs with mismatched URLs
+
+See [docs/guides/configuration.md § Multi-Backend Selection](../guides/configuration.md#multi-backend-selection-v0160)
+for the full matrix and error messages.
 
 ## 2. Running the Server
 
@@ -143,6 +191,44 @@ Edit `<project>/.the-one/config.json` directly. Changes take effect on next brok
 ### Precedence
 
 Runtime overrides > env vars > project config > global config > defaults
+
+### Multi-Backend Selection (v0.16.0+)
+
+State store and vector backend are pluggable via four env vars
+parsed at broker startup:
+
+```bash
+THE_ONE_STATE_TYPE=<sqlite|postgres|redis|postgres-combined|redis-combined>
+THE_ONE_STATE_URL=<connection string>
+THE_ONE_VECTOR_TYPE=<qdrant|pgvector|redis-vectors|postgres-combined|redis-combined>
+THE_ONE_VECTOR_URL=<connection string>
+```
+
+Shipping today (v0.16.0-phase3):
+
+| State | Vector | Features | Notes |
+|---|---|---|---|
+| `sqlite` (default) | `qdrant` (default) | (none) | v0.15.x baseline, no rebuild needed |
+| `sqlite` | `pgvector` | `pg-vectors` | Phase 2 — single-axis Postgres |
+| `postgres` | `qdrant` | `pg-state` | Phase 3 — single-axis Postgres |
+| `postgres` | `pgvector` | `pg-state,pg-vectors` | Phase 3 — split-pool on both axes |
+
+Pending: `postgres-combined` (Phase 4), `redis` + `redis-combined`
+(Phases 5–6), `redis-vectors` at full parity (Phase 7).
+
+**Tuning knobs** live in `config.json` under `vector_pgvector` (HNSW
+parameters + pool sizing) and `state_postgres` (statement timeout +
+pool sizing). Secrets stay in env vars. See
+[docs/guides/configuration.md § Multi-Backend Selection](../guides/configuration.md#multi-backend-selection-v0160)
+for the full field tables.
+
+Per-backend operational playbooks:
+- [pgvector-backend.md](../guides/pgvector-backend.md) — per-provider
+  extension install, HNSW retune recipes, monitoring queries.
+- [postgres-state-backend.md](../guides/postgres-state-backend.md) —
+  sync-over-async bridge, FTS5 → tsvector translation, pool sizing.
+- [multi-backend-operations.md](../guides/multi-backend-operations.md)
+  — deployment matrix across state + vector axes.
 
 ## 7. Nano Provider Pool Management
 

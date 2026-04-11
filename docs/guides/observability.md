@@ -1,8 +1,16 @@
 # Observability Guide
 
 > v0.12.0 extended the broker's metrics surface with 8 new counters and
-> per-operation latency tracking. This guide covers what's measured, how
-> to access it, and how to use the data for debugging.
+> per-operation latency tracking. v0.15.0 added structured audit
+> outcomes (`outcome` + `error_kind` columns, schema v7) and wire-level
+> error sanitization with correlation IDs. v0.16.0 Phase 3 introduced
+> `CoreError::Postgres` (label `"postgres"`) for the new
+> `PostgresStateStore` backend — audit events and metrics behave
+> identically across SQLite and Postgres state stores because the
+> broker only talks through the `StateStore` trait.
+>
+> This guide covers what's measured, how to access it, and how to use
+> the data for debugging — backend-agnostic.
 
 ## The `observe` tool
 
@@ -12,7 +20,7 @@ actions:
 | Action | Purpose |
 |--------|---------|
 | `metrics` | Dump the current in-memory counter snapshot |
-| `events` | Read the SQLite audit event log (last N events) |
+| `events` | Read the audit event log (last N events) — reads from SQLite or Postgres depending on `THE_ONE_STATE_TYPE` |
 
 Call it via any AI CLI or direct JSON-RPC:
 

@@ -1,5 +1,10 @@
 # The-One MCP Complete Guide
 
+> **Current version**: v0.16.0-phase3. The v0.16.0 line introduced
+> multi-backend support — see § 1.1 "Multi-backend architecture
+> (v0.16.0+)" below. The default deployment (SQLite + Qdrant) is
+> unchanged; everything here still works for that path.
+
 ## 1. Overview
 
 `the-one-mcp` is a Rust MCP broker that acts as a smart intermediary between AI coding assistants and your project. Works with **Claude Code**, **Gemini CLI**, **OpenCode**, and **Codex** — same server, same protocol, client-aware tool loading.
@@ -7,7 +12,8 @@
 It provides:
 
 - **Project lifecycle** — detect languages, frameworks, and risk profile; cache results via fingerprinting
-- **Semantic memory** — production-grade RAG with fastembed 5.13 (1024-dim ONNX) or API embeddings over Qdrant
+- **Semantic memory** — production-grade RAG with fastembed 5.13 (1024-dim ONNX) or API embeddings. Vector storage is pluggable: Qdrant (default), pgvector (v0.16.0 Phase 2), or Redis/RediSearch.
+- **State store** — SQLite (default) or Postgres (v0.16.0 Phase 3) for project profiles, approvals, audit events, conversation sources, AAAK lessons, diary entries, and navigation nodes.
 - **Image search** — multimodal image indexing and search with optional OCR
 - **Reranking** — optional cross-encoder reranking for higher-precision search results
 - **Code-aware chunking** — AST chunkers for 13 languages with symbol metadata and fallback behavior
@@ -18,13 +24,43 @@ It provides:
 - **Intelligent routing** — rules-first with optional nano LLM provider pool (priority/round-robin/latency)
 - **Token efficiency** — configurable limits on search results, doc sizes, tool suggestions
 
+### 1.1 Multi-backend architecture (v0.16.0+)
+
+Both state and vector storage became pluggable in v0.16.0 via two parallel traits — `the_one_core::state_store::StateStore` and `the_one_memory::vector_backend::VectorBackend` — and a four-variable env surface that operators toggle without rebuilding anything except when opting into optional Cargo features.
+
+```bash
+# Selection env vars (defaults shown):
+THE_ONE_STATE_TYPE=<sqlite|postgres|redis|postgres-combined|redis-combined>  # default: sqlite
+THE_ONE_STATE_URL=<dsn>                                                       # required if TYPE != sqlite
+THE_ONE_VECTOR_TYPE=<qdrant|pgvector|redis-vectors|postgres-combined|redis-combined>  # default: qdrant
+THE_ONE_VECTOR_URL=<dsn>                                                      # required if TYPE != qdrant
+```
+
+Shipping today:
+
+| State | Vector | Cargo features | Phase |
+|---|---|---|---|
+| `sqlite` (default) | `qdrant` (default) | (none) | v0.15.x baseline |
+| `sqlite` | `pgvector` | `pg-vectors` | v0.16.0 Phase 2 |
+| `postgres` | `qdrant` | `pg-state` | v0.16.0 Phase 3 |
+| `postgres` | `pgvector` | `pg-state,pg-vectors` | v0.16.0 Phase 3 (split pools) |
+
+Pending in the v0.16.0 roadmap: `postgres-combined` (single pool, Phase 4), Redis state modes (Phase 5), combined Redis (Phase 6), Redis-Vector full parity (Phase 7).
+
+Deep-dive guides:
+- [pgvector-backend.md](pgvector-backend.md) — Phase 2 standalone guide
+- [postgres-state-backend.md](postgres-state-backend.md) — Phase 3 standalone guide
+- [multi-backend-operations.md](multi-backend-operations.md) — deployment matrix
+- [configuration.md § Multi-Backend Selection (v0.16.0+)](configuration.md#multi-backend-selection-v0160) — env var rules + field tables
+- [architecture.md § Multi-Backend Architecture (v0.16.0+)](architecture.md#multi-backend-architecture-v0160) — trait surface + broker factory
+
 ### Workspace Crates
 
 | Crate | Responsibility |
 |-------|---------------|
-| `the-one-core` | Config layering, SQLite storage (WAL), policy engine, profiler, manifests, docs manager, configurable limits |
-| `the-one-mcp` | Async broker orchestrator, 30 MCP tools (26 work + 4 multiplexed admin), JSON-RPC dispatch, transport layer (stdio/SSE/stream), CLI binary |
-| `the-one-memory` | Code-aware chunker (Rust/Python/TypeScript/JavaScript/Go + markdown fallback), embedding providers (fastembed local + OpenAI-compatible API), async Qdrant HTTP backend |
+| `the-one-core` | Config layering, SQLite + **Postgres** storage (Phase 3), policy engine, profiler, manifests, docs manager, configurable limits, `StateStore` trait, backend selection parser |
+| `the-one-mcp` | Async broker orchestrator, 30 MCP tools (26 work + 4 multiplexed admin), JSON-RPC dispatch, transport layer (stdio/SSE/stream), CLI binary, `state_by_project` cache (Phase 1) |
+| `the-one-memory` | Code-aware chunker (13 languages), embedding providers (fastembed local + OpenAI-compatible API), async Qdrant HTTP backend, **pgvector backend (Phase 2)**, `VectorBackend` trait |
 | `the-one-router` | Rules-first request classification, OpenAI-compatible nano provider, provider pool with health tracking and 3 routing policies |
 | `the-one-registry` | Capability catalog with risk-tier filtering, visibility modes (core/project/dormant) |
 | `the-one-claude` | Claude Code adapter (thin async wrapper over broker) |
@@ -69,7 +105,7 @@ The installer:
 5. Auto-detects Claude Code, Gemini CLI, OpenCode, Codex and registers the MCP
 6. Validates with a smoke test
 
-Options: `--version v0.14.3`, `--lean` (no swagger), `--local ./target/release`, `--uninstall`
+Options: `--version v0.16.0-phase3`, `--lean` (no swagger), `--local ./target/release`, `--uninstall`. Add `--features pg-vectors,pg-state` when building from source to enable the v0.16.0 multi-backend paths (see [INSTALL.md § Optional multi-backend features](../../INSTALL.md#optional-multi-backend-features-v0160)).
 
 ### Build from Source
 

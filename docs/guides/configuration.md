@@ -1,6 +1,6 @@
 # Configuration Reference
 
-> v0.14.3 — authoritative source: `crates/the-one-core/src/config.rs` and `crates/the-one-core/src/limits.rs`
+> v0.16.0-phase3 — authoritative source: `crates/the-one-core/src/config.rs` and `crates/the-one-core/src/limits.rs`. See § Multi-Backend Selection (v0.16.0+) below for the Phase 2/3 pgvector + Postgres state config additions.
 
 ## Overview
 

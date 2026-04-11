@@ -350,14 +350,16 @@ THE_ONE_VECTOR_URL=<connection string, may carry credentials>
 
 Full rationale and the per-rule test matrix in `docs/plans/2026-04-11-resume-phase1-onwards.md § Backend selection scheme`.
 
-### Phase 2 resume prompt
+### Phase 4 resume prompt
 
-A self-contained resume prompt for a fresh session to pick up Phase 2
-lives at `docs/plans/2026-04-11-resume-phase2-prompt.md` — 376 lines,
-enumerates all 10 deliverables (workspace deps, `pg-vectors` feature,
-`pg_vector.rs` module, `BackendSelection` parser, config.toml section,
-broker factory branch, integration + 8 negative validator tests, bench
-extension, docs work, release gate) plus 6 explicit STOP conditions.
+A self-contained resume prompt for a fresh session to pick up **Phase 4**
+(combined Postgres+pgvector backend) lives at
+`docs/plans/2026-04-11-resume-phase4-prompt.md` — zero-bootstrap entry
+point that reuses the Phase 2 and Phase 3 construction paths (~300 LOC
+of dispatcher wiring). Phase 2's original resume prompt was deleted in
+the post-phase3 docs sweep as a one-session artifact; the canonical
+historical records for Phases 0–3 live as DONE blocks inside
+`docs/plans/2026-04-11-resume-phase1-onwards.md`.
 
 ## What's Next
 

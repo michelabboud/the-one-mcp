@@ -1,6 +1,11 @@
 # The-One MCP Quickstart
 
-Shortest path to a working MCP server connected to your AI assistant.
+> Shortest path to a working MCP server connected to your AI assistant.
+> Default build uses **SQLite + Qdrant** — the 95% deployment. For
+> Postgres-backed state or pgvector-backed vectors (v0.16.0 Phase 2/3),
+> see [INSTALL.md § Optional multi-backend features](../../INSTALL.md#optional-multi-backend-features-v0160)
+> and the standalone [pgvector-backend.md](pgvector-backend.md) /
+> [postgres-state-backend.md](postgres-state-backend.md) guides.
 
 ## Option A: One-Command Install (Recommended)
 
@@ -80,5 +85,8 @@ $EDITOR ~/.the-one/config.json
 - **[INSTALL.md](../../INSTALL.md)** — complete installation guide
 - **[Complete Guide](the-one-mcp-complete-guide.md)** — all features including image search and reranking
 - **[MemPalace Operations Guide](mempalace-operations.md)** — profile presets, AAAK, diary, navigation, hook capture
-- **[Operator Runbook](../ops/operator-runbook.md)** — backup, incident triage
+- **[Operator Runbook](../ops/operator-runbook.md)** — backup, incident triage, multi-backend operations
+- **[Multi-Backend Operations](multi-backend-operations.md)** — deployment matrix across SQLite/Postgres/Qdrant/pgvector
+- **[pgvector Backend](pgvector-backend.md)** — v0.16.0 Phase 2 standalone guide
+- **[Postgres State Backend](postgres-state-backend.md)** — v0.16.0 Phase 3 standalone guide
 - **[Tool Ecosystem](../plans/tool-ecosystem-architecture.md)** — catalog vision

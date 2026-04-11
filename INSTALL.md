@@ -55,6 +55,49 @@ cargo build --release -p the-one-mcp --bin the-one-mcp
 bash scripts/install.sh --local ./target/release
 ```
 
+### Optional multi-backend features (v0.16.0+)
+
+By default the broker builds with SQLite state + Qdrant vectors.
+Operators running managed Postgres can opt into two additional
+backends via Cargo features — **both off by default**, so existing
+deployments don't rebuild:
+
+```bash
+# pgvector VectorBackend (Phase 2) — Postgres + `vector` extension
+# for semantic search. Activated at runtime via:
+#   THE_ONE_VECTOR_TYPE=pgvector
+#   THE_ONE_VECTOR_URL=postgres://user:pw@db.internal/the_one
+cargo build --release -p the-one-mcp --bin the-one-mcp --features pg-vectors
+
+# PostgresStateStore (Phase 3) — full StateStore trait on Postgres
+# (profiles, approvals, audit, diary with tsvector FTS, navigation
+# nodes + tunnels). Activated at runtime via:
+#   THE_ONE_STATE_TYPE=postgres
+#   THE_ONE_STATE_URL=postgres://user:pw@db.internal/the_one
+cargo build --release -p the-one-mcp --bin the-one-mcp --features pg-state
+
+# Both — split-pool Postgres on both axes (two independent pools):
+cargo build --release -p the-one-mcp --bin the-one-mcp --features pg-state,pg-vectors
+```
+
+Runtime selection happens through env vars, not config files, so
+the same binary can point at different backends across
+environments. Feature gates the sqlx dependency; without them sqlx
+is not in the dep tree.
+
+- See [docs/guides/configuration.md § Multi-Backend Selection](docs/guides/configuration.md#multi-backend-selection-v0160)
+  for the full `THE_ONE_{STATE,VECTOR}_{TYPE,URL}` surface and
+  fail-loud validation rules.
+- Per-backend operational details (setup, tuning, monitoring)
+  live in the standalone guides
+  [docs/guides/pgvector-backend.md](docs/guides/pgvector-backend.md)
+  and
+  [docs/guides/postgres-state-backend.md](docs/guides/postgres-state-backend.md).
+- Phase 4 (combined single-pool Postgres serving both axes) is
+  pending — the env var parser already validates
+  `postgres-combined` TYPE values; the factory branch currently
+  returns `NotEnabled`.
+
 ## What Gets Installed
 
 ```

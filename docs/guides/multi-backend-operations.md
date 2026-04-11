@@ -84,6 +84,10 @@ Requirements:
 
 ### SQLite + pgvector (v0.16.0 Phase 2, split-pool)
 
+> **Full operational details in the standalone guide**:
+> [pgvector-backend.md](pgvector-backend.md).
+
+
 Operators running managed Postgres can use pgvector for vector
 storage while keeping the v0.15.x SQLite state store. This is the
 simplest pgvector deployment: no state migration, no combined-
@@ -156,6 +160,10 @@ transparent — the broker routes through the same `VectorBackend`
 trait calls the existing Qdrant path uses.
 
 ### Postgres state + Qdrant (v0.16.0 Phase 3, split-pool)
+
+> **Full operational details in the standalone guide**:
+> [postgres-state-backend.md](postgres-state-backend.md).
+
 
 Use the Phase 3 `PostgresStateStore` for state while keeping the
 default Qdrant backend for vectors. This gives operators an
@@ -333,34 +341,101 @@ the-one-mcp supports overriding with `PRAGMA synchronous=FULL`
 
 ## 6. Migration paths
 
-### SQLite → Postgres (planned)
+> **No automated cross-backend migration tooling ships in v0.16.0.**
+> This was an explicit non-goal — see `PROGRESS.md` ("Deferred /
+> Not on the v0.16.0 roadmap"). Operators choose a backend at init
+> time; switching later is manual re-ingestion against the new
+> backend. Schema drift between backends is fine for a greenfield
+> install but unsafe for a data migration — which is why no
+> `maintain: migrate_state` tool exists and there's no plan to add
+> one in the v0.16.0 line.
 
-1. Drain the watcher and shut down the broker cleanly.
-2. Run the (planned) `maintain: action: migrate_state` tool with
-   `from: sqlite, to: postgres`. This dumps the SQLite tables and
-   re-inserts them into the Postgres schema using the same
-   `StateStore` trait on both sides.
-3. Update config: set `state_backend: "postgres"` and
-   `postgres_url: ...`
-4. Restart. The broker opens the Postgres pool, runs the same
-   migrations, and every subsequent write goes to Postgres.
+### SQLite → Postgres (manual, shipped in v0.16.0 Phase 3)
 
-### Qdrant → pgvector (planned)
+1. Stand up Postgres ≥ 13 (any vanilla image — no extensions
+   required for `PostgresStateStore`).
+2. Drain the watcher and shut down the broker cleanly.
+3. **Optional**: export the old SQLite history if you need it as a
+   reference. There's no import path; the dump is for your records
+   only.
+   ```bash
+   sqlite3 ~/.the-one/projects/<project>/state.db .dump > state-backup.sql
+   ```
+4. Rebuild the broker with the feature:
+   ```bash
+   cargo build --release -p the-one-mcp --bin the-one-mcp --features pg-state
+   ```
+5. Export env vars:
+   ```bash
+   export THE_ONE_STATE_TYPE=postgres
+   export THE_ONE_STATE_URL=postgres://user:pw@db.internal/the_one
+   ```
+6. Restart the broker. First boot applies the Phase 3 migrations
+   (`0000_state_migrations_table.sql` + `0001_state_schema_v7.sql`).
+7. Re-run `project.init` on every project to rehydrate metadata
+   against the new backend. Audit history, diary entries, and AAAK
+   lessons from the SQLite DB are NOT carried over — they exist
+   only in the backup.
 
-1. Keep both running during migration.
-2. Run `maintain: action: migrate_vectors` with
-   `from: qdrant, to: pgvector`.
-3. The broker exports each Qdrant collection in batches and upserts
-   into pgvector via the `VectorBackend` trait — no re-embedding
-   needed if dimensions match.
-4. Update `vector_backend: "pgvector"` in config and restart.
+Full guide + per-provider install notes:
+**[postgres-state-backend.md](postgres-state-backend.md)**.
 
-### Redis-Vector → Redis-Combined (planned)
+### Qdrant → pgvector (manual, shipped in v0.16.0 Phase 2)
 
-Redis-Vector already uses RediSearch under the hood. Migrating to
-the combined backend just means pointing state operations at the
-same Redis URL and enabling `redis_persistence_required` on a Redis
-instance with `appendonly yes`.
+1. Stand up Postgres ≥ 13 with the `vector` extension available
+   (Supabase ships it; AWS RDS / Cloud SQL / Azure / self-hosted
+   each have different install paths — see the standalone guide).
+2. Rebuild with the feature:
+   ```bash
+   cargo build --release -p the-one-mcp --bin the-one-mcp --features pg-vectors
+   ```
+3. Export env vars:
+   ```bash
+   export THE_ONE_VECTOR_TYPE=pgvector
+   export THE_ONE_VECTOR_URL=postgres://user:pw@db.internal/the_one
+   ```
+4. Restart the broker. `preflight_vector_extension` runs a
+   defensive 3-query probe with targeted per-provider error
+   messages; if the `vector` extension isn't installed, startup
+   fails loud with the install steps for your environment.
+5. Re-run `project.init` on every project to re-ingest source
+   documents against the pgvector backend. Existing Qdrant data is
+   untouched — delete the Qdrant collection manually once you're
+   confident the new backend is good.
+
+**The vector dimension is locked at 1024** (Decision C, matching
+BGE-large-en-v1.5 quality tier). If your existing Qdrant collection
+uses a different dim, you'll need to re-embed anyway — no
+batch-copy shortcut.
+
+Full guide + HNSW tuning + per-provider install:
+**[pgvector-backend.md](pgvector-backend.md)**.
+
+### Combined Postgres (Phase 4, pending)
+
+Phase 4 will ship `postgres-combined` — one `sqlx::PgPool` serving
+both `StateStore` and `VectorBackend` trait roles. The migration
+path from split-pool Postgres to combined Postgres will be:
+
+1. Verify both `state_postgres` and `vector_pgvector` point at the
+   **same** database (they can already share a schema because the
+   tracking tables `state_migrations` and `pgvector_migrations`
+   are distinct).
+2. Change both env var TYPEs to `postgres-combined` with
+   byte-identical URLs.
+3. Restart. The broker constructs one pool instead of two; no
+   data copy needed — both migration runners have already been
+   applied to the same schema in Phase 2/3.
+
+No-op data migration; just a dispatcher change. Ships in Phase 4.
+
+### Redis migrations (Phases 5 + 6, pending)
+
+Redis state store ships in Phase 5 (three durability modes: cache,
+persistent with AOF, combined). Combined Redis+RediSearch ships in
+Phase 6. Migration paths for those will follow the same
+re-ingestion pattern as SQLite → Postgres — no automated cross-
+backend tooling.
 
 ---
 
@@ -436,10 +511,40 @@ Start here
 
 ## 10. See also
 
+### Backend-specific guides (v0.16.0)
+
+- **[pgvector-backend.md](pgvector-backend.md)** — Phase 2 standalone
+  guide. Per-provider install (Supabase/RDS/Cloud SQL/Azure/self-
+  hosted), defensive preflight, hand-rolled migration runner,
+  HNSW tuning, sqlx pool sizing, monitoring queries, Decision D
+  deferral notes.
+- **[postgres-state-backend.md](postgres-state-backend.md)** — Phase 3
+  standalone guide. Sync-over-async bridge rationale, FTS5 →
+  tsvector translation, `'simple'` vs `'english'` tokenizer
+  choice, schema v7 parity, 11 integration tests, Phase 4 combined
+  preview.
+- `docs/guides/redis-vector-backend.md` — Redis/RediSearch backend
+  and persistence expectations.
+
+### Configuration + architecture
+
+- **[configuration.md § Multi-Backend Selection (v0.16.0+)](configuration.md#multi-backend-selection-v0160)**
+  — env var surface + validation rules + per-backend config tables.
+- **[architecture.md § Multi-Backend Architecture (v0.16.0+)](architecture.md#multi-backend-architecture-v0160)**
+  — trait surface, broker cache, factory dispatcher, cross-phase
+  relationship table.
 - `docs/plans/2026-04-11-multi-backend-architecture.md` — the full
   architecture plan (Phases A1/A2/B/C).
 - `docs/guides/production-hardening-v0.15.md` — v0.15.x durability
-  trade-offs + Lever 1 rationale.
+  trade-offs + Lever 1 rationale (§§ 15 + 16 now redirect to the
+  standalone backend guides above).
+
+### Plans + trait source
+
+- `docs/plans/2026-04-11-resume-phase1-onwards.md` — canonical Phase
+  1–7 execution plan with DONE blocks for Phases 0–3.
+- `docs/plans/2026-04-11-resume-phase4-prompt.md` — standalone resume
+  prompt for the next session (Phase 4 combined Postgres+pgvector).
 - `docs/guides/mempalace-operations.md` — memory palace configuration
   (orthogonal to backend choice).
 - `docs/reviews/2026-04-10-mempalace-comparative-audit.md` — why the
@@ -448,3 +553,5 @@ Start here
   trait source.
 - `crates/the-one-core/src/state_store.rs` — the StateStore trait
   source.
+- `crates/the-one-core/src/config/backend_selection.rs` — the env
+  var parser source (v0.16.0 Phase 2).
