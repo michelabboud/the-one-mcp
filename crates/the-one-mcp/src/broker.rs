@@ -22,6 +22,7 @@ use the_one_core::manifests::{
 };
 use the_one_core::policy::PolicyEngine;
 use the_one_core::project::{project_init, project_refresh, RefreshMode};
+use the_one_core::state_store::StateStore;
 use the_one_core::storage::sqlite::ProjectDatabase;
 use the_one_memory::conversation::{
     AaakCompressionArtifact, ConversationFormat, ConversationTranscript,
@@ -69,11 +70,35 @@ const AAAK_MIN_OCCURRENCES: usize = 2;
 const AAAK_MIN_CONFIDENCE_PERCENT: u8 = 70;
 const AAAK_MAX_LESSONS_PER_BATCH: usize = 8;
 
+/// Concrete type of the per-project state-store cache entry.
+///
+/// Each entry is an `Arc<std::sync::Mutex<Box<dyn StateStore + Send>>>`:
+///
+/// - `Arc` so two concurrent handlers targeting the same `(project_root,
+///   project_id)` can both clone a reference out of the outer `RwLock`
+///   without re-acquiring it for the duration of their work.
+/// - `std::sync::Mutex` (not `tokio::sync::Mutex`) is deliberate: it makes
+///   the guard `!Send`, which means the compiler refuses any attempt to
+///   hold a `StateStore` across an `.await` point. That restriction is
+///   load-bearing for Phase 3+ — holding a Postgres/Redis connection-pool
+///   checkout across an await is the #1 way to deadlock a backend pool
+///   under load. We pay for the correctness with one extra closure-shaped
+///   helper (`with_state_store`) and the rewrite of two broker handlers
+///   that currently straddle awaits.
+/// - `Box<dyn StateStore + Send>` so Phase 2+ can plug in Postgres/Redis
+///   without touching the cache type.
+type StateStoreCacheEntry = Arc<std::sync::Mutex<Box<dyn StateStore + Send>>>;
+
 pub struct McpBroker {
     router: Router,
     registry: CapabilityRegistry,
     memory_by_project: Arc<RwLock<HashMap<String, MemoryEngine>>>,
     docs_by_project: RwLock<HashMap<String, DocsManager>>,
+    /// Per-project `StateStore` cache keyed by `{canonical_root}::{project_id}`.
+    /// Added in v0.16.0 Phase 1 — replaces the prior pattern of opening
+    /// a fresh `ProjectDatabase` connection on every broker method call.
+    /// See [`StateStoreCacheEntry`] for the concurrency rationale.
+    state_by_project: RwLock<HashMap<String, StateStoreCacheEntry>>,
     global_registry_path: Option<PathBuf>,
     policy: PolicyEngine,
     session_approvals: RwLock<HashSet<String>>,
@@ -142,6 +167,7 @@ impl McpBroker {
             registry,
             memory_by_project: Arc::new(RwLock::new(HashMap::new())),
             docs_by_project: RwLock::new(HashMap::new()),
+            state_by_project: RwLock::new(HashMap::new()),
             global_registry_path,
             policy,
             session_approvals: RwLock::new(HashSet::new()),
@@ -189,6 +215,127 @@ impl McpBroker {
             CoreError::InvalidProjectConfig("project memory not indexed".to_string())
         })?;
         Ok(f(memory))
+    }
+
+    // ─── StateStore cache (v0.16.0 Phase 1) ────────────────────────────
+    //
+    // `state_store_factory` / `get_or_init_state_store` / `with_state_store`
+    // together replace the pattern of calling `ProjectDatabase::open(...)`
+    // directly in broker methods. All three helpers are private; broker
+    // methods exclusively use `with_state_store` to run a sync closure
+    // against the cached store.
+
+    /// Construct a fresh `StateStore` for the given project. Today this
+    /// only knows how to open SQLite. Phase 2+ will branch on
+    /// [`the_one_core::config::BackendSelection`] parsed from
+    /// `THE_ONE_STATE_TYPE` / `THE_ONE_STATE_URL` env vars — at which point
+    /// `&self` will be used to read the parsed selection that the broker
+    /// computes once at construction. The `&self` parameter is kept in the
+    /// signature today purely for that forward compatibility.
+    fn state_store_factory(
+        &self,
+        project_root: &Path,
+        project_id: &str,
+    ) -> Result<Box<dyn StateStore + Send>, CoreError> {
+        let db = ProjectDatabase::open(project_root, project_id)?;
+        Ok(Box::new(db))
+    }
+
+    /// Look up the cached state store for a project, constructing it on
+    /// first access.
+    ///
+    /// Uses a read/write-upgrade pattern so that the fast path (cache hit)
+    /// takes only a read lock on the outer `RwLock`, and the cold path
+    /// constructs the new store **outside** the write lock — important for
+    /// Phase 3+ when the factory becomes async (Postgres pool warm-up,
+    /// Redis AOF verification). The double-check under the write lock
+    /// handles the rare race where two concurrent callers both miss the
+    /// cache; the loser drops its freshly-built store and returns the
+    /// winner's entry.
+    async fn get_or_init_state_store(
+        &self,
+        project_root: &Path,
+        project_id: &str,
+    ) -> Result<StateStoreCacheEntry, CoreError> {
+        let key = Self::project_memory_key(project_root, project_id);
+
+        // Fast path: read lock, clone the Arc out, release.
+        if let Some(existing) = self.state_by_project.read().await.get(&key) {
+            return Ok(existing.clone());
+        }
+
+        // Cold path: construct outside the write lock so concurrent
+        // cache-miss traffic for *different* projects is not serialized
+        // through this factory call.
+        let new_store = self.state_store_factory(project_root, project_id)?;
+        let new_entry: StateStoreCacheEntry = Arc::new(std::sync::Mutex::new(new_store));
+
+        // Double-check under the write lock: another task may have raced
+        // us and populated the key while we were building.
+        let mut map = self.state_by_project.write().await;
+        if let Some(existing) = map.get(&key) {
+            return Ok(existing.clone());
+        }
+        map.insert(key, new_entry.clone());
+        Ok(new_entry)
+    }
+
+    /// Run a synchronous closure against the cached state store for a
+    /// project. The closure receives `&dyn StateStore` — the same
+    /// abstraction every future backend (Postgres, Redis, combined)
+    /// implements — so this helper is the single chokepoint through which
+    /// every broker method reaches persistent state.
+    ///
+    /// # Why the closure is synchronous
+    ///
+    /// The inner lock is a [`std::sync::Mutex`], not a tokio mutex. Its
+    /// guard is `!Send`, so the compiler refuses any attempt to hold it
+    /// across an `.await`. That restriction is deliberate: it prevents
+    /// any broker handler from pinning a backend connection (or a
+    /// Postgres/Redis pool checkout, in Phase 3+) across asynchronous
+    /// work, which is the #1 way to deadlock a backend pool under load.
+    ///
+    /// Broker handlers that need to interleave state-store calls with
+    /// async memory-engine work just invoke `with_state_store` multiple
+    /// times around the `.await` boundary, rather than holding one
+    /// connection for the whole request.
+    async fn with_state_store<R>(
+        &self,
+        project_root: &Path,
+        project_id: &str,
+        f: impl FnOnce(&dyn StateStore) -> Result<R, CoreError>,
+    ) -> Result<R, CoreError> {
+        let entry = self
+            .get_or_init_state_store(project_root, project_id)
+            .await?;
+        let guard = entry.lock().map_err(|_| {
+            // Mutex poisoning means a previous closure panicked mid-call.
+            // We surface this as InvalidProjectConfig — the project's
+            // state store is now in an unknown state, and the operator
+            // needs to investigate the earlier panic in the logs.
+            CoreError::InvalidProjectConfig(format!(
+                "state store mutex poisoned for project '{project_id}'; see prior panic in logs"
+            ))
+        })?;
+        f(&**guard)
+    }
+
+    /// Drain the state-store cache, closing every cached backend.
+    ///
+    /// For SQLite, closing is implicit on `Drop` (the `rusqlite::Connection`
+    /// releases its WAL lock). For Phase 3+ Postgres/Redis pools, this is
+    /// the explicit teardown point where async `pool.close().await` will
+    /// be called — reason the method is `async` today even though the
+    /// SQLite-only body is sync.
+    ///
+    /// Tests and binary shutdown should call this before dropping the
+    /// broker to guarantee pool cleanup ordering.
+    pub async fn shutdown(&self) {
+        let mut map = self.state_by_project.write().await;
+        map.clear();
+        // Phase 3+: iterate `drain()` and call `store.shutdown().await` on
+        // each — requires adding a shutdown method to the `StateStore`
+        // trait. Deferred until Postgres/Redis backends exist.
     }
 
     async fn build_memory_engine(
@@ -859,13 +1006,13 @@ impl McpBroker {
     }
 
     fn sync_navigation_nodes_from_palace_metadata(
-        db: &ProjectDatabase,
+        store: &dyn StateStore,
         project_id: &str,
         palace: &PalaceMetadata,
     ) -> Result<(), CoreError> {
         let now = current_time_epoch_ms();
         let drawer_id = Self::navigation_drawer_node_id(project_id, &palace.wing);
-        db.upsert_navigation_node(&MemoryNavigationNode {
+        store.upsert_navigation_node(&MemoryNavigationNode {
             node_id: drawer_id.clone(),
             project_id: project_id.to_string(),
             kind: MemoryNavigationNodeKind::Drawer,
@@ -880,7 +1027,7 @@ impl McpBroker {
         let mut parent_node_id = drawer_id;
         if let Some(hall) = palace.hall.as_deref() {
             let closet_id = Self::navigation_closet_node_id(project_id, &palace.wing, hall);
-            db.upsert_navigation_node(&MemoryNavigationNode {
+            store.upsert_navigation_node(&MemoryNavigationNode {
                 node_id: closet_id.clone(),
                 project_id: project_id.to_string(),
                 kind: MemoryNavigationNodeKind::Closet,
@@ -895,7 +1042,7 @@ impl McpBroker {
         }
 
         if let Some(room) = palace.room.as_deref() {
-            db.upsert_navigation_node(&MemoryNavigationNode {
+            store.upsert_navigation_node(&MemoryNavigationNode {
                 node_id: Self::navigation_room_node_id(
                     project_id,
                     &palace.wing,
@@ -1083,8 +1230,11 @@ impl McpBroker {
             return Ok(());
         }
 
-        let db = ProjectDatabase::open(project_root, project_id)?;
-        let sources = db.list_conversation_sources(None, None, None, usize::MAX)?;
+        let sources = self
+            .with_state_store(project_root, project_id, |store| {
+                store.list_conversation_sources(None, None, None, usize::MAX)
+            })
+            .await?;
         let (engine, _) = self
             .build_rehydrated_local_engine(project_root, project_id, &sources, None)
             .await?;
@@ -1663,8 +1813,16 @@ impl McpBroker {
 
         let (transcript_path, transcript) =
             Self::load_transcript_from_path(project_root, &request.path, &request.format)?;
-        let db = ProjectDatabase::open(project_root, &request.project_id)?;
-        let existing_sources = db.list_conversation_sources(None, None, None, usize::MAX)?;
+
+        // v0.16.0 Phase 1: pull existing sources through the state-store
+        // cache. The handler then proceeds to async memory-engine work
+        // *without* holding any state-store lock, and reacquires the
+        // cache inside a single closure at the end for all DB writes.
+        let existing_sources = self
+            .with_state_store(project_root, &request.project_id, |store| {
+                store.list_conversation_sources(None, None, None, usize::MAX)
+            })
+            .await?;
 
         let palace = Self::palace_metadata_from_parts(&request.project_id, wing, hall, room);
         let source_path = transcript_path.display().to_string();
@@ -1712,7 +1870,15 @@ impl McpBroker {
         };
         drop(memories);
 
-        db.upsert_conversation_source(&the_one_core::storage::sqlite::ConversationSourceRecord {
+        // v0.16.0 Phase 1: all remaining state-store writes run inside a
+        // single sync closure. This bundles the conversation source
+        // upsert, optional navigation sync, optional AAAK lessons, and
+        // the audit entry into one Mutex-guarded span — previously they
+        // ran through four separate `db.*` calls on one held handle.
+        // The closure returns the audit outcome so a failure to record
+        // audit doesn't propagate, matching the v0.14.x non-fatal
+        // behavior.
+        let conversation_record = the_one_core::storage::sqlite::ConversationSourceRecord {
             project_id: request.project_id.clone(),
             transcript_path: transcript_path.display().to_string(),
             memory_path: source_path,
@@ -1721,42 +1887,57 @@ impl McpBroker {
             hall: palace.as_ref().and_then(|value| value.hall.clone()),
             room: palace.as_ref().and_then(|value| value.room.clone()),
             message_count: transcript.messages.len(),
-        })?;
-
-        if Self::navigation_features_enabled(&config) {
-            if let Some(palace) = palace.as_ref() {
-                Self::sync_navigation_nodes_from_palace_metadata(&db, &request.project_id, palace)?;
-            }
-        }
-
-        if Self::aaak_features_enabled(&config) {
-            for lesson in Self::aaak_lessons_from_transcript(
+        };
+        let aaak_lessons = if Self::aaak_features_enabled(&config) {
+            Self::aaak_lessons_from_transcript(
                 &request.project_id,
                 &transcript_path,
                 &transcript,
                 AAAK_MAX_LESSONS_PER_BATCH,
-            ) {
-                db.upsert_aaak_lesson(&lesson)?;
-            }
-        }
-
-        // v0.15.0: structured audit entry for every successful write.
+            )
+        } else {
+            Vec::new()
+        };
         let audit_params = the_one_core::audit::params_json(serde_json::json!({
             "project_id": request.project_id,
             "path": request.path,
             "ingested_chunks": ingested_chunks,
         }));
-        if let Err(err) = db.record_audit(&the_one_core::audit::AuditRecord::ok(
-            "memory.ingest_conversation",
-            audit_params,
-        )) {
-            tracing::warn!(
-                target: "the_one_mcp::audit",
-                operation = "memory.ingest_conversation",
-                error = %err,
-                "audit record failed (non-fatal)"
-            );
-        }
+        let navigation_enabled = Self::navigation_features_enabled(&config);
+        let project_id_for_nav = request.project_id.clone();
+        let palace_for_nav = palace.clone();
+
+        self.with_state_store(project_root, &request.project_id, |store| {
+            store.upsert_conversation_source(&conversation_record)?;
+
+            if navigation_enabled {
+                if let Some(palace) = palace_for_nav.as_ref() {
+                    Self::sync_navigation_nodes_from_palace_metadata(
+                        store,
+                        &project_id_for_nav,
+                        palace,
+                    )?;
+                }
+            }
+
+            for lesson in &aaak_lessons {
+                store.upsert_aaak_lesson(lesson)?;
+            }
+
+            if let Err(err) = store.record_audit(&the_one_core::audit::AuditRecord::ok(
+                "memory.ingest_conversation",
+                audit_params,
+            )) {
+                tracing::warn!(
+                    target: "the_one_mcp::audit",
+                    operation = "memory.ingest_conversation",
+                    error = %err,
+                    "audit record failed (non-fatal)"
+                );
+            }
+            Ok(())
+        })
+        .await?;
 
         Ok(MemoryIngestConversationResponse {
             ingested_chunks,
@@ -1780,13 +1961,16 @@ impl McpBroker {
         self.ensure_project_memory_loaded(project_root, &request.project_id)
             .await?;
 
-        let db = ProjectDatabase::open(project_root, &request.project_id)?;
-        let sources = db.list_conversation_sources(
-            request.wing.as_deref(),
-            request.hall.as_deref(),
-            request.room.as_deref(),
-            request.max_items,
-        )?;
+        let sources = self
+            .with_state_store(project_root, &request.project_id, |store| {
+                store.list_conversation_sources(
+                    request.wing.as_deref(),
+                    request.hall.as_deref(),
+                    request.room.as_deref(),
+                    request.max_items,
+                )
+            })
+            .await?;
         if sources.is_empty() {
             return Ok(MemoryWakeUpResponse {
                 summary: "No conversation memory available.".to_string(),
@@ -1925,10 +2109,13 @@ impl McpBroker {
             &transcript,
             AAAK_MAX_LESSONS_PER_BATCH,
         );
-        let db = ProjectDatabase::open(project_root, &request.project_id)?;
-        for lesson in &lessons {
-            db.upsert_aaak_lesson(lesson)?;
-        }
+        self.with_state_store(project_root, &request.project_id, |store| {
+            for lesson in &lessons {
+                store.upsert_aaak_lesson(lesson)?;
+            }
+            Ok(())
+        })
+        .await?;
 
         Ok(MemoryAaakTeachResponse {
             outcome: AaakTeachOutcome {
@@ -1957,10 +2144,12 @@ impl McpBroker {
             ));
         }
 
-        let db = ProjectDatabase::open(project_root, &request.project_id)?;
-        Ok(MemoryAaakListLessonsResponse {
-            lessons: db.list_aaak_lessons(&request.project_id, request.limit)?,
-        })
+        let lessons = self
+            .with_state_store(project_root, &request.project_id, |store| {
+                store.list_aaak_lessons(&request.project_id, request.limit)
+            })
+            .await?;
+        Ok(MemoryAaakListLessonsResponse { lessons })
     }
 
     #[instrument(skip_all)]
@@ -1995,46 +2184,53 @@ impl McpBroker {
             the_one_core::naming::sanitize_name(tag, "diary tag")?;
         }
         let now = current_time_epoch_ms();
-        let db = ProjectDatabase::open(project_root, &request.project_id)?;
-        let existing_entry = db
-            .list_diary_entries(Some(&request.entry_date), Some(&request.entry_date), 1)?
-            .into_iter()
-            .next();
-        let entry = DiaryEntry {
-            entry_id: existing_entry
-                .as_ref()
-                .map(|entry| entry.entry_id.clone())
-                .unwrap_or_else(|| Self::diary_entry_id(&request.project_id, &request.entry_date)),
-            project_id: request.project_id.clone(),
-            entry_date: request.entry_date,
-            mood,
-            tags,
-            content,
-            created_at_epoch_ms: existing_entry
-                .as_ref()
-                .map(|entry| entry.created_at_epoch_ms)
-                .unwrap_or(now),
-            updated_at_epoch_ms: now,
-        };
+        let entry_date = request.entry_date.clone();
+        let project_id = request.project_id.clone();
+        let entry = self
+            .with_state_store(project_root, &request.project_id, |store| {
+                let existing_entry = store
+                    .list_diary_entries(Some(&entry_date), Some(&entry_date), 1)?
+                    .into_iter()
+                    .next();
+                let entry = DiaryEntry {
+                    entry_id: existing_entry
+                        .as_ref()
+                        .map(|entry| entry.entry_id.clone())
+                        .unwrap_or_else(|| Self::diary_entry_id(&project_id, &entry_date)),
+                    project_id: project_id.clone(),
+                    entry_date,
+                    mood,
+                    tags,
+                    content,
+                    created_at_epoch_ms: existing_entry
+                        .as_ref()
+                        .map(|entry| entry.created_at_epoch_ms)
+                        .unwrap_or(now),
+                    updated_at_epoch_ms: now,
+                };
 
-        db.upsert_diary_entry(&entry)?;
+                store.upsert_diary_entry(&entry)?;
 
-        let audit_params = the_one_core::audit::params_json(serde_json::json!({
-            "project_id": entry.project_id,
-            "entry_id": entry.entry_id,
-            "entry_date": entry.entry_date,
-        }));
-        if let Err(err) = db.record_audit(&the_one_core::audit::AuditRecord::ok(
-            "memory.diary.add",
-            audit_params,
-        )) {
-            tracing::warn!(
-                target: "the_one_mcp::audit",
-                operation = "memory.diary.add",
-                error = %err,
-                "audit record failed (non-fatal)"
-            );
-        }
+                let audit_params = the_one_core::audit::params_json(serde_json::json!({
+                    "project_id": entry.project_id,
+                    "entry_id": entry.entry_id,
+                    "entry_date": entry.entry_date,
+                }));
+                if let Err(err) = store.record_audit(&the_one_core::audit::AuditRecord::ok(
+                    "memory.diary.add",
+                    audit_params,
+                )) {
+                    tracing::warn!(
+                        target: "the_one_mcp::audit",
+                        operation = "memory.diary.add",
+                        error = %err,
+                        "audit record failed (non-fatal)"
+                    );
+                }
+
+                Ok(entry)
+            })
+            .await?;
 
         Ok(MemoryDiaryAddResponse { entry })
     }
@@ -2059,14 +2255,16 @@ impl McpBroker {
         )?;
         // v0.15.0: route through pagination validation — returns an
         // InvalidRequest error on over-limit, never silently truncates.
-        let db = ProjectDatabase::open(project_root, &request.project_id)?;
-        Ok(MemoryDiaryListResponse {
-            entries: db.list_diary_entries(
-                request.start_date.as_deref(),
-                request.end_date.as_deref(),
-                request.max_results,
-            )?,
-        })
+        let entries = self
+            .with_state_store(project_root, &request.project_id, |store| {
+                store.list_diary_entries(
+                    request.start_date.as_deref(),
+                    request.end_date.as_deref(),
+                    request.max_results,
+                )
+            })
+            .await?;
+        Ok(MemoryDiaryListResponse { entries })
     }
 
     #[instrument(skip_all)]
@@ -2094,15 +2292,17 @@ impl McpBroker {
             request.end_date.as_deref(),
         )?;
 
-        let db = ProjectDatabase::open(project_root, &request.project_id)?;
-        Ok(MemoryDiarySearchResponse {
-            entries: db.search_diary_entries_in_range(
-                query,
-                request.start_date.as_deref(),
-                request.end_date.as_deref(),
-                request.max_results,
-            )?,
-        })
+        let entries = self
+            .with_state_store(project_root, &request.project_id, |store| {
+                store.search_diary_entries_in_range(
+                    query,
+                    request.start_date.as_deref(),
+                    request.end_date.as_deref(),
+                    request.max_results,
+                )
+            })
+            .await?;
+        Ok(MemoryDiarySearchResponse { entries })
     }
 
     #[instrument(skip_all)]
@@ -2125,12 +2325,15 @@ impl McpBroker {
         )?;
 
         let max_summary_items = self.policy.clamp_search_hits(request.max_summary_items);
-        let db = ProjectDatabase::open(project_root, &request.project_id)?;
-        let entries = db.list_diary_entries(
-            request.start_date.as_deref(),
-            request.end_date.as_deref(),
-            max_summary_items,
-        )?;
+        let entries = self
+            .with_state_store(project_root, &request.project_id, |store| {
+                store.list_diary_entries(
+                    request.start_date.as_deref(),
+                    request.end_date.as_deref(),
+                    max_summary_items,
+                )
+            })
+            .await?;
 
         Ok(MemoryDiarySummarizeResponse {
             summary: Self::build_diary_summary(
@@ -2166,48 +2369,58 @@ impl McpBroker {
             ));
         }
 
-        let db = ProjectDatabase::open(project_root, &request.project_id)?;
         let kind = Self::navigation_node_kind_from_label(&request.kind)?;
-        let parent_node = request
-            .parent_node_id
-            .as_deref()
-            .map(|parent_node_id| {
-                the_one_core::naming::sanitize_action_key(parent_node_id)?;
-                db.get_navigation_node(parent_node_id)?
-                    .ok_or_else(|| Self::navigation_missing_node_error(parent_node_id))
+        // Clone project_id for the outer call so the closure can move
+        // `request` freely (it moves `request.project_id` / `request.node_id`
+        // / `request.label` / `request.parent_node_id` into the node).
+        let project_id_key = request.project_id.clone();
+        let node = self
+            .with_state_store(project_root, &project_id_key, |store| {
+                let parent_node = request
+                    .parent_node_id
+                    .as_deref()
+                    .map(|parent_node_id| {
+                        the_one_core::naming::sanitize_action_key(parent_node_id)?;
+                        store
+                            .get_navigation_node(parent_node_id)?
+                            .ok_or_else(|| Self::navigation_missing_node_error(parent_node_id))
+                    })
+                    .transpose()?;
+                Self::validate_navigation_parent(&kind, parent_node.as_ref())?;
+
+                let node = MemoryNavigationNode {
+                    node_id: request.node_id,
+                    project_id: request.project_id,
+                    kind,
+                    label: request.label,
+                    parent_node_id: request.parent_node_id,
+                    wing,
+                    hall,
+                    room,
+                    updated_at_epoch_ms: current_time_epoch_ms(),
+                };
+                store.upsert_navigation_node(&node)?;
+
+                let audit_params = the_one_core::audit::params_json(serde_json::json!({
+                    "project_id": node.project_id,
+                    "node_id": node.node_id,
+                    "kind": node.kind.as_str(),
+                }));
+                if let Err(err) = store.record_audit(&the_one_core::audit::AuditRecord::ok(
+                    "memory.navigation.upsert_node",
+                    audit_params,
+                )) {
+                    tracing::warn!(
+                        target: "the_one_mcp::audit",
+                        operation = "memory.navigation.upsert_node",
+                        error = %err,
+                        "audit record failed (non-fatal)"
+                    );
+                }
+
+                Ok(node)
             })
-            .transpose()?;
-        Self::validate_navigation_parent(&kind, parent_node.as_ref())?;
-
-        let node = MemoryNavigationNode {
-            node_id: request.node_id,
-            project_id: request.project_id,
-            kind,
-            label: request.label,
-            parent_node_id: request.parent_node_id,
-            wing,
-            hall,
-            room,
-            updated_at_epoch_ms: current_time_epoch_ms(),
-        };
-        db.upsert_navigation_node(&node)?;
-
-        let audit_params = the_one_core::audit::params_json(serde_json::json!({
-            "project_id": node.project_id,
-            "node_id": node.node_id,
-            "kind": node.kind.as_str(),
-        }));
-        if let Err(err) = db.record_audit(&the_one_core::audit::AuditRecord::ok(
-            "memory.navigation.upsert_node",
-            audit_params,
-        )) {
-            tracing::warn!(
-                target: "the_one_mcp::audit",
-                operation = "memory.navigation.upsert_node",
-                error = %err,
-                "audit record failed (non-fatal)"
-            );
-        }
+            .await?;
 
         Ok(MemoryNavigationUpsertNodeResponse { node })
     }
@@ -2230,12 +2443,8 @@ impl McpBroker {
             ));
         }
 
-        let db = ProjectDatabase::open(project_root, &request.project_id)?;
-        db.get_navigation_node(&request.from_node_id)?
-            .ok_or_else(|| Self::navigation_missing_node_error(&request.from_node_id))?;
-        db.get_navigation_node(&request.to_node_id)?
-            .ok_or_else(|| Self::navigation_missing_node_error(&request.to_node_id))?;
-
+        // Compute the normalized endpoints first so the closure can move
+        // `request` into the tunnel record.
         let (from_node_id, to_node_id) =
             Self::normalized_tunnel_endpoints(&request.from_node_id, &request.to_node_id);
         if from_node_id == to_node_id {
@@ -2244,14 +2453,34 @@ impl McpBroker {
             ));
         }
 
-        let tunnel = MemoryNavigationTunnel {
-            tunnel_id: Self::navigation_tunnel_id(&request.project_id, &from_node_id, &to_node_id),
-            project_id: request.project_id,
-            from_node_id,
-            to_node_id,
-            updated_at_epoch_ms: current_time_epoch_ms(),
-        };
-        db.upsert_navigation_tunnel(&tunnel)?;
+        // Clone project_id for the outer call so the closure can move
+        // `request` freely (it needs to move `request.project_id` into
+        // the tunnel record).
+        let project_id_key = request.project_id.clone();
+        let tunnel = self
+            .with_state_store(project_root, &project_id_key, |store| {
+                store
+                    .get_navigation_node(&request.from_node_id)?
+                    .ok_or_else(|| Self::navigation_missing_node_error(&request.from_node_id))?;
+                store
+                    .get_navigation_node(&request.to_node_id)?
+                    .ok_or_else(|| Self::navigation_missing_node_error(&request.to_node_id))?;
+
+                let tunnel = MemoryNavigationTunnel {
+                    tunnel_id: Self::navigation_tunnel_id(
+                        &request.project_id,
+                        &from_node_id,
+                        &to_node_id,
+                    ),
+                    project_id: request.project_id,
+                    from_node_id,
+                    to_node_id,
+                    updated_at_epoch_ms: current_time_epoch_ms(),
+                };
+                store.upsert_navigation_tunnel(&tunnel)?;
+                Ok(tunnel)
+            })
+            .await?;
 
         Ok(MemoryNavigationLinkTunnelResponse { tunnel })
     }
@@ -2270,12 +2499,6 @@ impl McpBroker {
             ));
         }
 
-        let db = ProjectDatabase::open(project_root, &request.project_id)?;
-        if let Some(parent_node_id) = request.parent_node_id.as_deref() {
-            db.get_navigation_node(parent_node_id)?
-                .ok_or_else(|| Self::navigation_missing_node_error(parent_node_id))?;
-        }
-
         let kind_filter = request
             .kind
             .as_deref()
@@ -2290,39 +2513,52 @@ impl McpBroker {
             the_one_core::storage::sqlite::page_limits::NAVIGATION_NODES_DEFAULT,
             the_one_core::storage::sqlite::page_limits::NAVIGATION_NODES_MAX,
         )?;
-        let nodes_page = db.list_navigation_nodes_paged(
-            request.parent_node_id.as_deref(),
-            kind_filter.as_deref(),
-            &nodes_req,
-        )?;
-        let nodes = nodes_page.items;
 
-        // v0.15.0: tunnel filter pushed to SQL — previously we fetched every
-        // tunnel in the project into Rust and filtered client-side. Now we
-        // either fetch the full page of tunnels (when no filter is active)
-        // or call the indexed `list_navigation_tunnels_for_nodes` helper.
-        let tunnels = if request.parent_node_id.is_none() && request.kind.is_none() {
-            let tunnels_req = the_one_core::pagination::PageRequest::decode(
-                0,
-                None,
-                the_one_core::storage::sqlite::page_limits::NAVIGATION_TUNNELS_MAX,
-                the_one_core::storage::sqlite::page_limits::NAVIGATION_TUNNELS_MAX,
+        self.with_state_store(project_root, &request.project_id, |store| {
+            if let Some(parent_node_id) = request.parent_node_id.as_deref() {
+                store
+                    .get_navigation_node(parent_node_id)?
+                    .ok_or_else(|| Self::navigation_missing_node_error(parent_node_id))?;
+            }
+
+            let nodes_page = store.list_navigation_nodes_paged(
+                request.parent_node_id.as_deref(),
+                kind_filter.as_deref(),
+                &nodes_req,
             )?;
-            db.list_navigation_tunnels_paged(None, &tunnels_req)?.items
-        } else {
-            let node_id_list: Vec<String> = nodes.iter().map(|node| node.node_id.clone()).collect();
-            db.list_navigation_tunnels_for_nodes(
-                &node_id_list,
-                the_one_core::storage::sqlite::page_limits::NAVIGATION_TUNNELS_MAX,
-            )?
-        };
+            let nodes = nodes_page.items;
 
-        Ok(MemoryNavigationListResponse {
-            nodes,
-            tunnels,
-            next_cursor: nodes_page.next_cursor.map(|c| c.as_str().to_string()),
-            total_nodes: nodes_page.total_count,
+            // v0.15.0: tunnel filter pushed to SQL — previously we fetched every
+            // tunnel in the project into Rust and filtered client-side. Now we
+            // either fetch the full page of tunnels (when no filter is active)
+            // or call the indexed `list_navigation_tunnels_for_nodes` helper.
+            let tunnels = if request.parent_node_id.is_none() && request.kind.is_none() {
+                let tunnels_req = the_one_core::pagination::PageRequest::decode(
+                    0,
+                    None,
+                    the_one_core::storage::sqlite::page_limits::NAVIGATION_TUNNELS_MAX,
+                    the_one_core::storage::sqlite::page_limits::NAVIGATION_TUNNELS_MAX,
+                )?;
+                store
+                    .list_navigation_tunnels_paged(None, &tunnels_req)?
+                    .items
+            } else {
+                let node_id_list: Vec<String> =
+                    nodes.iter().map(|node| node.node_id.clone()).collect();
+                store.list_navigation_tunnels_for_nodes(
+                    &node_id_list,
+                    the_one_core::storage::sqlite::page_limits::NAVIGATION_TUNNELS_MAX,
+                )?
+            };
+
+            Ok(MemoryNavigationListResponse {
+                nodes,
+                tunnels,
+                next_cursor: nodes_page.next_cursor.map(|c| c.as_str().to_string()),
+                total_nodes: nodes_page.total_count,
+            })
         })
+        .await
     }
 
     #[instrument(skip_all)]
@@ -2339,10 +2575,6 @@ impl McpBroker {
             ));
         }
 
-        let db = ProjectDatabase::open(project_root, &request.project_id)?;
-        db.get_navigation_node(&request.start_node_id)?
-            .ok_or_else(|| Self::navigation_missing_node_error(&request.start_node_id))?;
-
         // v0.15.0 production-hardening: BFS traverses the node graph using
         // SQL-side neighbor queries. Prior to v0.15.0 this function loaded
         // every node (capped at 2 000) and every tunnel in the project into
@@ -2358,100 +2590,114 @@ impl McpBroker {
         // 4. Cap total visited nodes at `MAX_TRAVERSE_NODES` so a pathological
         //    request cannot OOM the server; return truncated results + a
         //    `truncated` flag.
+        //
+        // v0.16.0 Phase 1: the BFS runs entirely inside `with_state_store`
+        // — this is the ideal closure case because a single traversal
+        // makes dozens of sequential DB calls that all want the same
+        // backend connection.
         const MAX_TRAVERSE_NODES: usize = 2_000;
 
-        let start_node = db
-            .get_navigation_node(&request.start_node_id)?
-            .expect("start node existence was checked above");
+        self.with_state_store(project_root, &request.project_id, |store| {
+            store
+                .get_navigation_node(&request.start_node_id)?
+                .ok_or_else(|| Self::navigation_missing_node_error(&request.start_node_id))?;
 
-        let mut queue: VecDeque<(MemoryNavigationNode, usize)> =
-            VecDeque::from([(start_node.clone(), 0usize)]);
-        let mut visited: HashMap<String, MemoryNavigationNode> = HashMap::new();
-        visited.insert(start_node.node_id.clone(), start_node);
-        let mut ordered_nodes: Vec<MemoryNavigationNode> = Vec::new();
-        let mut truncated = false;
+            let start_node = store
+                .get_navigation_node(&request.start_node_id)?
+                .expect("start node existence was checked above");
 
-        while let Some((node, depth)) = queue.pop_front() {
-            ordered_nodes.push(node.clone());
-            if ordered_nodes.len() >= MAX_TRAVERSE_NODES {
-                truncated = !queue.is_empty();
-                break;
-            }
-            if depth >= request.max_depth {
-                continue;
-            }
+            let mut queue: VecDeque<(MemoryNavigationNode, usize)> =
+                VecDeque::from([(start_node.clone(), 0usize)]);
+            let mut visited: HashMap<String, MemoryNavigationNode> = HashMap::new();
+            visited.insert(start_node.node_id.clone(), start_node);
+            let mut ordered_nodes: Vec<MemoryNavigationNode> = Vec::new();
+            let mut truncated = false;
 
-            // Parent edge — walk up one level.
-            if let Some(parent_id) = node.parent_node_id.as_deref() {
-                if !visited.contains_key(parent_id) {
-                    if let Some(parent) = db.get_navigation_node(parent_id)? {
-                        visited.insert(parent.node_id.clone(), parent.clone());
-                        queue.push_back((parent, depth + 1));
+            while let Some((node, depth)) = queue.pop_front() {
+                ordered_nodes.push(node.clone());
+                if ordered_nodes.len() >= MAX_TRAVERSE_NODES {
+                    truncated = !queue.is_empty();
+                    break;
+                }
+                if depth >= request.max_depth {
+                    continue;
+                }
+
+                // Parent edge — walk up one level.
+                if let Some(parent_id) = node.parent_node_id.as_deref() {
+                    if !visited.contains_key(parent_id) {
+                        if let Some(parent) = store.get_navigation_node(parent_id)? {
+                            visited.insert(parent.node_id.clone(), parent.clone());
+                            queue.push_back((parent, depth + 1));
+                        }
+                    }
+                }
+
+                // Child nodes — indexed lookup by parent_node_id.
+                let mut child_offset: u64 = 0;
+                loop {
+                    let req = the_one_core::pagination::PageRequest::decode(
+                        the_one_core::storage::sqlite::page_limits::NAVIGATION_NODES_DEFAULT,
+                        Some(&the_one_core::pagination::Cursor::from_offset(child_offset).0),
+                        the_one_core::storage::sqlite::page_limits::NAVIGATION_NODES_DEFAULT,
+                        the_one_core::storage::sqlite::page_limits::NAVIGATION_NODES_MAX,
+                    )?;
+                    let child_page =
+                        store.list_navigation_nodes_paged(Some(&node.node_id), None, &req)?;
+                    for child in child_page.items {
+                        if visited.contains_key(&child.node_id) {
+                            continue;
+                        }
+                        visited.insert(child.node_id.clone(), child.clone());
+                        queue.push_back((child, depth + 1));
+                    }
+                    match child_page.next_cursor {
+                        Some(cursor) => {
+                            let (off, _) =
+                                the_one_core::pagination::Cursor::decode(cursor.as_str())?;
+                            child_offset = off;
+                        }
+                        None => break,
                     }
                 }
             }
 
-            // Child nodes — indexed lookup by parent_node_id.
-            let mut child_offset: u64 = 0;
-            loop {
-                let req = the_one_core::pagination::PageRequest::decode(
-                    the_one_core::storage::sqlite::page_limits::NAVIGATION_NODES_DEFAULT,
-                    Some(&the_one_core::pagination::Cursor::from_offset(child_offset).0),
-                    the_one_core::storage::sqlite::page_limits::NAVIGATION_NODES_DEFAULT,
-                    the_one_core::storage::sqlite::page_limits::NAVIGATION_NODES_MAX,
-                )?;
-                let child_page = db.list_navigation_nodes_paged(Some(&node.node_id), None, &req)?;
-                for child in child_page.items {
-                    if visited.contains_key(&child.node_id) {
-                        continue;
-                    }
-                    visited.insert(child.node_id.clone(), child.clone());
-                    queue.push_back((child, depth + 1));
-                }
-                match child_page.next_cursor {
-                    Some(cursor) => {
-                        let (off, _) = the_one_core::pagination::Cursor::decode(cursor.as_str())?;
-                        child_offset = off;
-                    }
-                    None => break,
-                }
+            // Collect tunnels touching any visited node.
+            let visited_ids: Vec<String> = visited.keys().cloned().collect();
+            let mut tunnels = store.list_navigation_tunnels_for_nodes(
+                &visited_ids,
+                the_one_core::storage::sqlite::page_limits::NAVIGATION_TUNNELS_MAX,
+            )?;
+            // Only retain tunnels where BOTH endpoints were visited — mirrors
+            // the v0.14.x semantics.
+            let visited_set: HashSet<&str> = visited_ids.iter().map(String::as_str).collect();
+            tunnels.retain(|tunnel| {
+                visited_set.contains(tunnel.from_node_id.as_str())
+                    && visited_set.contains(tunnel.to_node_id.as_str())
+            });
+            tunnels.sort_by(|left, right| {
+                left.from_node_id
+                    .cmp(&right.from_node_id)
+                    .then(left.to_node_id.cmp(&right.to_node_id))
+                    .then(left.tunnel_id.cmp(&right.tunnel_id))
+            });
+
+            if truncated {
+                tracing::warn!(
+                    target: "the_one_mcp::navigation",
+                    project_id = %request.project_id,
+                    visited = ordered_nodes.len(),
+                    "navigation traverse truncated at MAX_TRAVERSE_NODES"
+                );
             }
-        }
 
-        // Collect tunnels touching any visited node.
-        let visited_ids: Vec<String> = visited.keys().cloned().collect();
-        let mut tunnels = db.list_navigation_tunnels_for_nodes(
-            &visited_ids,
-            the_one_core::storage::sqlite::page_limits::NAVIGATION_TUNNELS_MAX,
-        )?;
-        // Only retain tunnels where BOTH endpoints were visited — mirrors
-        // the v0.14.x semantics.
-        let visited_set: HashSet<&str> = visited_ids.iter().map(String::as_str).collect();
-        tunnels.retain(|tunnel| {
-            visited_set.contains(tunnel.from_node_id.as_str())
-                && visited_set.contains(tunnel.to_node_id.as_str())
-        });
-        tunnels.sort_by(|left, right| {
-            left.from_node_id
-                .cmp(&right.from_node_id)
-                .then(left.to_node_id.cmp(&right.to_node_id))
-                .then(left.tunnel_id.cmp(&right.tunnel_id))
-        });
-
-        if truncated {
-            tracing::warn!(
-                target: "the_one_mcp::navigation",
-                project_id = %request.project_id,
-                visited = ordered_nodes.len(),
-                "navigation traverse truncated at MAX_TRAVERSE_NODES"
-            );
-        }
-
-        Ok(MemoryNavigationTraverseResponse {
-            nodes: ordered_nodes,
-            tunnels,
-            truncated,
+            Ok(MemoryNavigationTraverseResponse {
+                nodes: ordered_nodes,
+                tunnels,
+                truncated,
+            })
         })
+        .await
     }
 
     #[instrument(skip_all)]
@@ -3127,64 +3373,81 @@ impl McpBroker {
             });
         }
 
-        let db = ProjectDatabase::open(project_root, project_id)?;
-
         if !request.interactive {
-            if self
+            // v0.16.0 Phase 1: session-approvals check must happen BEFORE
+            // entering the state-store closure. The session_approvals
+            // RwLock is tokio-async while the state store uses a sync
+            // Mutex — interleaving them inside one closure would hold
+            // the state-store lock across an `.await`, which the compiler
+            // rejects (by design — see `with_state_store` docs).
+            let session_approved = self
                 .session_approvals
                 .read()
                 .await
-                .contains(&request.action_key)
-            {
-                db.record_audit_event(
-                    "tool_run",
-                    "{\"mode\":\"headless\",\"result\":\"approved_session\"}",
-                )?;
-                return Ok(ToolRunResponse {
-                    allowed: true,
-                    reason: "approved by session policy".to_string(),
-                });
-            }
-            let approved = db.is_approved(&request.action_key, ApprovalScope::Forever)?;
-            if approved {
-                db.record_audit_event(
-                    "tool_run",
-                    "{\"mode\":\"headless\",\"result\":\"approved\"}",
-                )?;
-                return Ok(ToolRunResponse {
-                    allowed: true,
-                    reason: "approved by persisted policy".to_string(),
-                });
-            }
-            db.record_audit_event("tool_run", "{\"mode\":\"headless\",\"result\":\"denied\"}")?;
-            return Ok(ToolRunResponse {
-                allowed: false,
-                reason: "headless mode denies unapproved high-risk action".to_string(),
-            });
+                .contains(&request.action_key);
+
+            return self
+                .with_state_store(project_root, project_id, |store| {
+                    if session_approved {
+                        store.record_audit_event(
+                            "tool_run",
+                            "{\"mode\":\"headless\",\"result\":\"approved_session\"}",
+                        )?;
+                        return Ok(ToolRunResponse {
+                            allowed: true,
+                            reason: "approved by session policy".to_string(),
+                        });
+                    }
+                    let approved =
+                        store.is_approved(&request.action_key, ApprovalScope::Forever)?;
+                    if approved {
+                        store.record_audit_event(
+                            "tool_run",
+                            "{\"mode\":\"headless\",\"result\":\"approved\"}",
+                        )?;
+                        return Ok(ToolRunResponse {
+                            allowed: true,
+                            reason: "approved by persisted policy".to_string(),
+                        });
+                    }
+                    store.record_audit_event(
+                        "tool_run",
+                        "{\"mode\":\"headless\",\"result\":\"denied\"}",
+                    )?;
+                    Ok(ToolRunResponse {
+                        allowed: false,
+                        reason: "headless mode denies unapproved high-risk action".to_string(),
+                    })
+                })
+                .await;
         }
 
+        // Interactive path. Session-scope approval mutates
+        // `session_approvals` (async RwLock), which must happen outside
+        // the state-store closure. Forever-scope approval is a sync DB
+        // write inside the closure.
         let scope = match request.approval_scope.as_deref() {
             Some("once") => ApprovalScope::Once,
             Some("session") => ApprovalScope::Session,
             Some("forever") => ApprovalScope::Forever,
             _ => ApprovalScope::Once,
         };
-        match scope {
-            ApprovalScope::Once => {}
-            ApprovalScope::Session => {
-                self.session_approvals
-                    .write()
-                    .await
-                    .insert(request.action_key.clone());
-            }
-            ApprovalScope::Forever => {
-                db.set_approval(&request.action_key, ApprovalScope::Forever, true)?;
-            }
+        if matches!(scope, ApprovalScope::Session) {
+            self.session_approvals
+                .write()
+                .await
+                .insert(request.action_key.clone());
         }
-        db.record_audit_event(
-            "tool_run",
-            "{\"mode\":\"interactive\",\"result\":\"approved\"}",
-        )?;
+        self.with_state_store(project_root, project_id, |store| {
+            if matches!(scope, ApprovalScope::Forever) {
+                store.set_approval(&request.action_key, ApprovalScope::Forever, true)?;
+            }
+            store.record_audit_event(
+                "tool_run",
+                "{\"mode\":\"interactive\",\"result\":\"approved\"}",
+            )
+        })
+        .await?;
 
         Ok(ToolRunResponse {
             allowed: true,
@@ -3220,8 +3483,13 @@ impl McpBroker {
         &self,
         request: ProjectProfileGetRequest,
     ) -> Result<Option<ProjectProfileGetResponse>, CoreError> {
-        let db = ProjectDatabase::open(Path::new(&request.project_root), &request.project_id)?;
-        let profile_json = db.latest_project_profile()?;
+        let profile_json = self
+            .with_state_store(
+                Path::new(&request.project_root),
+                &request.project_id,
+                |store| store.latest_project_profile(),
+            )
+            .await?;
         Ok(profile_json.map(|profile_json| ProjectProfileGetResponse {
             project_id: request.project_id,
             profile_json,
@@ -3296,19 +3564,26 @@ impl McpBroker {
         &self,
         request: AuditEventsRequest,
     ) -> Result<AuditEventsResponse, CoreError> {
-        let db = ProjectDatabase::open(Path::new(&request.project_root), &request.project_id)?;
-        let events = db.list_audit_events(request.limit).map(|items| {
-            items
-                .into_iter()
-                .map(|item| AuditEventItem {
-                    id: item.id,
-                    project_id: item.project_id,
-                    event_type: item.event_type,
-                    payload_json: item.payload_json,
-                    created_at_epoch_ms: item.created_at_epoch_ms,
-                })
-                .collect::<Vec<_>>()
-        })?;
+        let events = self
+            .with_state_store(
+                Path::new(&request.project_root),
+                &request.project_id,
+                |store| {
+                    store.list_audit_events(request.limit).map(|items| {
+                        items
+                            .into_iter()
+                            .map(|item| AuditEventItem {
+                                id: item.id,
+                                project_id: item.project_id,
+                                event_type: item.event_type,
+                                payload_json: item.payload_json,
+                                created_at_epoch_ms: item.created_at_epoch_ms,
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                },
+            )
+            .await?;
 
         Ok(AuditEventsResponse { events })
     }
@@ -4497,6 +4772,98 @@ mod tests {
             .await
             .expect("refresh should succeed");
         assert_eq!(refresh.mode, "cached");
+    }
+
+    /// Phase 1 (v0.16.0): back-to-back `with_state_store` calls for the
+    /// same `(project_root, project_id)` must reuse a single cached
+    /// entry — we verify via `Arc::ptr_eq` on the internal cache slot so
+    /// the check is independent of any backend-observable side effect.
+    ///
+    /// Also verifies:
+    /// - A second project gets a *different* cache entry.
+    /// - `McpBroker::shutdown()` drains every entry.
+    #[tokio::test]
+    async fn broker_state_store_cache_reuses_connections() {
+        // Two distinct project roots so each can hold its own
+        // `project_id` in its manifest — a single root is bound to a
+        // single project id by `project_init`.
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let root_a = temp.path().join("repo-a");
+        let root_b = temp.path().join("repo-b");
+        for root in [&root_a, &root_b] {
+            fs::create_dir_all(root).expect("project dir should exist");
+            fs::write(root.join("Cargo.toml"), "[package]\nname='x'\n")
+                .expect("cargo write should succeed");
+        }
+
+        let broker = McpBroker::new();
+        broker
+            .project_init(ProjectInitRequest {
+                project_root: root_a.display().to_string(),
+                project_id: "cache-test-a".to_string(),
+            })
+            .await
+            .expect("init A should succeed");
+        broker
+            .project_init(ProjectInitRequest {
+                project_root: root_b.display().to_string(),
+                project_id: "cache-test-b".to_string(),
+            })
+            .await
+            .expect("init B should succeed");
+
+        // First access populates the cache.
+        let entry_a_first = broker
+            .get_or_init_state_store(&root_a, "cache-test-a")
+            .await
+            .expect("first store lookup should succeed");
+        // Second access for the same project MUST return the same Arc.
+        let entry_a_second = broker
+            .get_or_init_state_store(&root_a, "cache-test-a")
+            .await
+            .expect("second store lookup should succeed");
+        assert!(
+            std::sync::Arc::ptr_eq(&entry_a_first, &entry_a_second),
+            "repeated get_or_init for the same project must return the cached entry"
+        );
+
+        // A *different* project must get a *different* entry.
+        let entry_b = broker
+            .get_or_init_state_store(&root_b, "cache-test-b")
+            .await
+            .expect("project B lookup should succeed");
+        assert!(
+            !std::sync::Arc::ptr_eq(&entry_a_first, &entry_b),
+            "distinct projects must get distinct state store entries"
+        );
+
+        // Cache should hold exactly two entries at this point.
+        assert_eq!(
+            broker.state_by_project.read().await.len(),
+            2,
+            "cache should hold one entry per project"
+        );
+
+        // `with_state_store` must route through the same cached entry —
+        // a sanity check that it actually uses the cache.
+        let project_id_from_store = broker
+            .with_state_store(&root_a, "cache-test-a", |store| {
+                Ok(store.project_id().to_string())
+            })
+            .await
+            .expect("with_state_store should succeed");
+        assert_eq!(project_id_from_store, "cache-test-a");
+
+        // Drop all outstanding Arcs so `shutdown` can fully drain.
+        drop(entry_a_first);
+        drop(entry_a_second);
+        drop(entry_b);
+
+        broker.shutdown().await;
+        assert!(
+            broker.state_by_project.read().await.is_empty(),
+            "shutdown should drain every cache entry"
+        );
     }
 
     #[tokio::test]
