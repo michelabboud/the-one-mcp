@@ -68,29 +68,31 @@ Add to the **workspace** `Cargo.toml` (not the individual crate — respect the 
 
 ```toml
 sqlx = { version = "0.8", default-features = false, features = [
-    "runtime-tokio", "tls-rustls", "postgres", "macros", "migrate", "chrono", "uuid"
+    "runtime-tokio", "tls-rustls", "postgres", "macros", "migrate", "chrono"
 ] }
 pgvector = { version = "0.4", features = ["sqlx"] }
 ```
 
-**TWO decision points to verify with me BEFORE adding** (these are the first things you ask when the fresh session starts — do not guess, do not copy from the plan text which is incomplete on both axes):
+**Decision A — sqlx TLS stack → DECIDED: `tls-rustls`** *(locked in by Michel before the fresh session started; no need to ask again)*
 
-**Decision A — TLS feature axis.** The plan lists `"runtime-tokio"` with no TLS. **That is insufficient for any production deployment.** Postgres-over-TLS is the default everywhere in managed cloud (AWS RDS, Supabase, GCP Cloud SQL, Azure Flexible Server) and most self-hosted setups. The three real options are:
+Pure-Rust TLS with `rustls` + `webpki-roots`. No OpenSSL dependency, smallest workspace blast radius, composes cleanly with the rest of the tokio async ecosystem already in use. Alternatives considered and rejected:
 
-| Feature | Pulls | Use when |
-|---|---|---|
-| `runtime-tokio` alone | no TLS stack | Local dev only. **Never ship.** |
-| `runtime-tokio` + `tls-rustls` | `rustls` + `webpki-roots` | Pure-Rust TLS, no OpenSSL dep. My default recommendation — matches the rest of the workspace. Check `cargo tree | grep rustls` first to verify no existing `rustls` version conflict. |
-| `runtime-tokio` + `tls-native-tls` | `native-tls` (OpenSSL on Linux, SChannel on Windows, Secure Transport on macOS) | Only if the workspace already depends on `native-tls` and pulling rustls would double-up TLS stacks. |
+- `runtime-tokio` alone (no TLS): local dev only, would fail against any managed Postgres (AWS RDS, Supabase, GCP Cloud SQL, Azure Flexible Server all require TLS).
+- `tls-native-tls`: only justified if the workspace already pulls `native-tls` and rustls would double up TLS stacks; we don't, so this would add OpenSSL for no gain.
 
-Ask me which TLS stack to pick. Default to `tls-rustls` if I'm not available because it has the smallest workspace blast radius — but STOP and report if `cargo tree` shows a pre-existing rustls version that would conflict.
+**One STOP condition still applies:** run `cargo tree | grep rustls` BEFORE adding the sqlx dep. If an existing workspace dep pulls a conflicting rustls major version, STOP and report — the fix might be to align versions across the workspace rather than proceeding with a resolver conflict.
 
-**Decision B — sqlx non-TLS feature set.** The plan minimum is `["runtime-tokio", "postgres", "macros"]`. Beyond those, consider:
-- `migrate` — enables `sqlx::migrate!` macro for schema bootstrap. **Recommended** so Phase 2 shares migration infrastructure with Phase 3's `PostgresStateStore`.
-- `chrono` — enables `TIMESTAMPTZ` ↔ `chrono::DateTime` conversion. **Recommended** — Postgres audit timestamps use timestamptz and Rust code expects DateTime.
-- `uuid` — enables `UUID` column type. **Optional** — only needed if project identifiers are stored as `UUID` rather than `TEXT`. Lean toward NOT adding this unless a clear need emerges, because it pulls `uuid` into the sqlx dependency tree.
+**Decision B — sqlx non-TLS feature set → DECIDED: `["runtime-tokio", "tls-rustls", "postgres", "macros", "migrate", "chrono"]`** *(locked in; no need to ask again)*
 
-Ask me to confirm the exact feature list before editing `Cargo.toml`. Default to `["runtime-tokio", "tls-rustls", "postgres", "macros", "migrate", "chrono"]` if I'm not available.
+Per-feature rationale:
+- `runtime-tokio` — tokio runtime integration. Required.
+- `tls-rustls` — per Decision A.
+- `postgres` — Postgres driver. Required.
+- `macros` — enables `sqlx::query!`, `sqlx::query_as!`, compile-time SQL validation. Required for the batched upsert patterns in § 3.
+- `migrate` — enables `sqlx::migrate!` macro. **Required for Decision C** (schema migration tracking). Also shared with Phase 3's `PostgresStateStore` which will use a sibling migration directory.
+- `chrono` — `TIMESTAMPTZ` ↔ `chrono::DateTime` conversion. Postgres audit timestamps use `timestamptz` and the existing Rust code expects `DateTime`. Required for Phase 3 but harmless to land now with Phase 2.
+
+**`uuid` is deliberately omitted.** The initial read was "probably needed for project identifiers stored as UUID vs TEXT". Decision: project identifiers stay as `TEXT` in the pgvector schema — matches the existing SQLite schema, matches the `StateStore::project_id() -> &str` trait contract, keeps the sqlx dep tree leaner. If a future phase needs UUID columns, add the feature then.
 
 ### 2. New Cargo feature `pg-vectors`
 
@@ -221,14 +223,34 @@ CREATE INDEX IF NOT EXISTS chunks_source_idx   ON the_one.chunks (project_id, so
 CREATE INDEX IF NOT EXISTS chunks_palace_idx   ON the_one.chunks (project_id, wing, hall, room);
 ```
 
-**Problem:** sqlx migrations cannot take runtime parameters — you can't substitute `$DIMS` or `$m` / `$ef_construction` into a migration .sql file. Two options:
+**Problem:** sqlx migrations cannot take runtime parameters — you can't substitute `$DIMS` or `$m` / `$ef_construction` into a migration .sql file. There were two options; one is now locked in.
 
-- **Option A (recommended):** hardcode dims to match the default quality-tier embedding provider (BGE-large-en-v1.5 = 1024 dims) in `0002_chunks_table.sql`. Refuse to boot if the active provider reports a different dim — `InvalidProjectConfig("pgvector schema was migrated with dim=1024; active embedding provider reports dim=768; recreate the pgvector schema against a matching provider or switch providers")`. This makes dim a schema-migration-level choice, which is correct — changing embedding providers means re-ingesting everything anyway.
-- **Option B:** skip `sqlx::migrate!` for the `CREATE TABLE` statement and use a hand-rolled idempotent `CREATE TABLE IF NOT EXISTS` executed AFTER migrations with the dim substituted at runtime. This gives dim flexibility at the cost of the migration tracker not knowing about the chunks table schema.
+**Decision C — schema dim strategy → DECIDED: Option A, hardcode `dim=1024` in `0002_chunks_table.sql`** *(locked in by Michel before the fresh session started; no need to ask again)*
 
-**Ask me which option before committing.** My strong default is A — it's simpler, the dim is a breaking-change axis anyway, and Phase 4's combined Postgres will want migration-managed schemas for transactional consistency.
+Rationale recap:
+- `dim=1024` matches the default quality-tier embedding provider (BGE-large-en-v1.5), which is the configured default for new installs.
+- Changing the embedding provider tier means re-ingesting every chunk anyway (different vector space, different semantics) — so dim IS a schema-migration-level decision, not a runtime parameter.
+- Phase 4 (combined Postgres+pgvector) will want migration-managed schemas for transactional consistency between state writes and vector writes. Starting Phase 2 with migration tracking means Phase 4 doesn't have to retrofit it.
+- `sqlx::migrate!` creates its own `_sqlx_migrations` tracking table — no hand-rolled migration infrastructure needed.
 
-Same pattern for `0003_entities_table.sql`, `0004_relations_table.sql`, `0005_images_table.sql` — each is one migration file, mirroring the chunks shape for its own vector type.
+Implementation constraint this locks in:
+
+```rust
+// In PgVectorBackend::new, after sqlx::migrate!().run() returns:
+let provider_dim = embedding_provider.dimensions();
+const MIGRATED_DIM: i32 = 1024;  // hardcoded to match 0002_chunks_table.sql
+if provider_dim != MIGRATED_DIM as usize {
+    return Err(format!(
+        "pgvector schema was migrated with dim={MIGRATED_DIM}; active embedding provider \
+         reports dim={provider_dim}; recreate the pgvector schema against a matching \
+         provider (quality tier = BGE-large-en-v1.5 at 1024d) or switch providers to match"
+    ));
+}
+```
+
+The rejected Option B was: skip `sqlx::migrate!` for the chunks table and use runtime-substituted `CREATE TABLE IF NOT EXISTS` with dim from the provider. More flexible on dim, but loses migration tracking on the hottest table and forces Phase 4 to bolt on migration infrastructure retroactively.
+
+Same pattern for `0003_entities_table.sql`, `0004_relations_table.sql`, `0005_images_table.sql` — each hardcoded to `dim=1024`, each mirroring the chunks shape for its own vector type. If a future phase needs to support multiple dim configurations, it'll do so via a new migration (`0006_reshape_chunks_dim.sql`) not via runtime parameterization.
 
 **Hybrid search decision point** (unchanged from original prompt, still requires a brainstorming pass before committing):
 
@@ -534,9 +556,10 @@ All seven must pass. Record the passing count; it must be ≥ 450 + the Phase 2 
 STOP and ask me rather than working around any of these:
 
 - **sqlx version incompatibility** with our existing tokio version. Check first: `cargo tree -p the-one-memory --features pg-vectors | grep -E 'tokio|sqlx'`. If sqlx pulls a different tokio major, STOP.
-- **pgvector crate dimension mismatch** with the active embedding provider. If the provider reports 768 dims but the bootstrap hardcodes 384, STOP and ask me how to plumb the dim through config.
+- **rustls version conflict in the workspace.** Run `cargo tree | grep rustls` BEFORE adding the sqlx dep. If an existing dep pulls a conflicting `rustls` major, STOP and report — Decision A (`tls-rustls`) assumes no pre-existing conflict; if one exists, the fix might be a workspace-wide alignment rather than proceeding.
+- **Provider dim ≠ migrated dim.** Decision C locks `dim=1024` (BGE-large-en-v1.5 quality tier) into the migration SQL. If the active embedding provider reports anything other than 1024, this is EXPECTED FAIL behavior per § 3 — surface the `InvalidProjectConfig` error exactly as shown, do NOT work around it by making the dim runtime-configurable. If Michel later wants multi-dim support, that's a new migration (`0006_reshape_*`) in a follow-up phase, not a Phase 2 scope change.
 - **HNSW vs IVFFlat decision point**. The plan mentions both. My default is HNSW for recall at small-to-medium scale, IVFFlat for >10M chunks. If you see benchmark numbers that contradict this, STOP and report before committing to one.
-- **Hybrid search semantics**. Pgvector supports dense HNSW natively but sparse is a manual implementation. The plan mentions "Batched upserts via multi-row INSERT" but doesn't pin hybrid semantics. Ask before committing.
+- **Hybrid search semantics (Decision D — DEFERRED).** Write the dense-only path through §§ 1–6 first. When you reach the hybrid implementation inside § 3's `impl VectorBackend` body, STOP and bring Michel benchmark numbers for both options (α: tsvector+GIN, β: sparse arrays + manual inner-product rewrite) before committing to one.
 - **Test harness flakiness** if the Postgres instance isn't available. Tests MUST skip gracefully via `return` when `matching_env` yields `None` — never a `.expect()` or `.unwrap()` on env presence.
 - **Any unexpected dependency conflict** in `Cargo.lock`. Don't delete `Cargo.lock`. Report and ask.
 
@@ -558,15 +581,15 @@ Phase 2 is one of the larger phases — ~800 LOC plus the docs + benches + negat
 
 ## First action when the fresh session starts
 
-1. Verify baseline per the block above (`git log`, `git status`, `cargo fmt/clippy/test`, release gate). Expected HEAD is at or after commit `549eec8` (the Phase 1 docs closeout); expected test baseline is **450 passing, 1 ignored**.
-2. Record the baseline count into `/tmp/the-one-baseline.txt`
-3. Read the § Phase 2 full deliverables above in order — **in particular, do not skim § 3**, which has the migration strategy, the extension preflight, and the dim-vs-migration trade-off that everything downstream depends on.
-4. **Stop and ask me these four decision points in order, before touching `Cargo.toml` or any source file:**
-   - **A. sqlx TLS feature axis** (§ 1 Decision A): `tls-rustls`, `tls-native-tls`, or no TLS? Default recommendation: `tls-rustls`. STOP if `cargo tree | grep rustls` shows a pre-existing conflicting version.
-   - **B. sqlx non-TLS feature set** (§ 1 Decision B): default recommendation `["runtime-tokio", "tls-rustls", "postgres", "macros", "migrate", "chrono"]`. Omit `uuid` unless a clear need emerges.
-   - **C. Schema migration strategy** (§ 3 Options A vs B): use `sqlx::migrate!` with hardcoded `dim=1024` (Option A — my recommendation) or skip migrations for the chunks table and use runtime-substituted `CREATE TABLE IF NOT EXISTS` (Option B — more flexible, loses migration tracking).
-   - **D. Hybrid search semantics** (§ 3 near the end): tsvector + GIN for sparse-like recall, OR manual sparse arrays with inner-product rewrite? Needs its own brainstorming pass — both have real trade-offs.
-5. Wait for my answers to A–D before adding any dependency or writing any migration file.
-6. Once A–D are decided, proceed through § 1–10 in order, running the release artifact checks in § 10 before asking for commit authorization.
+1. Verify baseline per the block above (`git log`, `git status`, `cargo fmt/clippy/test`, release gate). Expected HEAD is at or after the commit tagged `v0.16.0-phase2-ready`; expected test baseline is **450 passing, 1 ignored**.
+2. Record the baseline count into `/tmp/the-one-baseline.txt`.
+3. **Run `cargo tree | grep rustls`** — this is the one pre-code check that might still force a STOP. If an existing workspace dep pulls a conflicting `rustls` major version, STOP and report. Otherwise proceed.
+4. Read the § Phase 2 full deliverables above in order — **in particular, do not skim § 3**, which has the migration strategy, the extension preflight, and the dim hardcoded to 1024 that everything downstream depends on.
+5. **Decisions A, B, C are already locked in** (see DECIDED markers in § 1 and § 3). Do NOT ask about them — proceed directly with:
+   - **A:** sqlx `tls-rustls`
+   - **B:** sqlx features `["runtime-tokio", "tls-rustls", "postgres", "macros", "migrate", "chrono"]`
+   - **C:** `sqlx::migrate!` with hardcoded `dim=1024` in `0002_chunks_table.sql` + matching provider-dim check in `PgVectorBackend::new`
+6. **One decision remains deferred — D (hybrid search semantics).** You do NOT need to resolve D before starting work on §§ 1–6. Write the dense-only path first (§§ 1–6 cover workspace deps, feature flag, module scaffold, validator, config, factory branch — none of which depend on hybrid semantics). When you reach the hybrid implementation inside § 3's `impl VectorBackend` body, STOP and bring me benchmark numbers for both options (α: tsvector+GIN, β: sparse arrays + manual inner-product rewrite) before committing to one.
+7. Proceed through §§ 1–10 in order, running the release artifact checks in § 10 before asking for commit authorization.
 
-Phase 0 and Phase 1 are shipped. Begin at Phase 2.
+Phase 0 and Phase 1 are shipped. Decisions A/B/C are locked in. Begin at Phase 2.
