@@ -58,10 +58,12 @@ redis-vectors = ["dep:fred"]
 #     Reads `include_str!()`'d SQL files, tracks applied versions in
 #     the `the_one.pgvector_migrations` table, applies missing
 #     migrations in order. ~80 LOC, covered in `pg_vector.rs` tests.
-#   - `chrono`  → deferred to Phase 3 (`PostgresStateStore`) where
-#     `TIMESTAMPTZ` columns actually exist. Phase 2's pgvector tables
-#     use `created_at_epoch_ms BIGINT` throughout, which sqlx handles
-#     natively without the feature.
+#   - `chrono`  → removed from the roadmap entirely. Every backend
+#     in this workspace stores timestamps as `BIGINT epoch_ms`,
+#     which sqlx handles natively without the feature. The cargo
+#     `links` conflict with rusqlite 0.39 is permanent and not
+#     worth revisiting — future phases (PostgresStateStore, etc.)
+#     use the same epoch_ms convention.
 pg-vectors = ["dep:sqlx", "dep:pgvector"]
 
 # Tree-sitter code-aware chunker. Enables AST-based chunking for 13

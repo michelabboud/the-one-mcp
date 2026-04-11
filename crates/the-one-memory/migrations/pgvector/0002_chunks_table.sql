@@ -53,8 +53,9 @@ CREATE TABLE IF NOT EXISTS the_one.chunks (
     sparse_vector_indices INTEGER[],
     sparse_vector_values  REAL[],
     -- Milliseconds since Unix epoch. Matches the rest of the
-    -- workspace's time representation. `chrono` was deferred
-    -- to Phase 3 — this column stays BIGINT regardless.
+    -- workspace's time representation — every backend stores
+    -- timestamps as BIGINT epoch_ms by convention. Chrono is not
+    -- used here and won't be added later.
     created_at_epoch_ms   BIGINT NOT NULL
 );
 

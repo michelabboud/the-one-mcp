@@ -35,7 +35,8 @@ CREATE TABLE IF NOT EXISTS the_one.pgvector_migrations (
     checksum      BYTEA NOT NULL,
     -- Milliseconds since the Unix epoch, matching the rest of the
     -- workspace's time representation. Intentionally NOT
-    -- TIMESTAMPTZ — `chrono` was deferred to Phase 3 and this
-    -- schema avoids it across the board.
+    -- TIMESTAMPTZ — the workspace uses `BIGINT epoch_ms` across
+    -- every backend by convention. Chrono is not used here and
+    -- won't be added later.
     applied_at_ms BIGINT NOT NULL
 );
