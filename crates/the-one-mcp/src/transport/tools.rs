@@ -425,4 +425,44 @@ mod tests {
             assert!(tool["inputSchema"].is_object(), "tool missing inputSchema");
         }
     }
+
+    /// M5 (mempalace comparative audit): no tool description may contain
+    /// imperative directives aimed at the AI client (e.g. "always call X
+    /// first", "on wake-up do Y"). Mempalace's `PALACE_PROTOCOL` baked such
+    /// directives into response data, which is a form of self-prompt-
+    /// injection — it tightly couples storage semantics to LLM behaviour
+    /// and breaks when the agent's own system prompt conflicts.
+    ///
+    /// This test is a hygiene gate: new tool descriptions must stay
+    /// descriptive ("semantic search over indexed documentation") rather
+    /// than imperative ("you MUST call this before responding").
+    #[test]
+    fn test_tool_descriptions_are_descriptive_not_imperative() {
+        // Case-insensitive substrings that should never appear in a tool
+        // description. We tolerate mention of these words in inputSchema
+        // (where they describe parameter semantics) — only the description
+        // field is checked.
+        const FORBIDDEN: &[&str] = &[
+            "you must",
+            "always call",
+            "never call",
+            "on wake-up",
+            "before responding",
+            "do not guess",
+            "this protocol ensures",
+        ];
+
+        for tool in tool_definitions() {
+            let name = tool["name"].as_str().unwrap_or("<anonymous>");
+            let description = tool["description"].as_str().unwrap_or("").to_lowercase();
+            for needle in FORBIDDEN {
+                assert!(
+                    !description.contains(needle),
+                    "tool '{name}' description contains imperative directive '{needle}' — \
+                     descriptions must stay descriptive, not instruct the AI. \
+                     See M5 in docs/reviews/2026-04-10-mempalace-comparative-audit.md."
+                );
+            }
+        }
+    }
 }

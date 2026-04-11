@@ -314,6 +314,9 @@ pub struct MemoryNavigationListRequest {
     pub kind: Option<String>,
     #[serde(default = "default_navigation_limit")]
     pub limit: usize,
+    /// v0.15.0 — opaque cursor returned by a previous call. Omit for first page.
+    #[serde(default)]
+    pub cursor: Option<String>,
 }
 
 fn default_navigation_limit() -> usize {
@@ -324,6 +327,16 @@ fn default_navigation_limit() -> usize {
 pub struct MemoryNavigationListResponse {
     pub nodes: Vec<MemoryNavigationNode>,
     pub tunnels: Vec<MemoryNavigationTunnel>,
+    /// v0.15.0 — opaque cursor for fetching the next page of nodes. `None`
+    /// iff this is the final page. The `tunnels` array is independent of this
+    /// cursor; callers should filter downstream if they need tunnels bounded
+    /// to the visible node set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    /// v0.15.0 — total number of nodes matching the filter, for clients that
+    /// want progress-bar rendering. Populated when cheap to compute.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_nodes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -343,6 +356,11 @@ fn default_navigation_depth() -> usize {
 pub struct MemoryNavigationTraverseResponse {
     pub nodes: Vec<MemoryNavigationNode>,
     pub tunnels: Vec<MemoryNavigationTunnel>,
+    /// v0.15.0 — set when the BFS hit the per-call `MAX_TRAVERSE_NODES`
+    /// cap and stopped early. Clients should retry from a deeper node or
+    /// split the traversal across multiple start points.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1028,6 +1046,7 @@ mod tests {
             parent_node_id: Some("drawer:ops".to_string()),
             kind: Some("closet".to_string()),
             limit: 25,
+            cursor: None,
         };
         let json = serde_json::to_string(&list).expect("serialize should succeed");
         let decoded: MemoryNavigationListRequest =

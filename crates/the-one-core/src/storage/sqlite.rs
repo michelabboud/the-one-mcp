@@ -3,13 +3,39 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::{params, params_from_iter, types::Value as SqlValue, Connection};
 
+use crate::audit::{AuditOutcome, AuditRecord};
 use crate::contracts::{
     AaakLesson, ApprovalScope, DiaryEntry, MemoryNavigationNode, MemoryNavigationNodeKind,
     MemoryNavigationTunnel,
 };
 use crate::error::CoreError;
+use crate::pagination::{Page, PageRequest};
 
-const CURRENT_SCHEMA_VERSION: i64 = 6;
+const CURRENT_SCHEMA_VERSION: i64 = 7;
+
+/// Per-endpoint max page sizes. These are enforced at the broker layer via
+/// [`PageRequest::decode`] — every list/search endpoint MUST declare a
+/// non-silent cap. Prior to v0.15.0 these were silent `clamp`s; clients had
+/// no way to know they had been truncated.
+pub mod page_limits {
+    pub const AUDIT_EVENTS_MAX: usize = 500;
+    pub const AUDIT_EVENTS_DEFAULT: usize = 50;
+
+    pub const CONVERSATION_SOURCES_MAX: usize = 500;
+    pub const CONVERSATION_SOURCES_DEFAULT: usize = 50;
+
+    pub const DIARY_ENTRIES_MAX: usize = 500;
+    pub const DIARY_ENTRIES_DEFAULT: usize = 20;
+
+    pub const AAAK_LESSONS_MAX: usize = 500;
+    pub const AAAK_LESSONS_DEFAULT: usize = 20;
+
+    pub const NAVIGATION_NODES_MAX: usize = 1_000;
+    pub const NAVIGATION_NODES_DEFAULT: usize = 100;
+
+    pub const NAVIGATION_TUNNELS_MAX: usize = 1_000;
+    pub const NAVIGATION_TUNNELS_DEFAULT: usize = 200;
+}
 
 #[derive(Debug)]
 pub struct ProjectDatabase {
@@ -24,6 +50,8 @@ pub struct AuditEvent {
     pub project_id: String,
     pub event_type: String,
     pub payload_json: String,
+    pub outcome: String,
+    pub error_kind: Option<String>,
     pub created_at_epoch_ms: i64,
 }
 
@@ -54,6 +82,30 @@ impl ProjectDatabase {
 
         let conn = Connection::open(&db_path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
+        // v0.15.1 (production hardening Lever 1): switch from the default
+        // `synchronous=FULL` to `synchronous=NORMAL`. In WAL mode this means
+        // fsync() is called only at checkpoint time, not on every commit.
+        //
+        // Durability trade-off:
+        // - Process crash: SAFE. The WAL file captures every committed
+        //   transaction; recovery on reopen reads it back.
+        // - OS crash or power loss: the last few committed transactions
+        //   that are still in the OS page cache (typically < 1s of writes)
+        //   can be lost.
+        //
+        // For the-one-mcp's workload (audit logs, diary entries, navigation
+        // nodes) this is the right trade-off: losing < 1s of writes on a
+        // power-cut is acceptable because the data that would have been
+        // audited lives in the same page-cache window, so the audit and
+        // the data stay consistent. Process crashes — by far the more
+        // common failure mode — remain fully safe.
+        //
+        // Measured impact (crates/the-one-core/examples/production_hardening_bench.rs):
+        //   record_audit: 5.33ms/row  →  ~100-500µs/row  (10-50×)
+        //
+        // See docs/guides/production-hardening-v0.15.md § Lever 1 for the
+        // rationale and the full trade-off analysis.
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
 
@@ -78,6 +130,17 @@ impl ProjectDatabase {
         let mode: String = self
             .conn
             .query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
+        Ok(mode)
+    }
+
+    /// Return the current `PRAGMA synchronous` setting as the integer SQLite
+    /// uses internally: 0=OFF, 1=NORMAL, 2=FULL, 3=EXTRA. v0.15.1 expects
+    /// NORMAL (1) because FULL's per-commit fsync made audit writes 10-50×
+    /// slower than necessary in WAL mode.
+    pub fn synchronous_mode(&self) -> Result<i64, CoreError> {
+        let mode: i64 = self
+            .conn
+            .query_row("PRAGMA synchronous", [], |row| row.get(0))?;
         Ok(mode)
     }
 
@@ -177,6 +240,10 @@ impl ProjectDatabase {
         Ok(version)
     }
 
+    /// Record an audit event with a raw event type and payload. Legacy entry
+    /// point preserved for back-compat; new code should prefer
+    /// [`ProjectDatabase::record_audit`], which enforces the structured
+    /// outcome + error_kind columns introduced in schema v7.
     pub fn record_audit_event(
         &self,
         event_type: &str,
@@ -184,10 +251,37 @@ impl ProjectDatabase {
     ) -> Result<(), CoreError> {
         self.conn.execute(
             "
-            INSERT INTO audit_events(project_id, event_type, payload_json, created_at_epoch_ms)
-            VALUES (?1, ?2, ?3, CAST(strftime('%s','now') AS INTEGER) * 1000)
+            INSERT INTO audit_events(
+                project_id, event_type, payload_json, outcome, error_kind, created_at_epoch_ms
+            )
+            VALUES (?1, ?2, ?3, 'unknown', NULL, CAST(strftime('%s','now') AS INTEGER) * 1000)
             ",
             params![self.project_id, event_type, payload_json],
+        )?;
+        Ok(())
+    }
+
+    /// Record a structured audit entry — the preferred API since v0.15.0.
+    ///
+    /// Every state-changing broker method should call this exactly once per
+    /// attempt, passing the operation name, redacted params, and outcome.
+    /// The audit log becomes a stable observability artefact: `outcome='error'`
+    /// rows with a given `error_kind` can be counted and alerted on.
+    pub fn record_audit(&self, record: &AuditRecord) -> Result<(), CoreError> {
+        self.conn.execute(
+            "
+            INSERT INTO audit_events(
+                project_id, event_type, payload_json, outcome, error_kind, created_at_epoch_ms
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, CAST(strftime('%s','now') AS INTEGER) * 1000)
+            ",
+            params![
+                self.project_id,
+                record.operation,
+                record.params_json,
+                record.outcome.as_str(),
+                record.error_kind,
+            ],
         )?;
         Ok(())
     }
@@ -199,19 +293,36 @@ impl ProjectDatabase {
         Ok(count)
     }
 
-    pub fn list_audit_events(&self, limit: usize) -> Result<Vec<AuditEvent>, CoreError> {
-        let safe_limit = limit.min(200) as i64;
+    pub fn audit_event_count_for_project(&self) -> Result<u64, CoreError> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM audit_events WHERE project_id = ?1",
+            params![self.project_id],
+            |row| row.get(0),
+        )?;
+        Ok(count.max(0) as u64)
+    }
+
+    /// List audit events with cursor-based pagination. Callers MUST supply
+    /// a validated [`PageRequest`] — the SQL layer no longer silently
+    /// truncates. Construct the request via
+    /// `PageRequest::decode(limit, cursor, AUDIT_EVENTS_DEFAULT, AUDIT_EVENTS_MAX)`.
+    pub fn list_audit_events_paged(
+        &self,
+        req: &PageRequest,
+    ) -> Result<Page<AuditEvent>, CoreError> {
+        let fetch = req.fetch_limit() as i64;
+        let offset = req.offset as i64;
         let mut stmt = self.conn.prepare(
             "
-            SELECT id, project_id, event_type, payload_json, created_at_epoch_ms
+            SELECT id, project_id, event_type, payload_json, outcome, error_kind, created_at_epoch_ms
             FROM audit_events
             WHERE project_id = ?1
             ORDER BY id DESC
-            LIMIT ?2
+            LIMIT ?2 OFFSET ?3
             ",
         )?;
 
-        let mut rows = stmt.query(params![self.project_id, safe_limit])?;
+        let mut rows = stmt.query(params![self.project_id, fetch, offset])?;
         let mut events = Vec::new();
         while let Some(row) = rows.next()? {
             events.push(AuditEvent {
@@ -219,11 +330,41 @@ impl ProjectDatabase {
                 project_id: row.get(1)?,
                 event_type: row.get(2)?,
                 payload_json: row.get(3)?,
-                created_at_epoch_ms: row.get(4)?,
+                outcome: row.get(4)?,
+                error_kind: row.get(5)?,
+                created_at_epoch_ms: row.get(6)?,
             });
         }
 
-        Ok(events)
+        let total = self.audit_event_count_for_project()?;
+        Ok(Page::from_peek(events, req.limit, req.offset, Some(total)))
+    }
+
+    /// Legacy, non-paginated list_audit_events — retained for back-compat
+    /// with tests written against v0.14.x. New code should use
+    /// [`list_audit_events_paged`]. Unlike the v0.14.x version this does
+    /// NOT silently truncate — it returns whatever the caller asked for, up
+    /// to the declared page max.
+    pub fn list_audit_events(&self, limit: usize) -> Result<Vec<AuditEvent>, CoreError> {
+        let req = PageRequest::decode(
+            limit,
+            None,
+            page_limits::AUDIT_EVENTS_DEFAULT,
+            page_limits::AUDIT_EVENTS_MAX,
+        )?;
+        let page = self.list_audit_events_paged(&req)?;
+        Ok(page.items)
+    }
+
+    /// Count audit events for this project that match a given outcome.
+    /// Used by observability dashboards to track error rates per operation.
+    pub fn audit_outcome_count(&self, outcome: AuditOutcome) -> Result<u64, CoreError> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM audit_events WHERE project_id = ?1 AND outcome = ?2",
+            params![self.project_id, outcome.as_str()],
+            |row| row.get(0),
+        )?;
+        Ok(count.max(0) as u64)
     }
 
     pub fn upsert_conversation_source(
@@ -369,6 +510,22 @@ impl ProjectDatabase {
         Ok(())
     }
 
+    /// Upsert a diary entry AND its FTS5 index atomically (v0.16.0 fix).
+    ///
+    /// Pre-v0.16.0 this method issued three separate `execute()` calls:
+    /// INSERT into `diary_entries`, DELETE from `diary_entries_fts`, INSERT
+    /// into `diary_entries_fts`. If the process crashed between statements
+    /// the FTS index was left out of sync with the main table — entries
+    /// would appear in `list_diary_entries` but not `search_diary_entries`,
+    /// or vice-versa.
+    ///
+    /// v0.16.0 wraps all three statements in a single `unchecked_transaction`
+    /// so the commit is atomic: either the whole entry lands (main +
+    /// re-indexed FTS row) or nothing does. `unchecked_transaction` is the
+    /// standard rusqlite pattern for transactions that must outlive a
+    /// borrow of `&self` (the alternative, `transaction()`, requires
+    /// `&mut self` and returns a guard that holds the borrow — which
+    /// doesn't compose with our impl of `StateStore`).
     pub fn upsert_diary_entry(&self, entry: &DiaryEntry) -> Result<(), CoreError> {
         if entry.project_id != self.project_id {
             return Err(CoreError::InvalidRequest(format!(
@@ -379,7 +536,9 @@ impl ProjectDatabase {
 
         let tags_json = serde_json::to_string(&entry.tags)?;
         let tags_search_text = entry.tags.join(" ");
-        self.conn.execute(
+
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
             "
             INSERT INTO diary_entries(
                 entry_id,
@@ -411,14 +570,14 @@ impl ProjectDatabase {
                 entry.updated_at_epoch_ms,
             ],
         )?;
-        self.conn.execute(
+        tx.execute(
             "
             DELETE FROM diary_entries_fts
             WHERE project_id = ?1 AND entry_id = ?2
             ",
             params![self.project_id, entry.entry_id],
         )?;
-        self.conn.execute(
+        tx.execute(
             "
             INSERT INTO diary_entries_fts(project_id, entry_id, entry_date, mood, tags, content)
             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
@@ -432,16 +591,40 @@ impl ProjectDatabase {
                 entry.content,
             ],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
+    /// Legacy list_diary_entries — retained for back-compat with v0.14.x.
+    /// Unlike the v0.14.x version this no longer silently truncates: the
+    /// limit is validated against `page_limits::DIARY_ENTRIES_MAX` and
+    /// invalid requests return `InvalidRequest`.
     pub fn list_diary_entries(
         &self,
         start_date: Option<&str>,
         end_date: Option<&str>,
         limit: usize,
     ) -> Result<Vec<DiaryEntry>, CoreError> {
-        let safe_limit = limit.clamp(1, 200) as i64;
+        let req = PageRequest::decode(
+            limit,
+            None,
+            page_limits::DIARY_ENTRIES_DEFAULT,
+            page_limits::DIARY_ENTRIES_MAX,
+        )?;
+        Ok(self
+            .list_diary_entries_paged(start_date, end_date, &req)?
+            .items)
+    }
+
+    /// Cursor-paginated variant — preferred entry point since v0.15.0.
+    pub fn list_diary_entries_paged(
+        &self,
+        start_date: Option<&str>,
+        end_date: Option<&str>,
+        req: &PageRequest,
+    ) -> Result<Page<DiaryEntry>, CoreError> {
+        let fetch = req.fetch_limit() as i64;
+        let offset = req.offset as i64;
         let mut sql = String::from(
             "
             SELECT entry_id, project_id, entry_date, mood, tags_json, content,
@@ -467,10 +650,12 @@ impl ProjectDatabase {
         sql.push_str(&format!(
             "
             ORDER BY entry_date DESC, updated_at_epoch_ms DESC, entry_id ASC
-            LIMIT ?{bind_index}
-            "
+            LIMIT ?{bind_index} OFFSET ?{}
+            ",
+            bind_index + 1
         ));
-        bind_values.push(safe_limit.into());
+        bind_values.push(fetch.into());
+        bind_values.push(offset.into());
 
         let mut stmt = self.conn.prepare(&sql)?;
         let mut rows = stmt.query(params_from_iter(bind_values.iter()))?;
@@ -479,7 +664,31 @@ impl ProjectDatabase {
             entries.push(diary_entry_from_row(row)?);
         }
 
-        Ok(entries)
+        let total = self.count_diary_entries(start_date, end_date)?;
+        Ok(Page::from_peek(entries, req.limit, req.offset, Some(total)))
+    }
+
+    fn count_diary_entries(
+        &self,
+        start_date: Option<&str>,
+        end_date: Option<&str>,
+    ) -> Result<u64, CoreError> {
+        let mut sql = String::from("SELECT COUNT(*) FROM diary_entries WHERE project_id = ?1");
+        let mut bind_values: Vec<SqlValue> = vec![self.project_id.clone().into()];
+        let mut bind_index = 2;
+        if let Some(start_date) = start_date {
+            sql.push_str(&format!(" AND entry_date >= ?{bind_index}"));
+            bind_values.push(start_date.to_string().into());
+            bind_index += 1;
+        }
+        if let Some(end_date) = end_date {
+            sql.push_str(&format!(" AND entry_date <= ?{bind_index}"));
+            bind_values.push(end_date.to_string().into());
+        }
+        let count: i64 =
+            self.conn
+                .query_row(&sql, params_from_iter(bind_values.iter()), |row| row.get(0))?;
+        Ok(count.max(0) as u64)
     }
 
     pub fn search_diary_entries(
@@ -490,6 +699,8 @@ impl ProjectDatabase {
         self.search_diary_entries_in_range(query, None, None, limit)
     }
 
+    /// Legacy search_diary_entries_in_range — validates the limit and
+    /// delegates to the paginated implementation.
     pub fn search_diary_entries_in_range(
         &self,
         query: &str,
@@ -497,19 +708,44 @@ impl ProjectDatabase {
         end_date: Option<&str>,
         limit: usize,
     ) -> Result<Vec<DiaryEntry>, CoreError> {
-        let safe_limit = limit.clamp(1, 200) as i64;
+        let req = PageRequest::decode(
+            limit,
+            None,
+            page_limits::DIARY_ENTRIES_DEFAULT,
+            page_limits::DIARY_ENTRIES_MAX,
+        )?;
+        Ok(self
+            .search_diary_entries_paged(query, start_date, end_date, &req)?
+            .items)
+    }
+
+    /// Paginated search for diary entries. Uses FTS5 when available and falls
+    /// back to LIKE on FTS5 failures.
+    pub fn search_diary_entries_paged(
+        &self,
+        query: &str,
+        start_date: Option<&str>,
+        end_date: Option<&str>,
+        req: &PageRequest,
+    ) -> Result<Page<DiaryEntry>, CoreError> {
         let query = query.trim();
         if query.is_empty() {
-            return Ok(Vec::new());
+            return Ok(Page::final_page(Vec::new(), Some(0)));
         }
 
-        match self.search_diary_entries_with_fts(query, start_date, end_date, safe_limit) {
-            Ok(entries) => Ok(entries),
-            Err(CoreError::Sqlite(_)) => {
-                self.search_diary_entries_with_like(query, start_date, end_date, safe_limit)
-            }
-            Err(other) => Err(other),
-        }
+        let fetch = req.fetch_limit() as i64;
+        let offset = req.offset as i64;
+
+        let raw =
+            match self.search_diary_entries_with_fts(query, start_date, end_date, fetch, offset) {
+                Ok(entries) => entries,
+                Err(CoreError::Sqlite(_)) => {
+                    self.search_diary_entries_with_like(query, start_date, end_date, fetch, offset)?
+                }
+                Err(other) => return Err(other),
+            };
+
+        Ok(Page::from_peek(raw, req.limit, req.offset, None))
     }
 
     fn search_diary_entries_with_fts(
@@ -518,6 +754,7 @@ impl ProjectDatabase {
         start_date: Option<&str>,
         end_date: Option<&str>,
         limit: i64,
+        offset: i64,
     ) -> Result<Vec<DiaryEntry>, CoreError> {
         let mut sql = String::from(
             "
@@ -549,10 +786,12 @@ impl ProjectDatabase {
         sql.push_str(&format!(
             "
             ORDER BY d.entry_date DESC, d.updated_at_epoch_ms DESC, d.entry_id ASC
-            LIMIT ?{bind_index}
-            "
+            LIMIT ?{bind_index} OFFSET ?{}
+            ",
+            bind_index + 1
         ));
         bind_values.push(limit.into());
+        bind_values.push(offset.into());
 
         let mut stmt = self.conn.prepare(&sql)?;
         let mut rows = stmt.query(params_from_iter(bind_values.iter()))?;
@@ -569,6 +808,7 @@ impl ProjectDatabase {
         start_date: Option<&str>,
         end_date: Option<&str>,
         limit: i64,
+        offset: i64,
     ) -> Result<Vec<DiaryEntry>, CoreError> {
         let mut sql = String::from(
             "
@@ -603,10 +843,12 @@ impl ProjectDatabase {
         sql.push_str(&format!(
             "
             ORDER BY entry_date DESC, updated_at_epoch_ms DESC, entry_id ASC
-            LIMIT ?{bind_index}
-            "
+            LIMIT ?{bind_index} OFFSET ?{}
+            ",
+            bind_index + 1
         ));
         bind_values.push(limit.into());
+        bind_values.push(offset.into());
 
         let mut stmt = self.conn.prepare(&sql)?;
         let mut rows = stmt.query(params_from_iter(bind_values.iter()))?;
@@ -617,12 +859,31 @@ impl ProjectDatabase {
         Ok(entries)
     }
 
+    /// Legacy list_aaak_lessons — validates the limit and delegates to the
+    /// paginated implementation. Unlike v0.14.x this rejects over-limit
+    /// requests instead of silently truncating to 200.
     pub fn list_aaak_lessons(
         &self,
         project_id: &str,
         limit: usize,
     ) -> Result<Vec<AaakLesson>, CoreError> {
-        let safe_limit = limit.clamp(1, 200) as i64;
+        let req = PageRequest::decode(
+            limit,
+            None,
+            page_limits::AAAK_LESSONS_DEFAULT,
+            page_limits::AAAK_LESSONS_MAX,
+        )?;
+        Ok(self.list_aaak_lessons_paged(project_id, &req)?.items)
+    }
+
+    /// Cursor-paginated list of AAAK lessons. Preferred since v0.15.0.
+    pub fn list_aaak_lessons_paged(
+        &self,
+        project_id: &str,
+        req: &PageRequest,
+    ) -> Result<Page<AaakLesson>, CoreError> {
+        let fetch = req.fetch_limit() as i64;
+        let offset = req.offset as i64;
         let mut stmt = self.conn.prepare(
             "
             SELECT lesson_id, project_id, pattern_key, role, canonical_text, occurrence_count,
@@ -630,11 +891,11 @@ impl ProjectDatabase {
             FROM aaak_lessons
             WHERE project_id = ?1
             ORDER BY confidence_percent DESC, occurrence_count DESC, pattern_key ASC
-            LIMIT ?2
+            LIMIT ?2 OFFSET ?3
             ",
         )?;
 
-        let mut rows = stmt.query(params![project_id, safe_limit])?;
+        let mut rows = stmt.query(params![project_id, fetch, offset])?;
         let mut lessons = Vec::new();
         while let Some(row) = rows.next()? {
             lessons.push(AaakLesson {
@@ -649,7 +910,19 @@ impl ProjectDatabase {
                 updated_at_epoch_ms: row.get(8)?,
             });
         }
-        Ok(lessons)
+
+        let total: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM aaak_lessons WHERE project_id = ?1",
+            params![project_id],
+            |row| row.get(0),
+        )?;
+
+        Ok(Page::from_peek(
+            lessons,
+            req.limit,
+            req.offset,
+            Some(total.max(0) as u64),
+        ))
     }
 
     pub fn delete_aaak_lesson(&self, lesson_id: &str) -> Result<bool, CoreError> {
@@ -724,13 +997,33 @@ impl ProjectDatabase {
         Ok(None)
     }
 
+    /// Legacy list_navigation_nodes — validates the limit and delegates.
     pub fn list_navigation_nodes(
         &self,
         parent_node_id: Option<&str>,
         kind: Option<&str>,
         limit: usize,
     ) -> Result<Vec<MemoryNavigationNode>, CoreError> {
-        let safe_limit = limit.clamp(1, 2_000) as i64;
+        let req = PageRequest::decode(
+            limit,
+            None,
+            page_limits::NAVIGATION_NODES_DEFAULT,
+            page_limits::NAVIGATION_NODES_MAX,
+        )?;
+        Ok(self
+            .list_navigation_nodes_paged(parent_node_id, kind, &req)?
+            .items)
+    }
+
+    /// Cursor-paginated list of navigation nodes. Preferred since v0.15.0.
+    pub fn list_navigation_nodes_paged(
+        &self,
+        parent_node_id: Option<&str>,
+        kind: Option<&str>,
+        req: &PageRequest,
+    ) -> Result<Page<MemoryNavigationNode>, CoreError> {
+        let fetch = req.fetch_limit() as i64;
+        let offset = req.offset as i64;
         let mut sql = String::from(
             "
             SELECT node_id, project_id, kind, label, parent_node_id, wing, hall, room,
@@ -754,9 +1047,11 @@ impl ProjectDatabase {
         }
 
         sql.push_str(&format!(
-            " ORDER BY kind ASC, label ASC, node_id ASC LIMIT ?{bind_index}"
+            " ORDER BY kind ASC, label ASC, node_id ASC LIMIT ?{bind_index} OFFSET ?{}",
+            bind_index + 1
         ));
-        bind_values.push(safe_limit.into());
+        bind_values.push(fetch.into());
+        bind_values.push(offset.into());
 
         let mut stmt = self.conn.prepare(&sql)?;
         let mut rows = stmt.query(params_from_iter(bind_values.iter()))?;
@@ -764,7 +1059,32 @@ impl ProjectDatabase {
         while let Some(row) = rows.next()? {
             nodes.push(navigation_node_from_row(row)?);
         }
-        Ok(nodes)
+
+        let total = self.count_navigation_nodes(parent_node_id, kind)?;
+        Ok(Page::from_peek(nodes, req.limit, req.offset, Some(total)))
+    }
+
+    fn count_navigation_nodes(
+        &self,
+        parent_node_id: Option<&str>,
+        kind: Option<&str>,
+    ) -> Result<u64, CoreError> {
+        let mut sql = String::from("SELECT COUNT(*) FROM navigation_nodes WHERE project_id = ?1");
+        let mut bind_values: Vec<SqlValue> = vec![self.project_id.clone().into()];
+        let mut bind_index = 2;
+        if let Some(parent_node_id) = parent_node_id {
+            sql.push_str(&format!(" AND parent_node_id = ?{bind_index}"));
+            bind_values.push(parent_node_id.to_string().into());
+            bind_index += 1;
+        }
+        if let Some(kind) = kind {
+            sql.push_str(&format!(" AND kind = ?{bind_index}"));
+            bind_values.push(kind.to_string().into());
+        }
+        let count: i64 =
+            self.conn
+                .query_row(&sql, params_from_iter(bind_values.iter()), |row| row.get(0))?;
+        Ok(count.max(0) as u64)
     }
 
     pub fn upsert_navigation_tunnel(
@@ -798,10 +1118,32 @@ impl ProjectDatabase {
         Ok(())
     }
 
+    /// Legacy list_navigation_tunnels — DEPRECATED, use
+    /// [`list_navigation_tunnels_paged`] or
+    /// [`list_navigation_tunnels_for_nodes`] instead. This version used to
+    /// return every tunnel in the project with no limit at all; it now
+    /// returns at most `NAVIGATION_TUNNELS_MAX` rows and emits a warning.
     pub fn list_navigation_tunnels(
         &self,
         node_id: Option<&str>,
     ) -> Result<Vec<MemoryNavigationTunnel>, CoreError> {
+        let req = PageRequest::decode(
+            0,
+            None,
+            page_limits::NAVIGATION_TUNNELS_MAX,
+            page_limits::NAVIGATION_TUNNELS_MAX,
+        )?;
+        Ok(self.list_navigation_tunnels_paged(node_id, &req)?.items)
+    }
+
+    /// Cursor-paginated list of navigation tunnels. Preferred since v0.15.0.
+    pub fn list_navigation_tunnels_paged(
+        &self,
+        node_id: Option<&str>,
+        req: &PageRequest,
+    ) -> Result<Page<MemoryNavigationTunnel>, CoreError> {
+        let fetch = req.fetch_limit() as i64;
+        let offset = req.offset as i64;
         let mut sql = String::from(
             "
             SELECT tunnel_id, project_id, from_node_id, to_node_id, updated_at_epoch_ms
@@ -810,11 +1152,20 @@ impl ProjectDatabase {
             ",
         );
         let mut bind_values: Vec<SqlValue> = vec![self.project_id.clone().into()];
+        let mut bind_index = 2;
         if let Some(node_id) = node_id {
-            sql.push_str(" AND (from_node_id = ?2 OR to_node_id = ?2)");
+            sql.push_str(&format!(
+                " AND (from_node_id = ?{bind_index} OR to_node_id = ?{bind_index})"
+            ));
             bind_values.push(node_id.to_string().into());
+            bind_index += 1;
         }
-        sql.push_str(" ORDER BY from_node_id ASC, to_node_id ASC, tunnel_id ASC");
+        sql.push_str(&format!(
+            " ORDER BY from_node_id ASC, to_node_id ASC, tunnel_id ASC LIMIT ?{bind_index} OFFSET ?{}",
+            bind_index + 1
+        ));
+        bind_values.push(fetch.into());
+        bind_values.push(offset.into());
 
         let mut stmt = self.conn.prepare(&sql)?;
         let mut rows = stmt.query(params_from_iter(bind_values.iter()))?;
@@ -828,7 +1179,117 @@ impl ProjectDatabase {
                 updated_at_epoch_ms: row.get(4)?,
             });
         }
-        Ok(tunnels)
+
+        let total = self.count_navigation_tunnels(node_id)?;
+        Ok(Page::from_peek(tunnels, req.limit, req.offset, Some(total)))
+    }
+
+    /// SQL-side filter: fetch every tunnel that touches any of the given
+    /// node ids. Used by `memory_navigation_list` to avoid loading every
+    /// tunnel in the project and filtering in Rust. The caller supplies an
+    /// explicit limit that is validated against
+    /// `page_limits::NAVIGATION_TUNNELS_MAX`.
+    ///
+    /// Implementation: uses a `WHERE from_node_id IN (...) OR to_node_id IN (...)`
+    /// clause with dynamically-bound parameters. SQLite's default SQLITE_MAX_VARIABLE_NUMBER
+    /// is 999, so we chunk the input by 400 (leaving headroom) and UNION the results.
+    pub fn list_navigation_tunnels_for_nodes(
+        &self,
+        node_ids: &[String],
+        limit: usize,
+    ) -> Result<Vec<MemoryNavigationTunnel>, CoreError> {
+        if node_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let req = PageRequest::decode(
+            limit,
+            None,
+            page_limits::NAVIGATION_TUNNELS_DEFAULT,
+            page_limits::NAVIGATION_TUNNELS_MAX,
+        )?;
+
+        // Deduplicate and chunk — avoids SQLITE_MAX_VARIABLE_NUMBER and ensures
+        // stable ordering across chunk boundaries.
+        let mut unique: Vec<&String> = node_ids.iter().collect();
+        unique.sort();
+        unique.dedup();
+
+        const CHUNK: usize = 400;
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut out: Vec<MemoryNavigationTunnel> = Vec::new();
+
+        for chunk in unique.chunks(CHUNK) {
+            let placeholders: String = (0..chunk.len())
+                .map(|i| format!("?{}", i + 2))
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "
+                SELECT tunnel_id, project_id, from_node_id, to_node_id, updated_at_epoch_ms
+                FROM navigation_tunnels
+                WHERE project_id = ?1
+                  AND (from_node_id IN ({ph}) OR to_node_id IN ({ph}))
+                ORDER BY from_node_id ASC, to_node_id ASC, tunnel_id ASC
+                LIMIT ?{lim}
+                ",
+                ph = placeholders,
+                lim = chunk.len() + 2
+            );
+            let mut bind_values: Vec<SqlValue> = Vec::with_capacity(chunk.len() + 2);
+            bind_values.push(self.project_id.clone().into());
+            for id in chunk {
+                bind_values.push((*id).clone().into());
+            }
+            bind_values.push((req.limit as i64).into());
+
+            let mut stmt = self.conn.prepare(&sql)?;
+            let mut rows = stmt.query(params_from_iter(bind_values.iter()))?;
+            while let Some(row) = rows.next()? {
+                let tunnel = MemoryNavigationTunnel {
+                    tunnel_id: row.get(0)?,
+                    project_id: row.get(1)?,
+                    from_node_id: row.get(2)?,
+                    to_node_id: row.get(3)?,
+                    updated_at_epoch_ms: row.get(4)?,
+                };
+                if seen.insert(tunnel.tunnel_id.clone()) {
+                    out.push(tunnel);
+                }
+                if out.len() >= req.limit {
+                    break;
+                }
+            }
+            if out.len() >= req.limit {
+                break;
+            }
+        }
+
+        out.sort_by(|a, b| {
+            a.from_node_id
+                .cmp(&b.from_node_id)
+                .then(a.to_node_id.cmp(&b.to_node_id))
+                .then(a.tunnel_id.cmp(&b.tunnel_id))
+        });
+        out.truncate(req.limit);
+        Ok(out)
+    }
+
+    fn count_navigation_tunnels(&self, node_id: Option<&str>) -> Result<u64, CoreError> {
+        let count: i64 = if let Some(node_id) = node_id {
+            self.conn.query_row(
+                "SELECT COUNT(*) FROM navigation_tunnels
+                 WHERE project_id = ?1 AND (from_node_id = ?2 OR to_node_id = ?2)",
+                params![self.project_id, node_id],
+                |row| row.get(0),
+            )?
+        } else {
+            self.conn.query_row(
+                "SELECT COUNT(*) FROM navigation_tunnels WHERE project_id = ?1",
+                params![self.project_id],
+                |row| row.get(0),
+            )?
+        };
+        Ok(count.max(0) as u64)
     }
 
     fn ensure_navigation_project_scope(&self, project_id: &str) -> Result<(), CoreError> {
@@ -1172,11 +1633,206 @@ fn run_migrations(conn: &Connection) -> Result<(), CoreError> {
         )?;
     }
 
+    if current < 7 {
+        // Schema v7 (v0.15.0 production hardening): add structured outcome
+        // columns to audit_events so every state-changing broker operation
+        // can record a proper AuditRecord instead of opaque payload_json.
+        //
+        // Both new columns are nullable / default so existing rows from
+        // v0.14.x keep working — they get `outcome='unknown'` and
+        // `error_kind=NULL` which downstream dashboards can filter out.
+        //
+        // We also add an index on (project_id, outcome) so error-rate queries
+        // stay cheap as the audit log grows.
+        conn.execute_batch(
+            "
+            ALTER TABLE audit_events ADD COLUMN outcome TEXT NOT NULL DEFAULT 'unknown';
+            ALTER TABLE audit_events ADD COLUMN error_kind TEXT;
+
+            CREATE INDEX IF NOT EXISTS idx_audit_events_project_outcome
+            ON audit_events(project_id, outcome, created_at_epoch_ms DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_audit_events_project_event
+            ON audit_events(project_id, event_type, created_at_epoch_ms DESC);
+            ",
+        )?;
+
+        conn.execute(
+            "
+            INSERT INTO schema_migrations(version, applied_at_epoch_ms)
+            VALUES (?1, CAST(strftime('%s','now') AS INTEGER) * 1000)
+            ",
+            [7],
+        )?;
+    }
+
     if current > CURRENT_SCHEMA_VERSION {
         return Err(CoreError::UnsupportedSchemaVersion(current.to_string()));
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// StateStore trait impl (v0.16.0 Phase A2)
+// ---------------------------------------------------------------------------
+//
+// Forwards every trait method to the corresponding inherent method on
+// `ProjectDatabase`. Zero behaviour change for SQLite — the trait exists so
+// alternative backends (Postgres, Redis-with-AOF) can be swapped in at the
+// broker level without touching the 18+ call sites.
+
+use crate::state_store::{StateStore, StateStoreCapabilities};
+
+impl StateStore for ProjectDatabase {
+    fn project_id(&self) -> &str {
+        ProjectDatabase::project_id(self)
+    }
+
+    fn schema_version(&self) -> Result<i64, CoreError> {
+        ProjectDatabase::schema_version(self)
+    }
+
+    fn capabilities(&self) -> StateStoreCapabilities {
+        StateStoreCapabilities::sqlite()
+    }
+
+    fn upsert_project_profile(&self, profile_json: &str) -> Result<(), CoreError> {
+        ProjectDatabase::upsert_project_profile(self, profile_json)
+    }
+
+    fn latest_project_profile(&self) -> Result<Option<String>, CoreError> {
+        ProjectDatabase::latest_project_profile(self)
+    }
+
+    fn set_approval(
+        &self,
+        action_key: &str,
+        scope: ApprovalScope,
+        approved: bool,
+    ) -> Result<(), CoreError> {
+        ProjectDatabase::set_approval(self, action_key, scope, approved)
+    }
+
+    fn is_approved(&self, action_key: &str, scope: ApprovalScope) -> Result<bool, CoreError> {
+        ProjectDatabase::is_approved(self, action_key, scope)
+    }
+
+    fn record_audit_event(&self, event_type: &str, payload_json: &str) -> Result<(), CoreError> {
+        ProjectDatabase::record_audit_event(self, event_type, payload_json)
+    }
+
+    fn record_audit(&self, record: &AuditRecord) -> Result<(), CoreError> {
+        ProjectDatabase::record_audit(self, record)
+    }
+
+    fn audit_event_count_for_project(&self) -> Result<u64, CoreError> {
+        ProjectDatabase::audit_event_count_for_project(self)
+    }
+
+    fn list_audit_events_paged(&self, req: &PageRequest) -> Result<Page<AuditEvent>, CoreError> {
+        ProjectDatabase::list_audit_events_paged(self, req)
+    }
+
+    fn list_audit_events(&self, limit: usize) -> Result<Vec<AuditEvent>, CoreError> {
+        ProjectDatabase::list_audit_events(self, limit)
+    }
+
+    fn upsert_conversation_source(
+        &self,
+        record: &ConversationSourceRecord,
+    ) -> Result<(), CoreError> {
+        ProjectDatabase::upsert_conversation_source(self, record)
+    }
+
+    fn list_conversation_sources(
+        &self,
+        wing: Option<&str>,
+        hall: Option<&str>,
+        room: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ConversationSourceRecord>, CoreError> {
+        ProjectDatabase::list_conversation_sources(self, wing, hall, room, limit)
+    }
+
+    fn upsert_aaak_lesson(&self, lesson: &AaakLesson) -> Result<(), CoreError> {
+        ProjectDatabase::upsert_aaak_lesson(self, lesson)
+    }
+
+    fn list_aaak_lessons(
+        &self,
+        project_id: &str,
+        limit: usize,
+    ) -> Result<Vec<AaakLesson>, CoreError> {
+        ProjectDatabase::list_aaak_lessons(self, project_id, limit)
+    }
+
+    fn delete_aaak_lesson(&self, lesson_id: &str) -> Result<bool, CoreError> {
+        ProjectDatabase::delete_aaak_lesson(self, lesson_id)
+    }
+
+    fn upsert_diary_entry(&self, entry: &DiaryEntry) -> Result<(), CoreError> {
+        ProjectDatabase::upsert_diary_entry(self, entry)
+    }
+
+    fn list_diary_entries(
+        &self,
+        start_date: Option<&str>,
+        end_date: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<DiaryEntry>, CoreError> {
+        ProjectDatabase::list_diary_entries(self, start_date, end_date, limit)
+    }
+
+    fn search_diary_entries_in_range(
+        &self,
+        query: &str,
+        start_date: Option<&str>,
+        end_date: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<DiaryEntry>, CoreError> {
+        ProjectDatabase::search_diary_entries_in_range(self, query, start_date, end_date, limit)
+    }
+
+    fn upsert_navigation_node(&self, node: &MemoryNavigationNode) -> Result<(), CoreError> {
+        ProjectDatabase::upsert_navigation_node(self, node)
+    }
+
+    fn get_navigation_node(
+        &self,
+        node_id: &str,
+    ) -> Result<Option<MemoryNavigationNode>, CoreError> {
+        ProjectDatabase::get_navigation_node(self, node_id)
+    }
+
+    fn list_navigation_nodes_paged(
+        &self,
+        parent_node_id: Option<&str>,
+        kind: Option<&str>,
+        req: &PageRequest,
+    ) -> Result<Page<MemoryNavigationNode>, CoreError> {
+        ProjectDatabase::list_navigation_nodes_paged(self, parent_node_id, kind, req)
+    }
+
+    fn upsert_navigation_tunnel(&self, tunnel: &MemoryNavigationTunnel) -> Result<(), CoreError> {
+        ProjectDatabase::upsert_navigation_tunnel(self, tunnel)
+    }
+
+    fn list_navigation_tunnels_paged(
+        &self,
+        node_id: Option<&str>,
+        req: &PageRequest,
+    ) -> Result<Page<MemoryNavigationTunnel>, CoreError> {
+        ProjectDatabase::list_navigation_tunnels_paged(self, node_id, req)
+    }
+
+    fn list_navigation_tunnels_for_nodes(
+        &self,
+        node_ids: &[String],
+        limit: usize,
+    ) -> Result<Vec<MemoryNavigationTunnel>, CoreError> {
+        ProjectDatabase::list_navigation_tunnels_for_nodes(self, node_ids, limit)
+    }
 }
 
 #[cfg(test)]
@@ -1187,6 +1843,7 @@ mod tests {
         AaakLesson, ApprovalScope, DiaryEntry, MemoryNavigationNode, MemoryNavigationNodeKind,
         MemoryNavigationTunnel,
     };
+    use crate::error::CoreError;
 
     use super::{ConversationSourceRecord, ProjectDatabase};
 
@@ -1204,7 +1861,45 @@ mod tests {
             .to_string_lossy()
             .ends_with(".the-one/state.db"));
         assert_eq!(db.journal_mode().expect("journal mode query"), "wal");
-        assert_eq!(db.schema_version().expect("schema version query"), 6);
+        assert_eq!(db.schema_version().expect("schema version query"), 7);
+        // v0.15.1 Lever 1: synchronous must be NORMAL (1) in WAL mode. If
+        // this regresses to FULL (2) or EXTRA (3), audit-log write
+        // throughput drops by 10-50×. See production-hardening-v0.15.md.
+        assert_eq!(
+            db.synchronous_mode().expect("synchronous mode query"),
+            1,
+            "expected PRAGMA synchronous=NORMAL (1) after v0.15.1 Lever 1"
+        );
+    }
+
+    #[test]
+    fn test_audit_write_throughput_under_normal_sync() {
+        // Smoke test for v0.15.1 Lever 1: writes should complete in a
+        // realistic wall-clock budget. We don't assert a hard latency floor
+        // (CI runners vary) but we confirm 100 audit writes finish under
+        // 5s — which would be impossible at 5ms/row under FULL sync
+        // because that alone would take 0.5s just on fsync, plus overhead.
+        //
+        // This is a behavioral guard against accidentally switching back
+        // to synchronous=FULL. A pure pragma check (above) would miss the
+        // case where the pragma is set but ignored for some reason.
+        use std::time::Instant;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("repo");
+        fs::create_dir_all(&project_root).expect("project dir");
+        let db = ProjectDatabase::open(&project_root, "project-1").expect("db");
+
+        let t0 = Instant::now();
+        for i in 0..100 {
+            db.record_audit_event("tool_run", &format!("{{\"i\":{i}}}"))
+                .expect("audit write");
+        }
+        let elapsed = t0.elapsed();
+        assert!(
+            elapsed.as_secs() < 5,
+            "100 audit writes took {elapsed:?} — suspiciously slow, \
+             did synchronous=NORMAL regress?"
+        );
     }
 
     #[test]
@@ -1258,6 +1953,90 @@ mod tests {
         let events = db.list_audit_events(10).expect("list should work");
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event_type, "tool_run");
+        // Legacy record_audit_event writes 'unknown' for back-compat.
+        assert_eq!(events[0].outcome, "unknown");
+        assert!(events[0].error_kind.is_none());
+    }
+
+    #[test]
+    fn test_audit_record_structured_roundtrip() {
+        use crate::audit::{AuditOutcome, AuditRecord};
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let project_root = temp.path().join("repo");
+        fs::create_dir_all(&project_root).expect("project dir should exist");
+
+        let db = ProjectDatabase::open(&project_root, "project-1").expect("db should open");
+
+        db.record_audit(&AuditRecord::ok("docs.create", "{\"path\":\"notes/a.md\"}"))
+            .expect("ok audit write should succeed");
+
+        let err = CoreError::InvalidRequest("nope".into());
+        db.record_audit(&AuditRecord::error("docs.create", "{\"path\":\"\"}", &err))
+            .expect("error audit write should succeed");
+
+        let events = db.list_audit_events(10).expect("list should work");
+        assert_eq!(events.len(), 2);
+        // Most-recent first.
+        assert_eq!(events[0].outcome, "error");
+        assert_eq!(events[0].error_kind.as_deref(), Some("invalid_request"));
+        assert_eq!(events[1].outcome, "ok");
+        assert!(events[1].error_kind.is_none());
+
+        assert_eq!(
+            db.audit_outcome_count(AuditOutcome::Ok).unwrap(),
+            1,
+            "one ok"
+        );
+        assert_eq!(
+            db.audit_outcome_count(AuditOutcome::Error).unwrap(),
+            1,
+            "one error"
+        );
+    }
+
+    #[test]
+    fn test_audit_events_pagination() {
+        use crate::pagination::{Cursor, PageRequest};
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("repo");
+        fs::create_dir_all(&project_root).unwrap();
+        let db = ProjectDatabase::open(&project_root, "project-1").unwrap();
+        for i in 0..120 {
+            db.record_audit_event("tool_run", &format!("{{\"i\":{i}}}"))
+                .unwrap();
+        }
+
+        let req = PageRequest::decode(50, None, 50, 500).unwrap();
+        let page = db.list_audit_events_paged(&req).unwrap();
+        assert_eq!(page.items.len(), 50);
+        assert!(page.next_cursor.is_some());
+        assert_eq!(page.total_count, Some(120));
+
+        let next_cursor = page.next_cursor.unwrap();
+        let req2 = PageRequest::decode(50, Some(next_cursor.as_str()), 50, 500).unwrap();
+        let page2 = db.list_audit_events_paged(&req2).unwrap();
+        assert_eq!(page2.items.len(), 50);
+        assert!(page2.next_cursor.is_some());
+
+        let (off, _) = Cursor::decode(page2.next_cursor.unwrap().as_str()).unwrap();
+        assert_eq!(off, 100);
+
+        let req3 = PageRequest::decode(50, Some(&Cursor::from_offset(100).0), 50, 500).unwrap();
+        let page3 = db.list_audit_events_paged(&req3).unwrap();
+        assert_eq!(page3.items.len(), 20);
+        assert!(page3.next_cursor.is_none());
+    }
+
+    #[test]
+    fn test_list_audit_events_rejects_over_limit() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("repo");
+        fs::create_dir_all(&project_root).unwrap();
+        let db = ProjectDatabase::open(&project_root, "project-1").unwrap();
+        // AUDIT_EVENTS_MAX = 500 — any bigger number must be rejected, not
+        // silently truncated.
+        let err = db.list_audit_events(5_000).unwrap_err();
+        assert!(matches!(err, CoreError::InvalidRequest(_)));
     }
 
     #[test]

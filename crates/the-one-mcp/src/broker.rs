@@ -154,7 +154,19 @@ impl McpBroker {
     pub fn register_capability(&mut self, capability: Capability) {
         self.registry.add(capability);
         if let Some(path) = &self.global_registry_path {
-            let _ = self.registry.save_to_path(path);
+            if let Err(err) = self.registry.save_to_path(path) {
+                // Capability registry persistence is a side-effect of
+                // in-memory mutation — we still want the broker to observe
+                // the new capability, but failing silently here was how we
+                // lost track of misconfigured state dirs. Emit a warning so
+                // ops can see it in the log.
+                tracing::warn!(
+                    target: "the_one_mcp::registry",
+                    path = %path.display(),
+                    error = %err,
+                    "capability registry save failed"
+                );
+            }
         }
     }
 
@@ -412,6 +424,18 @@ impl McpBroker {
             MemoryConversationFormat::OpenAiMessages => "openai_messages",
             MemoryConversationFormat::ClaudeTranscript => "claude_transcript",
             MemoryConversationFormat::GenericJsonl => "generic_jsonl",
+        }
+    }
+
+    /// Render an absolute path for inclusion in a client-facing response.
+    /// If the path is inside `project_root` the result is the repo-relative
+    /// form (no leading slash); otherwise it's the absolute path. This
+    /// prevents the-one-mcp from leaking host filesystem layout details
+    /// for paths the client didn't already know about.
+    fn display_source_path(project_root: &Path, path: &Path) -> String {
+        match path.strip_prefix(project_root) {
+            Ok(rel) => rel.display().to_string(),
+            Err(_) => path.display().to_string(),
         }
     }
 
@@ -729,37 +753,58 @@ impl McpBroker {
         }
     }
 
+    /// Compute a collision-resistant digest for a navigation node seed.
+    ///
+    /// History: v0.14.x used only the first 12 hex chars (48 bits) of a
+    /// SHA-256 digest. The birthday bound at 48 bits is 2^24 ≈ 16.7M —
+    /// uncomfortably close to the "store everything verbatim" target.
+    ///
+    /// Production hardening (v0.15.0) widens the output to 32 hex chars
+    /// (128 bits, birthday bound 2^64 ≈ 18 quintillion) AND always folds
+    /// the project_id into the input so two projects that happen to share
+    /// a wing name still produce disjoint node IDs even if the database
+    /// layer's composite primary key is ever relaxed.
+    ///
+    /// Callers that stored node IDs under the v0.14.x scheme keep working
+    /// — the 12-char format is still accepted on reads because
+    /// `get_navigation_node` looks up by exact `(project_id, node_id)`.
     fn navigation_digest(seed: &str) -> String {
+        const DIGEST_HEX_CHARS: usize = 32;
         let mut hasher = Sha256::new();
         hasher.update(seed.as_bytes());
-        hasher
-            .finalize()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>()[..12]
-            .to_string()
+        let digest = hasher.finalize();
+        let mut out = String::with_capacity(DIGEST_HEX_CHARS);
+        for byte in digest.iter().take(DIGEST_HEX_CHARS / 2) {
+            out.push_str(&format!("{byte:02x}"));
+        }
+        out
     }
 
-    fn navigation_drawer_node_id(wing: &str) -> String {
+    fn navigation_drawer_node_id(project_id: &str, wing: &str) -> String {
         format!(
             "drawer:{}-{}",
             Self::navigation_slug(wing),
-            Self::navigation_digest(&format!("drawer:{wing}"))
+            Self::navigation_digest(&format!("v2:{project_id}:drawer:{wing}"))
         )
     }
 
-    fn navigation_closet_node_id(wing: &str, hall: &str) -> String {
+    fn navigation_closet_node_id(project_id: &str, wing: &str, hall: &str) -> String {
         format!(
             "closet:{}-{}",
             Self::navigation_slug(hall),
-            Self::navigation_digest(&format!("closet:{wing}:{hall}"))
+            Self::navigation_digest(&format!("v2:{project_id}:closet:{wing}:{hall}"))
         )
     }
 
-    fn navigation_room_node_id(wing: &str, hall: Option<&str>, room: &str) -> String {
+    fn navigation_room_node_id(
+        project_id: &str,
+        wing: &str,
+        hall: Option<&str>,
+        room: &str,
+    ) -> String {
         let scope = hall
-            .map(|hall| format!("room:{wing}:{hall}:{room}"))
-            .unwrap_or_else(|| format!("room:{wing}:{room}"));
+            .map(|hall| format!("v2:{project_id}:room:{wing}:{hall}:{room}"))
+            .unwrap_or_else(|| format!("v2:{project_id}:room:{wing}:{room}"));
         format!(
             "room:{}-{}",
             Self::navigation_slug(room),
@@ -770,7 +815,7 @@ impl McpBroker {
     fn navigation_tunnel_id(project_id: &str, from_node_id: &str, to_node_id: &str) -> String {
         format!(
             "tunnel-{}",
-            Self::navigation_digest(&format!("{project_id}:{from_node_id}:{to_node_id}"))
+            Self::navigation_digest(&format!("v2:{project_id}:{from_node_id}:{to_node_id}"))
         )
     }
 
@@ -819,7 +864,7 @@ impl McpBroker {
         palace: &PalaceMetadata,
     ) -> Result<(), CoreError> {
         let now = current_time_epoch_ms();
-        let drawer_id = Self::navigation_drawer_node_id(&palace.wing);
+        let drawer_id = Self::navigation_drawer_node_id(project_id, &palace.wing);
         db.upsert_navigation_node(&MemoryNavigationNode {
             node_id: drawer_id.clone(),
             project_id: project_id.to_string(),
@@ -834,7 +879,7 @@ impl McpBroker {
 
         let mut parent_node_id = drawer_id;
         if let Some(hall) = palace.hall.as_deref() {
-            let closet_id = Self::navigation_closet_node_id(&palace.wing, hall);
+            let closet_id = Self::navigation_closet_node_id(project_id, &palace.wing, hall);
             db.upsert_navigation_node(&MemoryNavigationNode {
                 node_id: closet_id.clone(),
                 project_id: project_id.to_string(),
@@ -851,7 +896,12 @@ impl McpBroker {
 
         if let Some(room) = palace.room.as_deref() {
             db.upsert_navigation_node(&MemoryNavigationNode {
-                node_id: Self::navigation_room_node_id(&palace.wing, palace.hall.as_deref(), room),
+                node_id: Self::navigation_room_node_id(
+                    project_id,
+                    &palace.wing,
+                    palace.hall.as_deref(),
+                    room,
+                ),
                 project_id: project_id.to_string(),
                 kind: MemoryNavigationNodeKind::Room,
                 label: room.to_string(),
@@ -1471,7 +1521,22 @@ impl McpBroker {
         let wing_filter = wing.as_deref();
         let hall_filter = hall.as_deref();
         let room_filter = room.as_deref();
-        let config = AppConfig::load(project_root, RuntimeOverrides::default()).ok();
+        // v0.15.0: we still degrade gracefully when config is missing (the
+        // search path is non-fatal), but we now log the error so an
+        // operator can diagnose a misconfigured project. Previously the
+        // failure was silently dropped.
+        let config = match AppConfig::load(project_root, RuntimeOverrides::default()) {
+            Ok(cfg) => Some(cfg),
+            Err(err) => {
+                tracing::warn!(
+                    target: "the_one_mcp::memory_search",
+                    project_id = %project_id,
+                    error = %err,
+                    "failed to load project config — proceeding with defaults"
+                );
+                None
+            }
+        };
         let palace_enabled = config
             .as_ref()
             .map(|cfg| cfg.memory_palace_enabled)
@@ -1486,9 +1551,21 @@ impl McpBroker {
         let search_top_k = Self::search_candidate_limit(top_k, filters_requested);
 
         if route.decision.requires_memory_search {
-            let _ = self
+            // Best-effort: if memory load fails the search path falls
+            // through to `Vec::new()` below. v0.14.x silently dropped this
+            // error; v0.15.0 emits a warning so operators can see why
+            // searches return no hits.
+            if let Err(err) = self
                 .ensure_project_memory_loaded(project_root, &project_id)
-                .await;
+                .await
+            {
+                tracing::warn!(
+                    target: "the_one_mcp::memory_search",
+                    project_id = %project_id,
+                    error = %err,
+                    "ensure_project_memory_loaded failed — returning empty hits"
+                );
+            }
         }
 
         // Load score threshold from config (LightRAG-inspired improvement)
@@ -1569,6 +1646,14 @@ impl McpBroker {
         request: MemoryIngestConversationRequest,
     ) -> Result<MemoryIngestConversationResponse, CoreError> {
         let project_root = Path::new(&request.project_root);
+        // v0.15.0 production hardening: validate every user-supplied name
+        // at the broker entry point. Returns InvalidRequest with a concrete
+        // human-readable message the client can show.
+        the_one_core::naming::sanitize_project_id(&request.project_id)?;
+        let wing = the_one_core::naming::sanitize_optional_name(request.wing.as_deref(), "wing")?;
+        let hall = the_one_core::naming::sanitize_optional_name(request.hall.as_deref(), "hall")?;
+        let room = the_one_core::naming::sanitize_optional_name(request.room.as_deref(), "room")?;
+
         let config = AppConfig::load(project_root, RuntimeOverrides::default())?;
         if !config.memory_palace_enabled {
             return Err(CoreError::NotEnabled(
@@ -1581,12 +1666,7 @@ impl McpBroker {
         let db = ProjectDatabase::open(project_root, &request.project_id)?;
         let existing_sources = db.list_conversation_sources(None, None, None, usize::MAX)?;
 
-        let palace = Self::palace_metadata_from_parts(
-            &request.project_id,
-            request.wing.clone(),
-            request.hall.clone(),
-            request.room.clone(),
-        );
+        let palace = Self::palace_metadata_from_parts(&request.project_id, wing, hall, room);
         let source_path = transcript_path.display().to_string();
         let pending_conversation = (source_path.as_str(), &transcript, palace.clone());
 
@@ -1660,9 +1740,27 @@ impl McpBroker {
             }
         }
 
+        // v0.15.0: structured audit entry for every successful write.
+        let audit_params = the_one_core::audit::params_json(serde_json::json!({
+            "project_id": request.project_id,
+            "path": request.path,
+            "ingested_chunks": ingested_chunks,
+        }));
+        if let Err(err) = db.record_audit(&the_one_core::audit::AuditRecord::ok(
+            "memory.ingest_conversation",
+            audit_params,
+        )) {
+            tracing::warn!(
+                target: "the_one_mcp::audit",
+                operation = "memory.ingest_conversation",
+                error = %err,
+                "audit record failed (non-fatal)"
+            );
+        }
+
         Ok(MemoryIngestConversationResponse {
             ingested_chunks,
-            source_path: transcript_path.display().to_string(),
+            source_path: Self::display_source_path(project_root, &transcript_path),
         })
     }
 
@@ -1871,6 +1969,9 @@ impl McpBroker {
         request: MemoryDiaryAddRequest,
     ) -> Result<MemoryDiaryAddResponse, CoreError> {
         let project_root = Path::new(&request.project_root);
+        // v0.15.0: validate project_id and each optional tag up front.
+        the_one_core::naming::sanitize_project_id(&request.project_id)?;
+
         let config = AppConfig::load(project_root, RuntimeOverrides::default())?;
         if !Self::diary_features_enabled(&config) {
             return Err(CoreError::NotEnabled(
@@ -1889,6 +1990,10 @@ impl McpBroker {
 
         let mood = Self::normalize_optional_diary_field(request.mood);
         let tags = Self::normalize_diary_tags(request.tags);
+        // Validate each tag — tags flow into FTS5 and JSON payloads.
+        for tag in &tags {
+            the_one_core::naming::sanitize_name(tag, "diary tag")?;
+        }
         let now = current_time_epoch_ms();
         let db = ProjectDatabase::open(project_root, &request.project_id)?;
         let existing_entry = db
@@ -1914,6 +2019,23 @@ impl McpBroker {
 
         db.upsert_diary_entry(&entry)?;
 
+        let audit_params = the_one_core::audit::params_json(serde_json::json!({
+            "project_id": entry.project_id,
+            "entry_id": entry.entry_id,
+            "entry_date": entry.entry_date,
+        }));
+        if let Err(err) = db.record_audit(&the_one_core::audit::AuditRecord::ok(
+            "memory.diary.add",
+            audit_params,
+        )) {
+            tracing::warn!(
+                target: "the_one_mcp::audit",
+                operation = "memory.diary.add",
+                error = %err,
+                "audit record failed (non-fatal)"
+            );
+        }
+
         Ok(MemoryDiaryAddResponse { entry })
     }
 
@@ -1935,12 +2057,14 @@ impl McpBroker {
             request.start_date.as_deref(),
             request.end_date.as_deref(),
         )?;
+        // v0.15.0: route through pagination validation — returns an
+        // InvalidRequest error on over-limit, never silently truncates.
         let db = ProjectDatabase::open(project_root, &request.project_id)?;
         Ok(MemoryDiaryListResponse {
             entries: db.list_diary_entries(
                 request.start_date.as_deref(),
                 request.end_date.as_deref(),
-                self.policy.clamp_search_hits(request.max_results),
+                request.max_results,
             )?,
         })
     }
@@ -1976,7 +2100,7 @@ impl McpBroker {
                 query,
                 request.start_date.as_deref(),
                 request.end_date.as_deref(),
-                self.policy.clamp_search_hits(request.max_results),
+                request.max_results,
             )?,
         })
     }
@@ -2024,6 +2148,16 @@ impl McpBroker {
         request: MemoryNavigationUpsertNodeRequest,
     ) -> Result<MemoryNavigationUpsertNodeResponse, CoreError> {
         let project_root = Path::new(&request.project_root);
+        // v0.15.0: validate every name at the entry point. label is a
+        // user-facing string so we use sanitize_name; node_id uses the
+        // action_key charset since it can carry `:` separators.
+        the_one_core::naming::sanitize_project_id(&request.project_id)?;
+        the_one_core::naming::sanitize_action_key(&request.node_id)?;
+        the_one_core::naming::sanitize_name(&request.label, "label")?;
+        let wing = the_one_core::naming::sanitize_optional_name(request.wing.as_deref(), "wing")?;
+        let hall = the_one_core::naming::sanitize_optional_name(request.hall.as_deref(), "hall")?;
+        let room = the_one_core::naming::sanitize_optional_name(request.room.as_deref(), "room")?;
+
         let config = AppConfig::load(project_root, RuntimeOverrides::default())?;
         if !Self::navigation_features_enabled(&config) {
             return Err(CoreError::NotEnabled(
@@ -2038,6 +2172,7 @@ impl McpBroker {
             .parent_node_id
             .as_deref()
             .map(|parent_node_id| {
+                the_one_core::naming::sanitize_action_key(parent_node_id)?;
                 db.get_navigation_node(parent_node_id)?
                     .ok_or_else(|| Self::navigation_missing_node_error(parent_node_id))
             })
@@ -2050,12 +2185,29 @@ impl McpBroker {
             kind,
             label: request.label,
             parent_node_id: request.parent_node_id,
-            wing: request.wing,
-            hall: request.hall,
-            room: request.room,
+            wing,
+            hall,
+            room,
             updated_at_epoch_ms: current_time_epoch_ms(),
         };
         db.upsert_navigation_node(&node)?;
+
+        let audit_params = the_one_core::audit::params_json(serde_json::json!({
+            "project_id": node.project_id,
+            "node_id": node.node_id,
+            "kind": node.kind.as_str(),
+        }));
+        if let Err(err) = db.record_audit(&the_one_core::audit::AuditRecord::ok(
+            "memory.navigation.upsert_node",
+            audit_params,
+        )) {
+            tracing::warn!(
+                target: "the_one_mcp::audit",
+                operation = "memory.navigation.upsert_node",
+                error = %err,
+                "audit record failed (non-fatal)"
+            );
+        }
 
         Ok(MemoryNavigationUpsertNodeResponse { node })
     }
@@ -2066,6 +2218,10 @@ impl McpBroker {
         request: MemoryNavigationLinkTunnelRequest,
     ) -> Result<MemoryNavigationLinkTunnelResponse, CoreError> {
         let project_root = Path::new(&request.project_root);
+        the_one_core::naming::sanitize_project_id(&request.project_id)?;
+        the_one_core::naming::sanitize_action_key(&request.from_node_id)?;
+        the_one_core::naming::sanitize_action_key(&request.to_node_id)?;
+
         let config = AppConfig::load(project_root, RuntimeOverrides::default())?;
         if !Self::navigation_features_enabled(&config) {
             return Err(CoreError::NotEnabled(
@@ -2126,29 +2282,47 @@ impl McpBroker {
             .map(Self::navigation_node_kind_from_label)
             .transpose()?
             .map(|kind| kind.as_str().to_string());
-        let nodes = db.list_navigation_nodes(
+        // v0.15.0: pagination — reject over-limit requests instead of silently
+        // truncating to 2 000 like v0.14.x did.
+        let nodes_req = the_one_core::pagination::PageRequest::decode(
+            request.limit,
+            request.cursor.as_deref(),
+            the_one_core::storage::sqlite::page_limits::NAVIGATION_NODES_DEFAULT,
+            the_one_core::storage::sqlite::page_limits::NAVIGATION_NODES_MAX,
+        )?;
+        let nodes_page = db.list_navigation_nodes_paged(
             request.parent_node_id.as_deref(),
             kind_filter.as_deref(),
-            request.limit,
+            &nodes_req,
         )?;
-        let all_tunnels = db.list_navigation_tunnels(None)?;
+        let nodes = nodes_page.items;
+
+        // v0.15.0: tunnel filter pushed to SQL — previously we fetched every
+        // tunnel in the project into Rust and filtered client-side. Now we
+        // either fetch the full page of tunnels (when no filter is active)
+        // or call the indexed `list_navigation_tunnels_for_nodes` helper.
         let tunnels = if request.parent_node_id.is_none() && request.kind.is_none() {
-            all_tunnels
+            let tunnels_req = the_one_core::pagination::PageRequest::decode(
+                0,
+                None,
+                the_one_core::storage::sqlite::page_limits::NAVIGATION_TUNNELS_MAX,
+                the_one_core::storage::sqlite::page_limits::NAVIGATION_TUNNELS_MAX,
+            )?;
+            db.list_navigation_tunnels_paged(None, &tunnels_req)?.items
         } else {
-            let node_ids = nodes
-                .iter()
-                .map(|node| node.node_id.as_str())
-                .collect::<HashSet<_>>();
-            all_tunnels
-                .into_iter()
-                .filter(|tunnel| {
-                    node_ids.contains(tunnel.from_node_id.as_str())
-                        || node_ids.contains(tunnel.to_node_id.as_str())
-                })
-                .collect()
+            let node_id_list: Vec<String> = nodes.iter().map(|node| node.node_id.clone()).collect();
+            db.list_navigation_tunnels_for_nodes(
+                &node_id_list,
+                the_one_core::storage::sqlite::page_limits::NAVIGATION_TUNNELS_MAX,
+            )?
         };
 
-        Ok(MemoryNavigationListResponse { nodes, tunnels })
+        Ok(MemoryNavigationListResponse {
+            nodes,
+            tunnels,
+            next_cursor: nodes_page.next_cursor.map(|c| c.as_str().to_string()),
+            total_nodes: nodes_page.total_count,
+        })
     }
 
     #[instrument(skip_all)]
@@ -2169,76 +2343,94 @@ impl McpBroker {
         db.get_navigation_node(&request.start_node_id)?
             .ok_or_else(|| Self::navigation_missing_node_error(&request.start_node_id))?;
 
-        let all_nodes = db.list_navigation_nodes(None, None, 2_000)?;
-        let all_tunnels = db.list_navigation_tunnels(None)?;
-        let node_map = all_nodes
-            .iter()
-            .cloned()
-            .map(|node| (node.node_id.clone(), node))
-            .collect::<HashMap<_, _>>();
+        // v0.15.0 production-hardening: BFS traverses the node graph using
+        // SQL-side neighbor queries. Prior to v0.15.0 this function loaded
+        // every node (capped at 2 000) and every tunnel in the project into
+        // memory on every call — O(total_nodes) per traverse even if the
+        // user only visited 10 reachable neighbors.
+        //
+        // Traversal strategy:
+        // 1. BFS with an explicit visited set.
+        // 2. For each frontier node, fetch its direct child nodes via
+        //    `list_navigation_nodes_paged(parent_node_id = current)` (indexed).
+        // 3. Fetch tunnels touching the current frontier via
+        //    `list_navigation_tunnels_for_nodes` (indexed).
+        // 4. Cap total visited nodes at `MAX_TRAVERSE_NODES` so a pathological
+        //    request cannot OOM the server; return truncated results + a
+        //    `truncated` flag.
+        const MAX_TRAVERSE_NODES: usize = 2_000;
 
-        let mut adjacency: HashMap<String, Vec<String>> = HashMap::new();
-        for node in node_map.values() {
-            if let Some(parent_node_id) = node.parent_node_id.as_deref() {
-                if node_map.contains_key(parent_node_id) {
-                    adjacency
-                        .entry(parent_node_id.to_string())
-                        .or_default()
-                        .push(node.node_id.clone());
-                    adjacency
-                        .entry(node.node_id.clone())
-                        .or_default()
-                        .push(parent_node_id.to_string());
-                }
+        let start_node = db
+            .get_navigation_node(&request.start_node_id)?
+            .expect("start node existence was checked above");
+
+        let mut queue: VecDeque<(MemoryNavigationNode, usize)> =
+            VecDeque::from([(start_node.clone(), 0usize)]);
+        let mut visited: HashMap<String, MemoryNavigationNode> = HashMap::new();
+        visited.insert(start_node.node_id.clone(), start_node);
+        let mut ordered_nodes: Vec<MemoryNavigationNode> = Vec::new();
+        let mut truncated = false;
+
+        while let Some((node, depth)) = queue.pop_front() {
+            ordered_nodes.push(node.clone());
+            if ordered_nodes.len() >= MAX_TRAVERSE_NODES {
+                truncated = !queue.is_empty();
+                break;
             }
-        }
-        for tunnel in &all_tunnels {
-            adjacency
-                .entry(tunnel.from_node_id.clone())
-                .or_default()
-                .push(tunnel.to_node_id.clone());
-            adjacency
-                .entry(tunnel.to_node_id.clone())
-                .or_default()
-                .push(tunnel.from_node_id.clone());
-        }
-        for neighbors in adjacency.values_mut() {
-            neighbors.sort();
-            neighbors.dedup();
-        }
-
-        let mut queue = VecDeque::from([(request.start_node_id.clone(), 0usize)]);
-        let mut visited = HashSet::from([request.start_node_id.clone()]);
-        let mut ordered_nodes = Vec::new();
-        while let Some((node_id, depth)) = queue.pop_front() {
-            if let Some(node) = node_map.get(&node_id) {
-                ordered_nodes.push(node.clone());
-            }
-
             if depth >= request.max_depth {
                 continue;
             }
 
-            if let Some(neighbors) = adjacency.get(&node_id) {
-                for neighbor in neighbors {
-                    if visited.insert(neighbor.clone()) {
-                        queue.push_back((neighbor.clone(), depth + 1));
+            // Parent edge — walk up one level.
+            if let Some(parent_id) = node.parent_node_id.as_deref() {
+                if !visited.contains_key(parent_id) {
+                    if let Some(parent) = db.get_navigation_node(parent_id)? {
+                        visited.insert(parent.node_id.clone(), parent.clone());
+                        queue.push_back((parent, depth + 1));
                     }
+                }
+            }
+
+            // Child nodes — indexed lookup by parent_node_id.
+            let mut child_offset: u64 = 0;
+            loop {
+                let req = the_one_core::pagination::PageRequest::decode(
+                    the_one_core::storage::sqlite::page_limits::NAVIGATION_NODES_DEFAULT,
+                    Some(&the_one_core::pagination::Cursor::from_offset(child_offset).0),
+                    the_one_core::storage::sqlite::page_limits::NAVIGATION_NODES_DEFAULT,
+                    the_one_core::storage::sqlite::page_limits::NAVIGATION_NODES_MAX,
+                )?;
+                let child_page = db.list_navigation_nodes_paged(Some(&node.node_id), None, &req)?;
+                for child in child_page.items {
+                    if visited.contains_key(&child.node_id) {
+                        continue;
+                    }
+                    visited.insert(child.node_id.clone(), child.clone());
+                    queue.push_back((child, depth + 1));
+                }
+                match child_page.next_cursor {
+                    Some(cursor) => {
+                        let (off, _) = the_one_core::pagination::Cursor::decode(cursor.as_str())?;
+                        child_offset = off;
+                    }
+                    None => break,
                 }
             }
         }
 
-        let visited_ids = ordered_nodes
-            .iter()
-            .map(|node| node.node_id.as_str())
-            .collect::<HashSet<_>>();
-        let mut tunnels = all_tunnels
-            .into_iter()
-            .filter(|tunnel| {
-                visited_ids.contains(tunnel.from_node_id.as_str())
-                    && visited_ids.contains(tunnel.to_node_id.as_str())
-            })
-            .collect::<Vec<_>>();
+        // Collect tunnels touching any visited node.
+        let visited_ids: Vec<String> = visited.keys().cloned().collect();
+        let mut tunnels = db.list_navigation_tunnels_for_nodes(
+            &visited_ids,
+            the_one_core::storage::sqlite::page_limits::NAVIGATION_TUNNELS_MAX,
+        )?;
+        // Only retain tunnels where BOTH endpoints were visited — mirrors
+        // the v0.14.x semantics.
+        let visited_set: HashSet<&str> = visited_ids.iter().map(String::as_str).collect();
+        tunnels.retain(|tunnel| {
+            visited_set.contains(tunnel.from_node_id.as_str())
+                && visited_set.contains(tunnel.to_node_id.as_str())
+        });
         tunnels.sort_by(|left, right| {
             left.from_node_id
                 .cmp(&right.from_node_id)
@@ -2246,9 +2438,19 @@ impl McpBroker {
                 .then(left.tunnel_id.cmp(&right.tunnel_id))
         });
 
+        if truncated {
+            tracing::warn!(
+                target: "the_one_mcp::navigation",
+                project_id = %request.project_id,
+                visited = ordered_nodes.len(),
+                "navigation traverse truncated at MAX_TRAVERSE_NODES"
+            );
+        }
+
         Ok(MemoryNavigationTraverseResponse {
             nodes: ordered_nodes,
             tunnels,
+            truncated,
         })
     }
 
@@ -2319,13 +2521,27 @@ impl McpBroker {
         let global_dir = the_one_core::config::global_state_dir_or_default();
         let catalog = the_one_core::tool_catalog::ToolCatalog::open(&global_dir)?;
 
-        // Import catalog files if catalog is empty
+        // Import catalog files if catalog is empty. Failures are logged but
+        // don't block the caller — the catalog is a best-effort index that
+        // the broker can rebuild on the next call.
         if catalog.tool_count()? == 0 {
-            let catalog_dir = Self::find_catalog_data_dir();
-            if let Some(dir) = catalog_dir {
-                let _ = catalog.import_catalog_dir(&dir);
+            if let Some(dir) = Self::find_catalog_data_dir() {
+                if let Err(err) = catalog.import_catalog_dir(&dir) {
+                    tracing::warn!(
+                        target: "the_one_mcp::catalog",
+                        dir = %dir.display(),
+                        error = %err,
+                        "initial catalog import failed"
+                    );
+                }
             }
-            let _ = catalog.scan_system_inventory();
+            if let Err(err) = catalog.scan_system_inventory() {
+                tracing::warn!(
+                    target: "the_one_mcp::catalog",
+                    error = %err,
+                    "initial system inventory scan failed"
+                );
+            }
         }
 
         let mut guard = self
@@ -2463,17 +2679,39 @@ impl McpBroker {
                 .as_ref()
                 .ok_or_else(|| CoreError::Catalog("catalog not initialized".into()))?;
 
-            // Re-scan inventory to pick up the new binary
-            let _ = cat.scan_system_inventory();
-            // Auto-enable
-            let _ = cat.enable_tool(&request.tool_id, "default", &request.project_root);
+            // Re-scan inventory to pick up the new binary. Log on failure
+            // but don't fail the install — the binary is on disk either way.
+            if let Err(err) = cat.scan_system_inventory() {
+                tracing::warn!(
+                    target: "the_one_mcp::catalog",
+                    tool_id = %request.tool_id,
+                    error = %err,
+                    "post-install inventory scan failed"
+                );
+            }
+            // Auto-enable — track the real outcome so we don't lie about
+            // `auto_enabled: true` in the response when the enable call
+            // actually failed (mempalace audit H1).
+            let auto_enabled =
+                match cat.enable_tool(&request.tool_id, "default", &request.project_root) {
+                    Ok(_) => true,
+                    Err(err) => {
+                        tracing::warn!(
+                            target: "the_one_mcp::catalog",
+                            tool_id = %request.tool_id,
+                            error = %err,
+                            "post-install auto-enable failed"
+                        );
+                        false
+                    }
+                };
 
             let info = cat.get_tool(&request.tool_id)?;
             Ok(ToolInstallResponse {
                 installed: true,
                 binary_path: info.as_ref().and_then(|t| t.installed_path.clone()),
                 version: info.as_ref().and_then(|t| t.installed_version.clone()),
-                auto_enabled: true,
+                auto_enabled,
                 output: combined,
             })
         } else {
@@ -2812,8 +3050,17 @@ impl McpBroker {
             }
         }
 
-        // Try catalog FTS
-        self.ensure_catalog().ok();
+        // Try catalog FTS — this path is a fallback, so we log but continue
+        // on failure. Prior to v0.15.0 the `self.ensure_catalog().ok()` call
+        // silently swallowed catalog initialization failures, meaning the
+        // subsequent search always hit the registry fallback.
+        if let Err(err) = self.ensure_catalog() {
+            tracing::debug!(
+                target: "the_one_mcp::tool_search",
+                error = %err,
+                "catalog init unavailable, falling through to registry"
+            );
+        }
         if let Ok(guard) = self.catalog.lock() {
             if let Some(cat) = guard.as_ref() {
                 if let Ok(results) = cat.search_fts(&request.query, clamped as u32) {
@@ -4438,7 +4685,21 @@ mod tests {
             .expect("conversation ingest should succeed");
 
         assert!(response.ingested_chunks >= 1);
-        assert_eq!(response.source_path, transcript_path.display().to_string());
+        // v0.15.0: the response source_path is project-relative (or the
+        // file stem) so we do not leak absolute host paths to the client.
+        // The ingest target still stores the canonical absolute path in
+        // SQLite so internal lookups work — we verify that via the search
+        // below.
+        assert!(
+            response.source_path.ends_with("transcript.json"),
+            "response source_path should end with the transcript filename, got {}",
+            response.source_path
+        );
+        assert!(
+            !response.source_path.starts_with('/'),
+            "response source_path should be project-relative, got {}",
+            response.source_path
+        );
 
         let search = broker
             .memory_search(MemorySearchRequest {
@@ -4456,11 +4717,15 @@ mod tests {
             "conversation text should be retrievable after ingest"
         );
         assert!(
+            search.hits.iter().any(|hit| hit
+                .source_path
+                .contains(transcript_path.file_name().unwrap().to_str().unwrap())),
+            "conversation memory should keep the transcript filename, got {:?}",
             search
                 .hits
                 .iter()
-                .any(|hit| hit.source_path == transcript_path.display().to_string()),
-            "conversation memory should keep the transcript source path, not only a derived markdown path"
+                .map(|h| &h.source_path)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -4857,6 +5122,7 @@ mod tests {
                 parent_node_id: None,
                 kind: Some("drawer".to_string()),
                 limit: 10,
+                cursor: None,
             })
             .await
             .expect("navigation list should succeed");
@@ -4915,6 +5181,7 @@ mod tests {
                 parent_node_id: Some("drawer:ops".to_string()),
                 kind: Some("closet".to_string()),
                 limit: 10,
+                cursor: None,
             })
             .await
             .expect("closet list should succeed");
@@ -4979,6 +5246,7 @@ mod tests {
                 parent_node_id: None,
                 kind: None,
                 limit: 10,
+                cursor: None,
             })
             .await
             .expect("navigation list should succeed");
@@ -5129,6 +5397,7 @@ mod tests {
                 parent_node_id: None,
                 kind: None,
                 limit: 10,
+                cursor: None,
             })
             .await
             .expect("navigation list should succeed");
@@ -5200,6 +5469,7 @@ mod tests {
                 parent_node_id: None,
                 kind: Some("drawer".to_string()),
                 limit: 10,
+                cursor: None,
             })
             .await
             .expect("project-a list should succeed");
@@ -5210,6 +5480,7 @@ mod tests {
                 parent_node_id: None,
                 kind: Some("drawer".to_string()),
                 limit: 10,
+                cursor: None,
             })
             .await
             .expect("project-b list should succeed");

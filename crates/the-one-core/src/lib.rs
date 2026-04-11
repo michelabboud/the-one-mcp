@@ -1,3 +1,4 @@
+pub mod audit;
 pub mod backup;
 pub mod config;
 pub mod contracts;
@@ -5,9 +6,12 @@ pub mod docs_manager;
 pub mod error;
 pub mod limits;
 pub mod manifests;
+pub mod naming;
+pub mod pagination;
 pub mod policy;
 pub mod profiler;
 pub mod project;
+pub mod state_store;
 pub mod storage;
 pub mod telemetry;
 pub mod tool_catalog;

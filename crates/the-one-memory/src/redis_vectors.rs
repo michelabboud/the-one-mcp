@@ -556,6 +556,103 @@ fn parse_score(value: Value) -> Result<f32, String> {
         .map_err(|e| format!("failed to parse Redis score '{text}': {e}"))
 }
 
+// ---------------------------------------------------------------------------
+// VectorBackend trait impl (v0.16.0 Phase A1)
+// ---------------------------------------------------------------------------
+//
+// Redis-Vector supports chunk upsert/search/delete + persistence verification.
+// Entity / relation / image / hybrid operations use the trait's default
+// implementations, which preserve v0.14.x silent-skip semantics:
+//   - write ops return Ok(())
+//   - read ops return Ok(Vec::new())
+//   - hybrid search returns Err so callers fall back to dense-only
+//
+// `upsert_chunks` requires the `content` field on `VectorPoint` to be `Some`
+// because Redis stores the content as a searchable hash field. Callers that
+// route to a Redis backend without a content field will see a clear error.
+
+use crate::vector_backend::{BackendCapabilities, VectorBackend, VectorHit, VectorPoint};
+use async_trait::async_trait;
+
+#[async_trait]
+impl VectorBackend for RedisVectorStore {
+    fn capabilities(&self) -> BackendCapabilities {
+        BackendCapabilities::chunks_only("redis-vectors")
+    }
+
+    async fn ensure_collection(&self, _dims: usize) -> Result<(), String> {
+        // Redis uses a single global index whose dims were fixed at
+        // RedisVectorStore construction. ensure_index creates it if missing;
+        // the dims argument is ignored (verified against self.embedding_dim
+        // inside search_chunks).
+        self.ensure_index().await
+    }
+
+    async fn upsert_chunks(&self, points: Vec<VectorPoint>) -> Result<(), String> {
+        if points.is_empty() {
+            return Ok(());
+        }
+        // Redis needs the full content text (it's stored as a searchable
+        // hash field). Reject up-front if any point is missing it so the
+        // error is actionable rather than silently corrupt.
+        let records: Result<Vec<RedisChunkRecord>, String> = points
+            .into_iter()
+            .map(|p| {
+                let content = p.content.ok_or_else(|| {
+                    "RedisVectorStore.upsert_chunks: VectorPoint.content is required (Redis stores content for FT.SEARCH)"
+                        .to_string()
+                })?;
+                Ok(RedisChunkRecord {
+                    chunk_id: p.payload.chunk_id,
+                    source_path: p.payload.source_path,
+                    heading: p.payload.heading,
+                    chunk_index: p.payload.chunk_index,
+                    content,
+                    vector: p.vector,
+                })
+            })
+            .collect();
+        let records = records?;
+        self.upsert_chunks(&records).await?;
+        Ok(())
+    }
+
+    async fn search_chunks(
+        &self,
+        query_vector: Vec<f32>,
+        top_k: usize,
+        score_threshold: f32,
+    ) -> Result<Vec<VectorHit>, String> {
+        let redis_results = self
+            .search_chunks(&query_vector, top_k, score_threshold)
+            .await?;
+        // Redis returns only (chunk_id, score). source_path/heading/chunk_index
+        // are empty strings/zeros here; callers look those up via
+        // MemoryEngine::by_id which has the full metadata.
+        Ok(redis_results
+            .into_iter()
+            .map(|r| VectorHit {
+                chunk_id: r.chunk_id,
+                source_path: String::new(),
+                heading: String::new(),
+                chunk_index: 0,
+                score: r.score,
+            })
+            .collect())
+    }
+
+    async fn delete_by_source_path(&self, source_path: &str) -> Result<(), String> {
+        // Redis's delete_by_source_path returns the number of deleted keys;
+        // we discard it (the trait's signature matches Qdrant's `Result<()>`).
+        self.delete_by_source_path(source_path).await?;
+        Ok(())
+    }
+
+    async fn verify_persistence(&self) -> Result<(), String> {
+        self.verify_persistence().await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::RedisVectorStore;

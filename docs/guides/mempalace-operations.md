@@ -219,9 +219,87 @@ Default metadata when omitted:
 - `hall = hook:<event>`
 - `room = event:<event>`
 
-## 7. Recommended Production Checks
+## 7. Pagination and over-limit behavior (v0.15.0+)
+
+As of v0.15.0, every list/search endpoint uses **cursor-based pagination**
+and **rejects over-limit requests instead of silently truncating**. See
+`docs/guides/production-hardening-v0.15.md` for the full per-endpoint
+caps.
+
+### Paginating diary entries
+
+```json
+{
+  "name": "memory.diary.list",
+  "arguments": {
+    "project_root": "/home/user/myproject",
+    "project_id": "myproject",
+    "max_results": 20
+  }
+}
+```
+
+Response carries `next_cursor` iff there is more data:
+
+```json
+{
+  "entries": [...],
+  "next_cursor": "eyJvIjoyMH0"
+}
+```
+
+Pass `next_cursor` verbatim in the next request to get the subsequent
+page. **Do not parse the cursor bytes** — format is reserved.
+
+### Over-limit behavior
+
+Requesting `max_results: 5000` against `memory.diary.list` returns a
+400-equivalent error:
+
+```json
+{
+  "error": {
+    "code": -32603,
+    "message": "limit 5000 exceeds maximum of 500 for this endpoint (request fewer items or page with a cursor) (kind=invalid_request, corr=corr-00000042)"
+  }
+}
+```
+
+v0.14.x silently clamped the same request to 200 items and lost the
+rest. Always check the response for `next_cursor` to detect truncation.
+
+## 8. Structured audit log (v0.15.0+)
+
+Every state-changing memory palace call now writes a structured audit
+row to `audit_events` with fields `event_type`, `payload_json`, `outcome`
+(`ok`/`error`/`unknown`), and `error_kind` (populated when
+`outcome='error'`).
+
+Inspect via `observe.audit_events` or SQL directly:
+
+```sql
+SELECT event_type, outcome, error_kind, COUNT(*) 
+FROM audit_events 
+WHERE project_id = 'myproject' 
+GROUP BY event_type, outcome, error_kind;
+```
+
+Operationally useful queries:
+
+- **Error rate by operation**: `SELECT event_type, SUM(CASE WHEN outcome='error' THEN 1 ELSE 0 END) * 100.0 / COUNT(*) AS err_pct FROM audit_events GROUP BY event_type;`
+- **Recent failures**: `SELECT * FROM audit_events WHERE outcome='error' ORDER BY id DESC LIMIT 20;`
+- **Kind-based alerting**: `SELECT error_kind, COUNT(*) FROM audit_events WHERE outcome='error' AND created_at_epoch_ms > <cutoff> GROUP BY error_kind;`
+
+## 9. Recommended Production Checks
 
 - keep `profile` explicit in CI/bootstrap scripts (`core` or `full`)
 - run `setup` action `refresh` after major config/profile changes
 - monitor memory surfaces with `observe` action `metrics`
 - back up project state before large ingest batches
+- sanitize wing/hall/room names at your ingest boundary — the broker
+  rejects names containing `/`, `\`, `..`, or punctuation outside
+  `[A-Za-z0-9 ._\-:]` as of v0.15.0
+- alert on `outcome='error'` rate per operation in the audit table
+- when paging through large lists, **always** pass back the
+  `next_cursor` instead of bumping `max_results` — the server will
+  reject over-limit requests

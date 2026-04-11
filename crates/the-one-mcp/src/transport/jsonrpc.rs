@@ -1,9 +1,93 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use the_one_core::audit::error_kind_label;
+use the_one_core::error::CoreError;
 
 use crate::api::*;
 use crate::broker::McpBroker;
+
+/// Monotonically-increasing correlation ID stamped on every JSON-RPC error
+/// response. Operators can grep the server log for this ID to find the full,
+/// un-sanitised error context. The ID resets on process restart.
+static CORRELATION_ID: AtomicU64 = AtomicU64::new(1);
+
+fn next_correlation_id() -> String {
+    let n = CORRELATION_ID.fetch_add(1, Ordering::Relaxed);
+    format!("corr-{n:08x}")
+}
+
+/// Convert a [`CoreError`] into a client-safe JSON-RPC error message.
+///
+/// Prior to v0.15.0 every error path passed `e.to_string()` straight into
+/// the client response, which leaked rusqlite schema details, absolute
+/// paths, and other internals. This function is the chokepoint that
+/// sanitises them.
+///
+/// The public message is the short, stable `error_kind_label` — e.g.
+/// `"sqlite"`, `"io"`, `"invalid_request"`. A correlation ID is appended so
+/// operators can match the response to the matching `tracing::error!` line
+/// in the server log, which still contains the full details.
+///
+/// Exception: [`CoreError::InvalidRequest`], [`CoreError::NotEnabled`],
+/// [`CoreError::PolicyDenied`], and [`CoreError::InvalidProjectConfig`]
+/// carry deliberately-crafted human-readable messages (e.g. "wing must not
+/// be empty"). These are safe to pass through verbatim — they do not
+/// contain paths, schema, or secrets — and they tell the client what to fix.
+pub(crate) fn public_error_message(err: &CoreError) -> (i32, String) {
+    let correlation = next_correlation_id();
+    tracing::error!(
+        target: "the_one_mcp::jsonrpc",
+        correlation_id = %correlation,
+        kind = %error_kind_label(err),
+        error = %err,
+        "request failed"
+    );
+    let kind = error_kind_label(err);
+    let code = match err {
+        CoreError::InvalidRequest(_) | CoreError::InvalidProjectConfig(_) => INVALID_PARAMS,
+        _ => INTERNAL_ERROR,
+    };
+    let public_detail = match err {
+        // Safe to surface — these carry user-facing messages by design.
+        CoreError::InvalidRequest(msg)
+        | CoreError::NotEnabled(msg)
+        | CoreError::PolicyDenied(msg)
+        | CoreError::InvalidProjectConfig(msg) => msg.clone(),
+        // Everything else: redacted label only.
+        _ => kind.to_string(),
+    };
+    (
+        code,
+        format!("{public_detail} (kind={kind}, corr={correlation})"),
+    )
+}
+
+/// Convert a `Result<T, CoreError>` into either the `Ok` value or a
+/// pre-sanitised `(code, message)` pair — helper for call sites that need
+/// to propagate errors as Strings.
+pub(crate) fn map_core_error_to_string(err: &CoreError) -> String {
+    let (_, msg) = public_error_message(err);
+    msg
+}
+
+/// Convert a `serde_json::Error` (from serializing our own broker response
+/// types) into a generic client-safe message. Serialization errors on
+/// controlled types are effectively unreachable, but if one slips through
+/// we log it with a correlation ID and return a short, generic label
+/// instead of exposing serde internals like "trailing characters at line X".
+pub(crate) fn serialize_error_to_string(err: serde_json::Error) -> String {
+    let correlation = next_correlation_id();
+    tracing::error!(
+        target: "the_one_mcp::jsonrpc",
+        correlation_id = %correlation,
+        error = %err,
+        "response serialization failed"
+    );
+    format!("response serialization failed (corr={correlation})")
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct JsonRpcRequest {
@@ -128,7 +212,10 @@ async fn handle_resources_list(
         .await
     {
         Ok(resp) => JsonRpcResponse::success(id, serde_json::to_value(resp).unwrap_or(Value::Null)),
-        Err(e) => JsonRpcResponse::error(id, INTERNAL_ERROR, e.to_string()),
+        Err(e) => {
+            let (code, msg) = public_error_message(&e);
+            JsonRpcResponse::error(id, code, msg)
+        }
     }
 }
 
@@ -165,7 +252,10 @@ async fn handle_resources_read(
         .await
     {
         Ok(resp) => JsonRpcResponse::success(id, serde_json::to_value(resp).unwrap_or(Value::Null)),
-        Err(e) => JsonRpcResponse::error(id, INTERNAL_ERROR, e.to_string()),
+        Err(e) => {
+            let (code, msg) = public_error_message(&e);
+            JsonRpcResponse::error(id, code, msg)
+        }
     }
 }
 
@@ -249,7 +339,7 @@ async fn dispatch_tool(broker: &McpBroker, tool_name: &str, args: Value) -> Resu
                     room,
                 })
                 .await;
-            serde_json::to_value(result).map_err(|e| e.to_string())
+            serde_json::to_value(result).map_err(serialize_error_to_string)
         }
         "memory.fetch_chunk" => {
             let project_root = args["project_root"]
@@ -264,7 +354,7 @@ async fn dispatch_tool(broker: &McpBroker, tool_name: &str, args: Value) -> Resu
                     id: chunk_id.to_string(),
                 })
                 .await;
-            serde_json::to_value(result).map_err(|e| e.to_string())
+            serde_json::to_value(result).map_err(serialize_error_to_string)
         }
         "memory.ingest_conversation" => {
             let project_root = args["project_root"]
@@ -297,8 +387,8 @@ async fn dispatch_tool(broker: &McpBroker, tool_name: &str, args: Value) -> Resu
                     room,
                 })
                 .await
-                .map_err(|e| e.to_string())?;
-            serde_json::to_value(result).map_err(|e| e.to_string())
+                .map_err(|e| map_core_error_to_string(&e))?;
+            serde_json::to_value(result).map_err(serialize_error_to_string)
         }
         "memory.aaak.compress" => {
             let project_root = args["project_root"]
@@ -316,8 +406,8 @@ async fn dispatch_tool(broker: &McpBroker, tool_name: &str, args: Value) -> Resu
                     format,
                 })
                 .await
-                .map_err(|e| e.to_string())?;
-            serde_json::to_value(result).map_err(|e| e.to_string())
+                .map_err(|e| map_core_error_to_string(&e))?;
+            serde_json::to_value(result).map_err(serialize_error_to_string)
         }
         "memory.aaak.teach" => {
             let project_root = args["project_root"]
@@ -335,8 +425,8 @@ async fn dispatch_tool(broker: &McpBroker, tool_name: &str, args: Value) -> Resu
                     format,
                 })
                 .await
-                .map_err(|e| e.to_string())?;
-            serde_json::to_value(result).map_err(|e| e.to_string())
+                .map_err(|e| map_core_error_to_string(&e))?;
+            serde_json::to_value(result).map_err(serialize_error_to_string)
         }
         "memory.aaak.list_lessons" => {
             let project_root = args["project_root"]
@@ -351,8 +441,8 @@ async fn dispatch_tool(broker: &McpBroker, tool_name: &str, args: Value) -> Resu
                     limit,
                 })
                 .await
-                .map_err(|e| e.to_string())?;
-            serde_json::to_value(result).map_err(|e| e.to_string())
+                .map_err(|e| map_core_error_to_string(&e))?;
+            serde_json::to_value(result).map_err(serialize_error_to_string)
         }
         "memory.diary.add" => {
             let project_root = args["project_root"]
@@ -386,8 +476,8 @@ async fn dispatch_tool(broker: &McpBroker, tool_name: &str, args: Value) -> Resu
                     content: content.to_string(),
                 })
                 .await
-                .map_err(|e| e.to_string())?;
-            serde_json::to_value(result).map_err(|e| e.to_string())
+                .map_err(|e| map_core_error_to_string(&e))?;
+            serde_json::to_value(result).map_err(serialize_error_to_string)
         }
         "memory.diary.list" => {
             let project_root = args["project_root"]
@@ -410,8 +500,8 @@ async fn dispatch_tool(broker: &McpBroker, tool_name: &str, args: Value) -> Resu
                     max_results,
                 })
                 .await
-                .map_err(|e| e.to_string())?;
-            serde_json::to_value(result).map_err(|e| e.to_string())
+                .map_err(|e| map_core_error_to_string(&e))?;
+            serde_json::to_value(result).map_err(serialize_error_to_string)
         }
         "memory.diary.search" => {
             let project_root = args["project_root"]
@@ -436,8 +526,8 @@ async fn dispatch_tool(broker: &McpBroker, tool_name: &str, args: Value) -> Resu
                     max_results,
                 })
                 .await
-                .map_err(|e| e.to_string())?;
-            serde_json::to_value(result).map_err(|e| e.to_string())
+                .map_err(|e| map_core_error_to_string(&e))?;
+            serde_json::to_value(result).map_err(serialize_error_to_string)
         }
         "memory.diary.summarize" => {
             let project_root = args["project_root"]
@@ -460,8 +550,8 @@ async fn dispatch_tool(broker: &McpBroker, tool_name: &str, args: Value) -> Resu
                     max_summary_items,
                 })
                 .await
-                .map_err(|e| e.to_string())?;
-            serde_json::to_value(result).map_err(|e| e.to_string())
+                .map_err(|e| map_core_error_to_string(&e))?;
+            serde_json::to_value(result).map_err(serialize_error_to_string)
         }
         "memory.navigation.upsert_node" => {
             let project_root = args["project_root"]
@@ -496,8 +586,8 @@ async fn dispatch_tool(broker: &McpBroker, tool_name: &str, args: Value) -> Resu
                         .map(str::to_string),
                 })
                 .await
-                .map_err(|e| e.to_string())?;
-            serde_json::to_value(result).map_err(|e| e.to_string())
+                .map_err(|e| map_core_error_to_string(&e))?;
+            serde_json::to_value(result).map_err(serialize_error_to_string)
         }
         "memory.navigation.link_tunnel" => {
             let project_root = args["project_root"]
@@ -516,8 +606,8 @@ async fn dispatch_tool(broker: &McpBroker, tool_name: &str, args: Value) -> Resu
                     to_node_id: to_node_id.to_string(),
                 })
                 .await
-                .map_err(|e| e.to_string())?;
-            serde_json::to_value(result).map_err(|e| e.to_string())
+                .map_err(|e| map_core_error_to_string(&e))?;
+            serde_json::to_value(result).map_err(serialize_error_to_string)
         }
         "memory.navigation.list" => {
             let project_root = args["project_root"]
@@ -538,10 +628,14 @@ async fn dispatch_tool(broker: &McpBroker, tool_name: &str, args: Value) -> Resu
                         .and_then(serde_json::Value::as_str)
                         .map(str::to_string),
                     limit,
+                    cursor: args
+                        .get("cursor")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string),
                 })
                 .await
-                .map_err(|e| e.to_string())?;
-            serde_json::to_value(result).map_err(|e| e.to_string())
+                .map_err(|e| map_core_error_to_string(&e))?;
+            serde_json::to_value(result).map_err(serialize_error_to_string)
         }
         "memory.navigation.traverse" => {
             let project_root = args["project_root"]
@@ -560,8 +654,8 @@ async fn dispatch_tool(broker: &McpBroker, tool_name: &str, args: Value) -> Resu
                     max_depth,
                 })
                 .await
-                .map_err(|e| e.to_string())?;
-            serde_json::to_value(result).map_err(|e| e.to_string())
+                .map_err(|e| map_core_error_to_string(&e))?;
+            serde_json::to_value(result).map_err(serialize_error_to_string)
         }
         "memory.wake_up" => {
             let project_root = args["project_root"]
@@ -591,8 +685,8 @@ async fn dispatch_tool(broker: &McpBroker, tool_name: &str, args: Value) -> Resu
                     max_items,
                 })
                 .await
-                .map_err(|e| e.to_string())?;
-            serde_json::to_value(result).map_err(|e| e.to_string())
+                .map_err(|e| map_core_error_to_string(&e))?;
+            serde_json::to_value(result).map_err(serialize_error_to_string)
         }
         "docs.list" => {
             let project_root = args["project_root"]
@@ -605,7 +699,7 @@ async fn dispatch_tool(broker: &McpBroker, tool_name: &str, args: Value) -> Resu
                     project_id: project_id.to_string(),
                 })
                 .await;
-            serde_json::to_value(result).map_err(|e| e.to_string())
+            serde_json::to_value(result).map_err(serialize_error_to_string)
         }
         "docs.get" => {
             let project_root = args["project_root"]
@@ -624,7 +718,7 @@ async fn dispatch_tool(broker: &McpBroker, tool_name: &str, args: Value) -> Resu
                         max_bytes,
                     })
                     .await;
-                serde_json::to_value(result).map_err(|e| e.to_string())
+                serde_json::to_value(result).map_err(serialize_error_to_string)
             } else {
                 let result = broker
                     .docs_get(DocsGetRequest {
@@ -633,7 +727,7 @@ async fn dispatch_tool(broker: &McpBroker, tool_name: &str, args: Value) -> Resu
                         path: path.to_string(),
                     })
                     .await;
-                serde_json::to_value(result).map_err(|e| e.to_string())
+                serde_json::to_value(result).map_err(serialize_error_to_string)
             }
         }
         "docs.save" => {
@@ -656,7 +750,7 @@ async fn dispatch_tool(broker: &McpBroker, tool_name: &str, args: Value) -> Resu
                     path: r.path,
                     created: false,
                 })
-                .map_err(|e| e.to_string()),
+                .map_err(serialize_error_to_string),
                 Err(_) => {
                     let result = broker
                         .docs_create(DocsCreateRequest {
@@ -666,12 +760,12 @@ async fn dispatch_tool(broker: &McpBroker, tool_name: &str, args: Value) -> Resu
                             content: content.to_string(),
                         })
                         .await
-                        .map_err(|e| e.to_string())?;
+                        .map_err(|e| map_core_error_to_string(&e))?;
                     serde_json::to_value(DocsSaveResponse {
                         path: result.path,
                         created: true,
                     })
-                    .map_err(|e| e.to_string())
+                    .map_err(serialize_error_to_string)
                 }
             }
         }
@@ -688,8 +782,8 @@ async fn dispatch_tool(broker: &McpBroker, tool_name: &str, args: Value) -> Resu
                     path: path.to_string(),
                 })
                 .await
-                .map_err(|e| e.to_string())?;
-            serde_json::to_value(result).map_err(|e| e.to_string())
+                .map_err(|e| map_core_error_to_string(&e))?;
+            serde_json::to_value(result).map_err(serialize_error_to_string)
         }
         "docs.move" => {
             let project_root = args["project_root"]
@@ -706,8 +800,8 @@ async fn dispatch_tool(broker: &McpBroker, tool_name: &str, args: Value) -> Resu
                     to: to.to_string(),
                 })
                 .await
-                .map_err(|e| e.to_string())?;
-            serde_json::to_value(result).map_err(|e| e.to_string())
+                .map_err(|e| map_core_error_to_string(&e))?;
+            serde_json::to_value(result).map_err(serialize_error_to_string)
         }
         "tool.find" => {
             let project_root = args["project_root"]
@@ -726,8 +820,11 @@ async fn dispatch_tool(broker: &McpBroker, tool_name: &str, args: Value) -> Resu
                         project_root: project_root.to_string(),
                         project_id: project_id.to_string(),
                     };
-                    let result = broker.tool_list(request).await.map_err(|e| e.to_string())?;
-                    serde_json::to_value(result).map_err(|e| e.to_string())
+                    let result = broker
+                        .tool_list(request)
+                        .await
+                        .map_err(|e| map_core_error_to_string(&e))?;
+                    serde_json::to_value(result).map_err(serialize_error_to_string)
                 }
                 "suggest" => {
                     let query = args["query"]
@@ -740,7 +837,7 @@ async fn dispatch_tool(broker: &McpBroker, tool_name: &str, args: Value) -> Resu
                             max,
                         })
                         .await;
-                    serde_json::to_value(result).map_err(|e| e.to_string())
+                    serde_json::to_value(result).map_err(serialize_error_to_string)
                 }
                 "search" => {
                     let query = args["query"]
@@ -753,7 +850,7 @@ async fn dispatch_tool(broker: &McpBroker, tool_name: &str, args: Value) -> Resu
                             max,
                         })
                         .await;
-                    serde_json::to_value(result).map_err(|e| e.to_string())
+                    serde_json::to_value(result).map_err(serialize_error_to_string)
                 }
                 _ => Err(format!("unknown tool.find mode: {mode}")),
             }
@@ -765,8 +862,8 @@ async fn dispatch_tool(broker: &McpBroker, tool_name: &str, args: Value) -> Resu
                     tool_id: tool_id.to_string(),
                 })
                 .await
-                .map_err(|e| e.to_string())?;
-            serde_json::to_value(result).map_err(|e| e.to_string())
+                .map_err(|e| map_core_error_to_string(&e))?;
+            serde_json::to_value(result).map_err(serialize_error_to_string)
         }
         "tool.install" => {
             let request = serde_json::from_value::<ToolInstallRequest>(args)
@@ -774,8 +871,8 @@ async fn dispatch_tool(broker: &McpBroker, tool_name: &str, args: Value) -> Resu
             let result = broker
                 .tool_install(request)
                 .await
-                .map_err(|e| e.to_string())?;
-            serde_json::to_value(result).map_err(|e| e.to_string())
+                .map_err(|e| map_core_error_to_string(&e))?;
+            serde_json::to_value(result).map_err(serialize_error_to_string)
         }
         "tool.run" => {
             let project_root = args["project_root"]
@@ -796,8 +893,8 @@ async fn dispatch_tool(broker: &McpBroker, tool_name: &str, args: Value) -> Resu
                     },
                 )
                 .await
-                .map_err(|e| e.to_string())?;
-            serde_json::to_value(result).map_err(|e| e.to_string())
+                .map_err(|e| map_core_error_to_string(&e))?;
+            serde_json::to_value(result).map_err(serialize_error_to_string)
         }
         "memory.search_images" => {
             let project_root = args["project_root"]
@@ -819,8 +916,8 @@ async fn dispatch_tool(broker: &McpBroker, tool_name: &str, args: Value) -> Resu
                     top_k,
                 })
                 .await
-                .map_err(|e| e.to_string())?;
-            serde_json::to_value(result).map_err(|e| e.to_string())
+                .map_err(|e| map_core_error_to_string(&e))?;
+            serde_json::to_value(result).map_err(serialize_error_to_string)
         }
         "memory.ingest_image" => {
             let project_root = args["project_root"]
@@ -840,8 +937,8 @@ async fn dispatch_tool(broker: &McpBroker, tool_name: &str, args: Value) -> Resu
                     caption,
                 })
                 .await
-                .map_err(|e| e.to_string())?;
-            serde_json::to_value(result).map_err(|e| e.to_string())
+                .map_err(|e| map_core_error_to_string(&e))?;
+            serde_json::to_value(result).map_err(serialize_error_to_string)
         }
 
         // ── Multiplexed admin tools ─────────────────────────────
@@ -883,8 +980,8 @@ async fn dispatch_setup(broker: &McpBroker, args: Value) -> Result<Value, String
                     project_id: project_id.to_string(),
                 })
                 .await
-                .map_err(|e| e.to_string())?;
-            serde_json::to_value(result).map_err(|e| e.to_string())
+                .map_err(|e| map_core_error_to_string(&e))?;
+            serde_json::to_value(result).map_err(serialize_error_to_string)
         }
         "refresh" => {
             let result = broker
@@ -893,8 +990,8 @@ async fn dispatch_setup(broker: &McpBroker, args: Value) -> Result<Value, String
                     project_id: project_id.to_string(),
                 })
                 .await
-                .map_err(|e| e.to_string())?;
-            serde_json::to_value(result).map_err(|e| e.to_string())
+                .map_err(|e| map_core_error_to_string(&e))?;
+            serde_json::to_value(result).map_err(serialize_error_to_string)
         }
         "profile" => {
             let result = broker
@@ -903,8 +1000,8 @@ async fn dispatch_setup(broker: &McpBroker, args: Value) -> Result<Value, String
                     project_id: project_id.to_string(),
                 })
                 .await
-                .map_err(|e| e.to_string())?;
-            serde_json::to_value(result).map_err(|e| e.to_string())
+                .map_err(|e| map_core_error_to_string(&e))?;
+            serde_json::to_value(result).map_err(serialize_error_to_string)
         }
         _ => Err(format!("unknown setup action: {action}")),
     }
@@ -924,8 +1021,8 @@ async fn dispatch_config(broker: &McpBroker, args: Value) -> Result<Value, Strin
             let result = broker
                 .config_export(Path::new(project_root))
                 .await
-                .map_err(|e| e.to_string())?;
-            serde_json::to_value(result).map_err(|e| e.to_string())
+                .map_err(|e| map_core_error_to_string(&e))?;
+            serde_json::to_value(result).map_err(serialize_error_to_string)
         }
         "update" => {
             let project_root = params["project_root"]
@@ -941,8 +1038,8 @@ async fn dispatch_config(broker: &McpBroker, args: Value) -> Result<Value, Strin
                     update,
                 })
                 .await
-                .map_err(|e| e.to_string())?;
-            serde_json::to_value(result).map_err(|e| e.to_string())
+                .map_err(|e| map_core_error_to_string(&e))?;
+            serde_json::to_value(result).map_err(serialize_error_to_string)
         }
         "profile.set" => {
             let project_root = params["project_root"]
@@ -957,14 +1054,17 @@ async fn dispatch_config(broker: &McpBroker, args: Value) -> Result<Value, Strin
                     }),
                 })
                 .await
-                .map_err(|e| e.to_string())?;
-            serde_json::to_value(result).map_err(|e| e.to_string())
+                .map_err(|e| map_core_error_to_string(&e))?;
+            serde_json::to_value(result).map_err(serialize_error_to_string)
         }
         "tool.add" => {
             let request = serde_json::from_value::<ToolAddRequest>(params)
                 .map_err(|e| format!("invalid tool.add params: {e}"))?;
-            let result = broker.tool_add(request).await.map_err(|e| e.to_string())?;
-            serde_json::to_value(result).map_err(|e| e.to_string())
+            let result = broker
+                .tool_add(request)
+                .await
+                .map_err(|e| map_core_error_to_string(&e))?;
+            serde_json::to_value(result).map_err(serialize_error_to_string)
         }
         "tool.remove" => {
             let request = serde_json::from_value::<ToolRemoveRequest>(params)
@@ -972,8 +1072,8 @@ async fn dispatch_config(broker: &McpBroker, args: Value) -> Result<Value, Strin
             let result = broker
                 .tool_remove(request)
                 .await
-                .map_err(|e| e.to_string())?;
-            serde_json::to_value(result).map_err(|e| e.to_string())
+                .map_err(|e| map_core_error_to_string(&e))?;
+            serde_json::to_value(result).map_err(serialize_error_to_string)
         }
         "models.list" => {
             let filter = params.get("filter").and_then(|v| v.as_str());
@@ -1004,8 +1104,8 @@ async fn dispatch_maintain(broker: &McpBroker, args: Value) -> Result<Value, Str
                     project_id: project_id.to_string(),
                 })
                 .await
-                .map_err(|e| e.to_string())?;
-            serde_json::to_value(result).map_err(|e| e.to_string())
+                .map_err(|e| map_core_error_to_string(&e))?;
+            serde_json::to_value(result).map_err(serialize_error_to_string)
         }
         "tool.enable" => {
             let project_root = params["project_root"]
@@ -1018,8 +1118,8 @@ async fn dispatch_maintain(broker: &McpBroker, args: Value) -> Result<Value, Str
                     family: family.to_string(),
                 })
                 .await
-                .map_err(|e| e.to_string())?;
-            serde_json::to_value(result).map_err(|e| e.to_string())
+                .map_err(|e| map_core_error_to_string(&e))?;
+            serde_json::to_value(result).map_err(serialize_error_to_string)
         }
         "tool.disable" => {
             let request = serde_json::from_value::<ToolDisableRequest>(params)
@@ -1027,15 +1127,15 @@ async fn dispatch_maintain(broker: &McpBroker, args: Value) -> Result<Value, Str
             let result = broker
                 .tool_disable(request)
                 .await
-                .map_err(|e| e.to_string())?;
-            serde_json::to_value(result).map_err(|e| e.to_string())
+                .map_err(|e| map_core_error_to_string(&e))?;
+            serde_json::to_value(result).map_err(serialize_error_to_string)
         }
         "tool.refresh" => {
             let result = broker
                 .tool_catalog_update()
                 .await
-                .map_err(|e| e.to_string())?;
-            serde_json::to_value(result).map_err(|e| e.to_string())
+                .map_err(|e| map_core_error_to_string(&e))?;
+            serde_json::to_value(result).map_err(serialize_error_to_string)
         }
         "trash.list" => {
             let project_root = params["project_root"]
@@ -1050,8 +1150,8 @@ async fn dispatch_maintain(broker: &McpBroker, args: Value) -> Result<Value, Str
                     project_id: project_id.to_string(),
                 })
                 .await
-                .map_err(|e| e.to_string())?;
-            serde_json::to_value(result).map_err(|e| e.to_string())
+                .map_err(|e| map_core_error_to_string(&e))?;
+            serde_json::to_value(result).map_err(serialize_error_to_string)
         }
         "trash.restore" => {
             let project_root = params["project_root"]
@@ -1068,8 +1168,8 @@ async fn dispatch_maintain(broker: &McpBroker, args: Value) -> Result<Value, Str
                     path: path.to_string(),
                 })
                 .await
-                .map_err(|e| e.to_string())?;
-            serde_json::to_value(result).map_err(|e| e.to_string())
+                .map_err(|e| map_core_error_to_string(&e))?;
+            serde_json::to_value(result).map_err(serialize_error_to_string)
         }
         "trash.empty" => {
             let project_root = params["project_root"]
@@ -1084,8 +1184,8 @@ async fn dispatch_maintain(broker: &McpBroker, args: Value) -> Result<Value, Str
                     project_id: project_id.to_string(),
                 })
                 .await
-                .map_err(|e| e.to_string())?;
-            serde_json::to_value(result).map_err(|e| e.to_string())
+                .map_err(|e| map_core_error_to_string(&e))?;
+            serde_json::to_value(result).map_err(serialize_error_to_string)
         }
         "images.rescan" => {
             let project_root = params["project_root"]
@@ -1097,7 +1197,7 @@ async fn dispatch_maintain(broker: &McpBroker, args: Value) -> Result<Value, Str
             broker
                 .image_rescan(Path::new(project_root), project_id)
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(|e| map_core_error_to_string(&e))
         }
         "images.clear" => {
             let project_root = params["project_root"]
@@ -1109,7 +1209,7 @@ async fn dispatch_maintain(broker: &McpBroker, args: Value) -> Result<Value, Str
             broker
                 .image_clear(Path::new(project_root), project_id)
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(|e| map_core_error_to_string(&e))
         }
         "images.delete" => {
             let project_root = params["project_root"]
@@ -1122,7 +1222,7 @@ async fn dispatch_maintain(broker: &McpBroker, args: Value) -> Result<Value, Str
             broker
                 .image_delete(Path::new(project_root), project_id, path)
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(|e| map_core_error_to_string(&e))
         }
         // v0.13.0: Graph RAG extraction + stats
         "graph.extract" => {
@@ -1135,8 +1235,8 @@ async fn dispatch_maintain(broker: &McpBroker, args: Value) -> Result<Value, Str
             let result = broker
                 .graph_extract(Path::new(project_root), project_id)
                 .await
-                .map_err(|e| e.to_string())?;
-            serde_json::to_value(result).map_err(|e| e.to_string())
+                .map_err(|e| map_core_error_to_string(&e))?;
+            serde_json::to_value(result).map_err(serialize_error_to_string)
         }
         "graph.stats" => {
             let project_root = params["project_root"]
@@ -1156,8 +1256,8 @@ async fn dispatch_maintain(broker: &McpBroker, args: Value) -> Result<Value, Str
             let result = broker
                 .backup_project(request)
                 .await
-                .map_err(|e| e.to_string())?;
-            serde_json::to_value(result).map_err(|e| e.to_string())
+                .map_err(|e| map_core_error_to_string(&e))?;
+            serde_json::to_value(result).map_err(serialize_error_to_string)
         }
         "restore" => {
             let request: crate::api::RestoreRequest = serde_json::from_value(params)
@@ -1165,8 +1265,8 @@ async fn dispatch_maintain(broker: &McpBroker, args: Value) -> Result<Value, Str
             let result = broker
                 .restore_project(request)
                 .await
-                .map_err(|e| e.to_string())?;
-            serde_json::to_value(result).map_err(|e| e.to_string())
+                .map_err(|e| map_core_error_to_string(&e))?;
+            serde_json::to_value(result).map_err(serialize_error_to_string)
         }
         "memory.capture_hook" => {
             let request: crate::api::MemoryCaptureHookRequest = serde_json::from_value(params)
@@ -1174,8 +1274,8 @@ async fn dispatch_maintain(broker: &McpBroker, args: Value) -> Result<Value, Str
             let result = broker
                 .memory_capture_hook(request)
                 .await
-                .map_err(|e| e.to_string())?;
-            serde_json::to_value(result).map_err(|e| e.to_string())
+                .map_err(|e| map_core_error_to_string(&e))?;
+            serde_json::to_value(result).map_err(serialize_error_to_string)
         }
         _ => Err(format!("unknown maintain action: {action}")),
     }
@@ -1190,7 +1290,7 @@ async fn dispatch_observe(broker: &McpBroker, args: Value) -> Result<Value, Stri
     match action {
         "metrics" => {
             let result = broker.metrics_snapshot();
-            serde_json::to_value(result).map_err(|e| e.to_string())
+            serde_json::to_value(result).map_err(serialize_error_to_string)
         }
         "events" => {
             let project_root = params["project_root"]
@@ -1207,8 +1307,8 @@ async fn dispatch_observe(broker: &McpBroker, args: Value) -> Result<Value, Stri
                     limit,
                 })
                 .await
-                .map_err(|e| e.to_string())?;
-            serde_json::to_value(result).map_err(|e| e.to_string())
+                .map_err(|e| map_core_error_to_string(&e))?;
+            serde_json::to_value(result).map_err(serialize_error_to_string)
         }
         _ => Err(format!("unknown observe action: {action}")),
     }

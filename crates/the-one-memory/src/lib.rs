@@ -48,6 +48,7 @@ pub mod redis_vectors;
 pub mod reranker;
 pub mod sparse_embeddings;
 pub mod thumbnail;
+pub mod vector_backend;
 pub mod watcher;
 
 use std::collections::HashMap;
@@ -57,14 +58,16 @@ use std::path::Path;
 use crate::chunker::{chunk_conversation, chunk_markdown, ChunkMeta};
 use crate::embeddings::EmbeddingProvider;
 use crate::graph::KnowledgeGraph;
-use crate::qdrant::{AsyncQdrantBackend, QdrantOptions, QdrantPayload, QdrantPoint};
-#[cfg(feature = "local-embeddings")]
-use crate::qdrant::{HybridPoint, QdrantSparseVector};
+use crate::qdrant::{AsyncQdrantBackend, QdrantOptions};
 #[cfg(feature = "redis-vectors")]
-use crate::redis_vectors::{RedisChunkRecord, RedisVectorStore};
+use crate::redis_vectors::RedisVectorStore;
 use crate::reranker::Reranker;
 #[cfg(feature = "local-embeddings")]
 use crate::sparse_embeddings::SparseEmbeddingProvider;
+use crate::vector_backend::{
+    ChunkPayload, EntityPoint as VbEntityPoint, HybridVectorPoint,
+    RelationPoint as VbRelationPoint, SparseVector as VbSparseVector, VectorBackend, VectorPoint,
+};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -142,9 +145,19 @@ pub struct MemoryEngine {
     chunks: Vec<ChunkMeta>,
     by_id: HashMap<String, usize>,
     embedding_provider: Box<dyn EmbeddingProvider>,
-    qdrant: Option<AsyncQdrantBackend>,
-    #[cfg(feature = "redis-vectors")]
-    redis: Option<RedisVectorStore>,
+    /// v0.16.0 — single backend slot. Replaces the pre-v0.16 pair of
+    /// `qdrant: Option<AsyncQdrantBackend>` + `redis: Option<RedisVectorStore>`
+    /// fields. Only one backend is ever active at a time (the broker's
+    /// `vector_backend` config selects it). `None` means no external vector
+    /// store is configured and the engine falls back to in-memory keyword
+    /// search.
+    backend: Option<Box<dyn VectorBackend>>,
+    /// v0.16.0 — Redis-specific flag, retained here because it's a
+    /// constructor-time decision rather than a backend-trait concern. When
+    /// true and the active backend is Redis, the engine refuses any write
+    /// path if `backend.verify_persistence()` reports AOF disabled.
+    /// Non-Redis backends ignore this flag entirely (their default
+    /// `verify_persistence` always succeeds).
     #[cfg(feature = "redis-vectors")]
     redis_persistence_required: bool,
     max_chunk_tokens: usize,
@@ -172,18 +185,20 @@ pub struct MemoryEngine {
 }
 
 impl MemoryEngine {
-    /// Create with fastembed local embeddings, no Qdrant (in-memory keyword fallback).
-    /// Only available with the `local-embeddings` feature (default).
-    #[cfg(feature = "local-embeddings")]
-    pub fn new_local(model_name: &str, max_chunk_tokens: usize) -> Result<Self, String> {
-        let provider = crate::embeddings::FastEmbedProvider::new(model_name)?;
-        Ok(Self {
+    /// v0.16.0 — canonical constructor. Takes an already-constructed
+    /// embedding provider and optional vector backend. All other
+    /// constructors delegate to this. Use this to plug in custom backends
+    /// (pgvector, Postgres-combined, etc.) from downstream crates.
+    pub fn new_with_backend(
+        embedding_provider: Box<dyn EmbeddingProvider>,
+        backend: Option<Box<dyn VectorBackend>>,
+        max_chunk_tokens: usize,
+    ) -> Self {
+        Self {
             chunks: Vec::new(),
             by_id: HashMap::new(),
-            embedding_provider: Box::new(provider),
-            qdrant: None,
-            #[cfg(feature = "redis-vectors")]
-            redis: None,
+            embedding_provider,
+            backend,
             #[cfg(feature = "redis-vectors")]
             redis_persistence_required: false,
             max_chunk_tokens,
@@ -195,7 +210,20 @@ impl MemoryEngine {
             hybrid_dense_weight: 0.7,
             hybrid_sparse_weight: 0.3,
             project_id: None,
-        })
+        }
+    }
+
+    /// Create with fastembed local embeddings, no external vector backend
+    /// (in-memory keyword fallback). Only available with the
+    /// `local-embeddings` feature (default).
+    #[cfg(feature = "local-embeddings")]
+    pub fn new_local(model_name: &str, max_chunk_tokens: usize) -> Result<Self, String> {
+        let provider = crate::embeddings::FastEmbedProvider::new(model_name)?;
+        Ok(Self::new_with_backend(
+            Box::new(provider),
+            None,
+            max_chunk_tokens,
+        ))
     }
 
     /// Create with fastembed local embeddings + Qdrant HTTP backend.
@@ -210,25 +238,11 @@ impl MemoryEngine {
     ) -> Result<Self, String> {
         let provider = crate::embeddings::FastEmbedProvider::new(model_name)?;
         let qdrant = AsyncQdrantBackend::new(qdrant_url, project_id, qdrant_options)?;
-        Ok(Self {
-            chunks: Vec::new(),
-            by_id: HashMap::new(),
-            embedding_provider: Box::new(provider),
-            qdrant: Some(qdrant),
-            #[cfg(feature = "redis-vectors")]
-            redis: None,
-            #[cfg(feature = "redis-vectors")]
-            redis_persistence_required: false,
+        Ok(Self::new_with_backend(
+            Box::new(provider),
+            Some(Box::new(qdrant)),
             max_chunk_tokens,
-            reranker: None,
-            graph: KnowledgeGraph::new(),
-            #[cfg(feature = "local-embeddings")]
-            sparse_provider: None,
-            hybrid_search_enabled: false,
-            hybrid_dense_weight: 0.7,
-            hybrid_sparse_weight: 0.3,
-            project_id: None,
-        })
+        ))
     }
 
     /// Create with API embeddings + Qdrant HTTP backend.
@@ -242,26 +256,11 @@ impl MemoryEngine {
         );
         let qdrant =
             AsyncQdrantBackend::new(config.qdrant_url, config.project_id, config.qdrant_options)?;
-        let max_chunk_tokens = config.max_chunk_tokens;
-        Ok(Self {
-            chunks: Vec::new(),
-            by_id: HashMap::new(),
-            embedding_provider: Box::new(provider),
-            qdrant: Some(qdrant),
-            #[cfg(feature = "redis-vectors")]
-            redis: None,
-            #[cfg(feature = "redis-vectors")]
-            redis_persistence_required: false,
-            max_chunk_tokens,
-            reranker: None,
-            graph: KnowledgeGraph::new(),
-            #[cfg(feature = "local-embeddings")]
-            sparse_provider: None,
-            hybrid_search_enabled: false,
-            hybrid_dense_weight: 0.7,
-            hybrid_sparse_weight: 0.3,
-            project_id: None,
-        })
+        Ok(Self::new_with_backend(
+            Box::new(provider),
+            Some(Box::new(qdrant)),
+            config.max_chunk_tokens,
+        ))
     }
 
     /// Create with fastembed local embeddings + Redis vector backend.
@@ -273,26 +272,16 @@ impl MemoryEngine {
     ) -> Result<Self, String> {
         let provider = crate::embeddings::FastEmbedProvider::new(model_name)?;
         let persistence_required = redis.persistence_required;
-        let redis =
+        let redis_store =
             RedisVectorStore::from_url(&redis.redis_url, redis.index_name, provider.dimensions())?;
 
-        Ok(Self {
-            chunks: Vec::new(),
-            by_id: HashMap::new(),
-            embedding_provider: Box::new(provider),
-            qdrant: None,
-            redis: Some(redis),
-            redis_persistence_required: persistence_required,
+        let mut engine = Self::new_with_backend(
+            Box::new(provider),
+            Some(Box::new(redis_store)),
             max_chunk_tokens,
-            reranker: None,
-            graph: KnowledgeGraph::new(),
-            #[cfg(feature = "local-embeddings")]
-            sparse_provider: None,
-            hybrid_search_enabled: false,
-            hybrid_dense_weight: 0.7,
-            hybrid_sparse_weight: 0.3,
-            project_id: None,
-        })
+        );
+        engine.redis_persistence_required = persistence_required;
+        Ok(engine)
     }
 
     /// Attach a reranker to this engine. When set, search results from Qdrant
@@ -337,24 +326,13 @@ impl MemoryEngine {
         self.project_id.as_deref()
     }
 
-    /// Return the active vector backend name.
+    /// Return the active vector backend name. Derived from the backend's
+    /// own capability report — backends self-identify.
     pub fn vector_backend_name(&self) -> &'static str {
-        #[cfg(feature = "redis-vectors")]
-        if self.redis.is_some() {
-            return "redis";
-        }
-
-        if self.qdrant.is_some() {
-            "qdrant"
-        } else {
-            "local"
-        }
-    }
-
-    /// Access the Redis backend, if configured.
-    #[cfg(feature = "redis-vectors")]
-    pub fn redis_backend(&self) -> Option<&RedisVectorStore> {
-        self.redis.as_ref()
+        self.backend
+            .as_ref()
+            .map(|b| b.capabilities().name)
+            .unwrap_or("local")
     }
 
     fn use_hybrid_indexing(&self) -> bool {
@@ -395,17 +373,17 @@ impl MemoryEngine {
     /// Does nothing if Qdrant is not configured.
     pub async fn upsert_entity_vectors(
         &self,
-        project_id: &str,
+        _project_id: &str,
         entities: &[crate::graph::Entity],
     ) -> Result<usize, String> {
-        let Some(qdrant) = &self.qdrant else {
+        let Some(backend) = self.backend.as_deref() else {
             return Ok(0);
         };
         if entities.is_empty() {
             return Ok(0);
         }
         let dims = self.embedding_provider.dimensions();
-        qdrant.create_entity_collection(project_id, dims).await?;
+        backend.ensure_entity_collection(dims).await?;
 
         let texts: Vec<String> = entities
             .iter()
@@ -413,10 +391,10 @@ impl MemoryEngine {
             .collect();
         let vectors = self.embedding_provider.embed_batch(&texts).await?;
 
-        let points: Vec<crate::qdrant::EntityPoint> = entities
+        let points: Vec<VbEntityPoint> = entities
             .iter()
             .zip(vectors)
-            .map(|(e, vec)| crate::qdrant::EntityPoint {
+            .map(|(e, vec)| VbEntityPoint {
                 id: e.name.to_lowercase(),
                 vector: vec,
                 name: e.name.clone(),
@@ -426,24 +404,24 @@ impl MemoryEngine {
             })
             .collect();
         let count = points.len();
-        qdrant.upsert_entity_points(project_id, points).await?;
+        backend.upsert_entities(points).await?;
         Ok(count)
     }
 
     /// Embed and upsert relations into the project's relation vector collection.
     pub async fn upsert_relation_vectors(
         &self,
-        project_id: &str,
+        _project_id: &str,
         relations: &[crate::graph::Relation],
     ) -> Result<usize, String> {
-        let Some(qdrant) = &self.qdrant else {
+        let Some(backend) = self.backend.as_deref() else {
             return Ok(0);
         };
         if relations.is_empty() {
             return Ok(0);
         }
         let dims = self.embedding_provider.dimensions();
-        qdrant.create_relation_collection(project_id, dims).await?;
+        backend.ensure_relation_collection(dims).await?;
 
         let texts: Vec<String> = relations
             .iter()
@@ -456,7 +434,7 @@ impl MemoryEngine {
             .collect();
         let vectors = self.embedding_provider.embed_batch(&texts).await?;
 
-        let points: Vec<crate::qdrant::RelationPoint> = relations
+        let points: Vec<VbRelationPoint> = relations
             .iter()
             .zip(vectors)
             .map(|(r, vec)| {
@@ -467,7 +445,7 @@ impl MemoryEngine {
                     r.target.to_lowercase(),
                     r.relation_type.to_lowercase()
                 );
-                crate::qdrant::RelationPoint {
+                VbRelationPoint {
                     id,
                     vector: vec,
                     source: r.source.clone(),
@@ -479,7 +457,7 @@ impl MemoryEngine {
             })
             .collect();
         let count = points.len();
-        qdrant.upsert_relation_points(project_id, points).await?;
+        backend.upsert_relations(points).await?;
         Ok(count)
     }
 
@@ -487,31 +465,29 @@ impl MemoryEngine {
     /// Returns `(source_chunk_ids, entity_names)` for the top matches.
     pub async fn search_entities_semantic(
         &self,
-        project_id: &str,
+        _project_id: &str,
         query: &str,
         top_k: usize,
-    ) -> Result<Vec<crate::qdrant::EntitySearchResult>, String> {
-        let Some(qdrant) = &self.qdrant else {
+    ) -> Result<Vec<crate::vector_backend::EntityHit>, String> {
+        let Some(backend) = self.backend.as_deref() else {
             return Ok(Vec::new());
         };
         let vector = self.embedding_provider.embed_single(query).await?;
-        qdrant.search_entities(project_id, vector, top_k, 0.0).await
+        backend.search_entities(vector, top_k, 0.0).await
     }
 
     /// Semantic search over the project's relation vector collection.
     pub async fn search_relations_semantic(
         &self,
-        project_id: &str,
+        _project_id: &str,
         query: &str,
         top_k: usize,
-    ) -> Result<Vec<crate::qdrant::RelationSearchResult>, String> {
-        let Some(qdrant) = &self.qdrant else {
+    ) -> Result<Vec<crate::vector_backend::RelationHit>, String> {
+        let Some(backend) = self.backend.as_deref() else {
             return Ok(Vec::new());
         };
         let vector = self.embedding_provider.embed_single(query).await?;
-        qdrant
-            .search_relations(project_id, vector, top_k, 0.0)
-            .await
+        backend.search_relations(vector, top_k, 0.0).await
     }
 
     /// Ingest all `.md` files from a directory tree.
@@ -564,29 +540,32 @@ impl MemoryEngine {
             self.by_id.insert(chunk.id.clone(), idx);
         }
 
-        // If qdrant is available, ensure collection + embed + upsert
-        if let Some(qdrant) = &self.qdrant {
+        // v0.16.0: route through trait. Backends that don't support hybrid
+        // fall back automatically via the trait's default `Err(...)` on
+        // `upsert_hybrid_chunks`, which we catch below.
+        if let Some(backend) = self.backend.as_deref() {
             let dims = self.embedding_provider.dimensions();
 
-            // Choose dense-only or hybrid collection setup
             #[cfg(feature = "local-embeddings")]
-            let use_hybrid = self.hybrid_search_enabled && self.sparse_provider.is_some();
+            let use_hybrid = self.hybrid_search_enabled
+                && self.sparse_provider.is_some()
+                && backend.capabilities().hybrid;
             #[cfg(not(feature = "local-embeddings"))]
             let use_hybrid = false;
 
             if use_hybrid {
-                qdrant
+                backend
                     .ensure_hybrid_collection(dims)
                     .await
                     .map_err(std::io::Error::other)?;
             } else {
-                qdrant
+                backend
                     .ensure_collection(dims)
                     .await
                     .map_err(std::io::Error::other)?;
             }
 
-            // Embed in batches of 64
+            // Embed in batches of 64.
             let batch_size = 64;
             for batch_start in (0..self.chunks.len()).step_by(batch_size) {
                 let batch_end = (batch_start + batch_size).min(self.chunks.len());
@@ -601,7 +580,8 @@ impl MemoryEngine {
                     .await
                     .map_err(std::io::Error::other)?;
 
-                // Hybrid upsert when sparse provider is active
+                // Hybrid upsert when sparse provider is active AND backend
+                // supports it.
                 #[cfg(feature = "local-embeddings")]
                 if use_hybrid {
                     if let Some(sparse_prov) = &self.sparse_provider {
@@ -609,18 +589,19 @@ impl MemoryEngine {
                             .embed_batch(&texts)
                             .map_err(std::io::Error::other)?;
 
-                        let hybrid_points: Vec<HybridPoint> = self.chunks[batch_start..batch_end]
+                        let hybrid_points: Vec<HybridVectorPoint> = self.chunks
+                            [batch_start..batch_end]
                             .iter()
                             .zip(vectors.into_iter())
                             .zip(sparse_vecs.into_iter())
-                            .map(|((chunk, dense_vec), sv)| HybridPoint {
+                            .map(|((chunk, dense_vec), sv)| HybridVectorPoint {
                                 id: chunk.id.clone(),
                                 dense: dense_vec,
-                                sparse: QdrantSparseVector {
+                                sparse: VbSparseVector {
                                     indices: sv.indices,
                                     values: sv.values,
                                 },
-                                payload: QdrantPayload {
+                                payload: ChunkPayload {
                                     chunk_id: chunk.id.clone(),
                                     source_path: chunk.source_path.clone(),
                                     heading: chunk
@@ -630,42 +611,37 @@ impl MemoryEngine {
                                         .unwrap_or_default(),
                                     chunk_index: chunk.chunk_index,
                                 },
+                                content: Some(chunk.content.clone()),
                             })
                             .collect();
 
-                        qdrant
-                            .upsert_hybrid_points(hybrid_points)
+                        backend
+                            .upsert_hybrid_chunks(hybrid_points)
                             .await
                             .map_err(std::io::Error::other)?;
                         continue;
                     }
                 }
 
-                // Dense-only upsert (default path)
-                let points: Vec<QdrantPoint> = self.chunks[batch_start..batch_end]
+                // Dense-only upsert (default path).
+                let points: Vec<VectorPoint> = self.chunks[batch_start..batch_end]
                     .iter()
                     .zip(vectors.into_iter())
-                    .map(|(chunk, vector)| QdrantPoint {
+                    .map(|(chunk, vector)| VectorPoint {
                         id: chunk.id.clone(),
                         vector,
-                        payload: QdrantPayload {
+                        payload: ChunkPayload {
                             chunk_id: chunk.id.clone(),
                             source_path: chunk.source_path.clone(),
                             heading: chunk.heading_hierarchy.last().cloned().unwrap_or_default(),
                             chunk_index: chunk.chunk_index,
                         },
+                        content: Some(chunk.content.clone()),
                     })
                     .collect();
 
-                qdrant
-                    .upsert_points(points)
-                    .await
-                    .map_err(std::io::Error::other)?;
-            }
-        } else {
-            #[cfg(feature = "redis-vectors")]
-            if self.redis.is_some() {
-                self.upsert_chunks_to_backend(&self.chunks)
+                backend
+                    .upsert_chunks(points)
                     .await
                     .map_err(std::io::Error::other)?;
             }
@@ -703,10 +679,21 @@ impl MemoryEngine {
             request.top_k
         };
 
-        // Hybrid path (dense + sparse, linear fusion)
+        // Hybrid path (dense + sparse, linear fusion). Only runs when the
+        // backend advertises hybrid capability; otherwise fall back to
+        // dense-only search.
         #[cfg(feature = "local-embeddings")]
         if self.hybrid_search_enabled {
-            if let (Some(qdrant), Some(sparse_prov)) = (&self.qdrant, &self.sparse_provider) {
+            let backend_supports_hybrid = self
+                .backend
+                .as_ref()
+                .map(|b| b.capabilities().hybrid)
+                .unwrap_or(false);
+            if let (true, Some(backend), Some(sparse_prov)) = (
+                backend_supports_hybrid,
+                self.backend.as_deref(),
+                &self.sparse_provider,
+            ) {
                 let dense_vec = match self.embedding_provider.embed_single(&request.query).await {
                     Ok(v) => v,
                     Err(_) => return Vec::new(),
@@ -720,21 +707,23 @@ impl MemoryEngine {
                     }
                 };
 
-                let qdrant_sparse = QdrantSparseVector {
+                let trait_sparse = VbSparseVector {
                     indices: sparse_vec.indices,
                     values: sparse_vec.values,
                 };
 
-                let (dense_results, sparse_results) = match qdrant
-                    .search_hybrid(dense_vec, qdrant_sparse, fetch_k, request.score_threshold)
+                let hybrid_hits = match backend
+                    .search_chunks_hybrid(dense_vec, trait_sparse, fetch_k, request.score_threshold)
                     .await
                 {
-                    Ok(pair) => pair,
+                    Ok(hits) => hits,
                     Err(e) => {
                         tracing::warn!("hybrid search failed, falling back to dense-only: {e}");
                         return self.search_vector_dense_only(request, fetch_k).await;
                     }
                 };
+                let dense_results = hybrid_hits.dense;
+                let sparse_results = hybrid_hits.sparse;
 
                 // Fuse: linear combination with BM25 normalization on sparse score
                 let mut fused: HashMap<String, f32> = HashMap::new();
@@ -787,60 +776,33 @@ impl MemoryEngine {
         request: &MemorySearchRequest,
         fetch_k: usize,
     ) -> Vec<MemorySearchResult> {
+        // v0.16.0: unified dispatch. The broker selects exactly one
+        // backend at construction time — the old Redis-first / Qdrant-
+        // fallback branching collapses into a single trait call.
         #[cfg(feature = "redis-vectors")]
-        if let Some(redis) = &self.redis {
-            if self
-                .ensure_redis_persistence_if_required(redis)
-                .await
-                .is_err()
-            {
-                return Vec::new();
+        if self.redis_persistence_required {
+            if let Some(backend) = self.backend.as_deref() {
+                if backend.verify_persistence().await.is_err() {
+                    return Vec::new();
+                }
             }
-            let query_vector = match self.embedding_provider.embed_single(&request.query).await {
-                Ok(v) => v,
-                Err(_) => return Vec::new(),
-            };
-
-            let redis_results = match redis
-                .search_chunks(&query_vector, fetch_k, request.score_threshold)
-                .await
-            {
-                Ok(results) => results,
-                Err(_) => return Vec::new(),
-            };
-
-            let results: Vec<MemorySearchResult> = redis_results
-                .into_iter()
-                .filter_map(|r| {
-                    self.by_id
-                        .get(&r.chunk_id)
-                        .and_then(|&idx| self.chunks.get(idx))
-                        .map(|chunk| MemorySearchResult {
-                            chunk: chunk.clone(),
-                            score: r.score,
-                        })
-                })
-                .collect();
-
-            return self.finish_search_results(request, results).await;
         }
 
-        let results = if let Some(qdrant) = &self.qdrant {
+        let results = if let Some(backend) = self.backend.as_deref() {
             let query_vector = match self.embedding_provider.embed_single(&request.query).await {
                 Ok(v) => v,
                 Err(_) => return Vec::new(),
             };
 
-            let qdrant_results = match qdrant
-                .search(query_vector, fetch_k, request.score_threshold)
+            let hits = match backend
+                .search_chunks(query_vector, fetch_k, request.score_threshold)
                 .await
             {
                 Ok(r) => r,
                 Err(_) => return Vec::new(),
             };
 
-            qdrant_results
-                .into_iter()
+            hits.into_iter()
                 .filter_map(|r| {
                     self.by_id
                         .get(&r.chunk_id)
@@ -930,9 +892,15 @@ impl MemoryEngine {
 
         // --- v0.13.1 semantic path -----------------------------------------
         // Try the LightRAG-style keyword extraction + entity/relation vector
-        // search first. Only available when project_id + Qdrant are set AND
-        // THE_ONE_GRAPH_ENABLED=true (the keyword extractor handles the flag).
-        if let (Some(pid), Some(_)) = (self.project_id.as_deref(), self.qdrant.as_ref()) {
+        // search first. Only available when project_id + a backend that
+        // supports entity/relation vectors are set AND THE_ONE_GRAPH_ENABLED
+        // is true (the keyword extractor handles the flag).
+        let backend_has_entities = self
+            .backend
+            .as_ref()
+            .map(|b| b.capabilities().entities)
+            .unwrap_or(false);
+        if let (Some(pid), true) = (self.project_id.as_deref(), backend_has_entities) {
             let keywords = crate::graph_extractor::extract_query_keywords(&request.query).await;
             if !keywords.is_empty() {
                 // Local mode: search entity collection for low-level identifiers
@@ -1024,102 +992,46 @@ impl MemoryEngine {
     /// BM25-sparse hybrid (dense cosine + sparse SPLADE) runs inside
     /// `search_vector` when `hybrid_search_enabled` is true.
     async fn search_hybrid_mode(&self, request: &MemorySearchRequest) -> Vec<MemorySearchResult> {
-        // Get vector search results (without reranking -- we'll rerank the merged set)
-        let vector_results = {
+        // v0.16.0: unified backend dispatch. The old Redis-first / Qdrant-
+        // fallback / cfg-gated branching collapses to one trait call because
+        // only one backend is ever active.
+        let vector_results: Vec<MemorySearchResult> = {
             let fetch_k = (request.top_k * 2).max(10);
             #[cfg(feature = "redis-vectors")]
-            {
-                if let Some(redis) = &self.redis {
-                    if self
-                        .ensure_redis_persistence_if_required(redis)
-                        .await
-                        .is_err()
-                    {
+            if self.redis_persistence_required {
+                if let Some(backend) = self.backend.as_deref() {
+                    if backend.verify_persistence().await.is_err() {
                         return self.search_graph(request).await;
                     }
-                    let query_vector =
-                        match self.embedding_provider.embed_single(&request.query).await {
-                            Ok(v) => v,
-                            Err(_) => return self.search_graph(request).await,
-                        };
-
-                    match redis
-                        .search_chunks(&query_vector, fetch_k, request.score_threshold)
-                        .await
-                    {
-                        Ok(r) => r
-                            .into_iter()
-                            .filter_map(|r| {
-                                self.by_id
-                                    .get(&r.chunk_id)
-                                    .and_then(|&idx| self.chunks.get(idx))
-                                    .map(|chunk| MemorySearchResult {
-                                        chunk: chunk.clone(),
-                                        score: r.score,
-                                    })
-                            })
-                            .collect(),
-                        Err(_) => Vec::new(),
-                    }
-                } else if let Some(qdrant) = &self.qdrant {
-                    let query_vector =
-                        match self.embedding_provider.embed_single(&request.query).await {
-                            Ok(v) => v,
-                            Err(_) => return self.search_graph(request).await,
-                        };
-
-                    match qdrant
-                        .search(query_vector, fetch_k, request.score_threshold)
-                        .await
-                    {
-                        Ok(r) => r
-                            .into_iter()
-                            .filter_map(|r| {
-                                self.by_id
-                                    .get(&r.chunk_id)
-                                    .and_then(|&idx| self.chunks.get(idx))
-                                    .map(|chunk| MemorySearchResult {
-                                        chunk: chunk.clone(),
-                                        score: r.score,
-                                    })
-                            })
-                            .collect(),
-                        Err(_) => Vec::new(),
-                    }
-                } else {
-                    self.search_keyword(request)
                 }
             }
-            #[cfg(not(feature = "redis-vectors"))]
-            {
-                if let Some(qdrant) = &self.qdrant {
-                    let query_vector =
-                        match self.embedding_provider.embed_single(&request.query).await {
-                            Ok(v) => v,
-                            Err(_) => return self.search_graph(request).await,
-                        };
+            if let Some(backend) = self.backend.as_deref() {
+                let query_vector = match self.embedding_provider.embed_single(&request.query).await
+                {
+                    Ok(v) => v,
+                    Err(_) => return self.search_graph(request).await,
+                };
 
-                    match qdrant
-                        .search(query_vector, fetch_k, request.score_threshold)
-                        .await
-                    {
-                        Ok(r) => r
-                            .into_iter()
-                            .filter_map(|r| {
-                                self.by_id
-                                    .get(&r.chunk_id)
-                                    .and_then(|&idx| self.chunks.get(idx))
-                                    .map(|chunk| MemorySearchResult {
-                                        chunk: chunk.clone(),
-                                        score: r.score,
-                                    })
-                            })
-                            .collect(),
-                        Err(_) => Vec::new(),
-                    }
-                } else {
-                    self.search_keyword(request)
+                match backend
+                    .search_chunks(query_vector, fetch_k, request.score_threshold)
+                    .await
+                {
+                    Ok(hits) => hits
+                        .into_iter()
+                        .filter_map(|r| {
+                            self.by_id
+                                .get(&r.chunk_id)
+                                .and_then(|&idx| self.chunks.get(idx))
+                                .map(|chunk| MemorySearchResult {
+                                    chunk: chunk.clone(),
+                                    score: r.score,
+                                })
+                        })
+                        .collect(),
+                    Err(_) => Vec::new(),
                 }
+            } else {
+                self.search_keyword(request)
             }
         };
 
@@ -1210,38 +1122,21 @@ impl MemoryEngine {
             return Ok(());
         }
 
-        #[cfg(feature = "redis-vectors")]
-        if let Some(redis) = &self.redis {
-            self.ensure_redis_persistence_if_required(redis).await?;
-            let texts: Vec<String> = chunks.iter().map(|chunk| chunk.content.clone()).collect();
-            let vectors = self.embedding_provider.embed_batch(&texts).await?;
-
-            let records: Vec<RedisChunkRecord> = chunks
-                .iter()
-                .zip(vectors.into_iter())
-                .map(|(chunk, vector)| RedisChunkRecord {
-                    chunk_id: chunk.id.clone(),
-                    source_path: chunk.source_path.clone(),
-                    heading: chunk.heading_hierarchy.last().cloned().unwrap_or_default(),
-                    chunk_index: chunk.chunk_index,
-                    content: chunk.content.clone(),
-                    vector,
-                })
-                .collect();
-
-            redis.upsert_chunks(&records).await?;
-            return Ok(());
-        }
-
-        let Some(qdrant) = &self.qdrant else {
+        let Some(backend) = self.backend.as_deref() else {
             return Ok(());
         };
 
+        #[cfg(feature = "redis-vectors")]
+        if self.redis_persistence_required {
+            backend.verify_persistence().await?;
+        }
+
         let dims = self.embedding_provider.dimensions();
-        if self.use_hybrid_indexing() {
-            qdrant.ensure_hybrid_collection(dims).await?;
+        let use_hybrid_backend = backend.capabilities().hybrid && self.use_hybrid_indexing();
+        if use_hybrid_backend {
+            backend.ensure_hybrid_collection(dims).await?;
         } else {
-            qdrant.ensure_collection(dims).await?;
+            backend.ensure_collection(dims).await?;
         }
 
         let batch_size = 64;
@@ -1252,21 +1147,21 @@ impl MemoryEngine {
             let vectors = self.embedding_provider.embed_batch(&texts).await?;
 
             #[cfg(feature = "local-embeddings")]
-            if self.use_hybrid_indexing() {
+            if use_hybrid_backend {
                 if let Some(sparse_prov) = &self.sparse_provider {
                     let sparse_vecs = sparse_prov.embed_batch(&texts)?;
-                    let hybrid_points: Vec<HybridPoint> = batch
+                    let hybrid_points: Vec<HybridVectorPoint> = batch
                         .iter()
                         .zip(vectors.into_iter())
                         .zip(sparse_vecs.into_iter())
-                        .map(|((chunk, dense), sparse)| HybridPoint {
+                        .map(|((chunk, dense), sparse)| HybridVectorPoint {
                             id: chunk.id.clone(),
                             dense,
-                            sparse: QdrantSparseVector {
+                            sparse: VbSparseVector {
                                 indices: sparse.indices,
                                 values: sparse.values,
                             },
-                            payload: QdrantPayload {
+                            payload: ChunkPayload {
                                 chunk_id: chunk.id.clone(),
                                 source_path: chunk.source_path.clone(),
                                 heading: chunk
@@ -1276,42 +1171,47 @@ impl MemoryEngine {
                                     .unwrap_or_default(),
                                 chunk_index: chunk.chunk_index,
                             },
+                            content: Some(chunk.content.clone()),
                         })
                         .collect();
 
-                    qdrant.upsert_hybrid_points(hybrid_points).await?;
+                    backend.upsert_hybrid_chunks(hybrid_points).await?;
                     continue;
                 }
             }
 
-            let points: Vec<QdrantPoint> = batch
+            let points: Vec<VectorPoint> = batch
                 .iter()
                 .zip(vectors.into_iter())
-                .map(|(chunk, vector)| QdrantPoint {
+                .map(|(chunk, vector)| VectorPoint {
                     id: chunk.id.clone(),
                     vector,
-                    payload: QdrantPayload {
+                    payload: ChunkPayload {
                         chunk_id: chunk.id.clone(),
                         source_path: chunk.source_path.clone(),
                         heading: chunk.heading_hierarchy.last().cloned().unwrap_or_default(),
                         chunk_index: chunk.chunk_index,
                     },
+                    content: Some(chunk.content.clone()),
                 })
                 .collect();
 
-            qdrant.upsert_points(points).await?;
+            backend.upsert_chunks(points).await?;
         }
 
         Ok(())
     }
 
     #[cfg(feature = "redis-vectors")]
+    #[allow(dead_code)]
     async fn ensure_redis_persistence_if_required(
         &self,
-        redis: &RedisVectorStore,
+        _redis: &RedisVectorStore,
     ) -> Result<(), String> {
-        if self.redis_persistence_required {
-            redis.verify_persistence().await?;
+        if let Some(backend) = self.backend.as_deref() {
+            if self.redis_persistence_required {
+                backend.verify_persistence().await?;
+            }
         }
         Ok(())
     }
@@ -1440,15 +1340,9 @@ impl MemoryEngine {
             self.by_id.insert(chunk.id.clone(), idx);
         }
 
-        #[cfg(feature = "redis-vectors")]
-        if let Some(redis) = &self.redis {
-            redis.delete_by_source_path(&path_str).await?;
-            return Ok(count);
-        }
-
-        // Remove from Qdrant if available
-        if let Some(qdrant) = &self.qdrant {
-            qdrant
+        // v0.16.0: unified delete dispatch through trait.
+        if let Some(backend) = self.backend.as_deref() {
+            backend
                 .delete_by_source_path(&path_str)
                 .await
                 .map_err(|e| e.to_string())?;
@@ -1564,8 +1458,8 @@ mod tests {
         .await
         .expect("redis engine should construct");
 
-        assert_eq!(engine.vector_backend_name(), "redis");
-        assert!(engine.redis_backend().is_some());
+        // v0.16.0: the trait reports the backend's self-identified name.
+        assert_eq!(engine.vector_backend_name(), "redis-vectors");
     }
 
     #[cfg(feature = "redis-vectors")]

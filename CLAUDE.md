@@ -28,6 +28,9 @@ bash scripts/release-gate.sh
 # Run the MCP server (stdio)
 cargo run -p the-one-mcp --bin the-one-mcp -- serve
 
+# Run production hardening benchmarks (v0.15.0+)
+cargo run --release --example production_hardening_bench -p the-one-core
+
 # Run embedded admin UI
 THE_ONE_PROJECT_ROOT="$(pwd)" THE_ONE_PROJECT_ID="demo" cargo run -p the-one-ui --bin embedded-ui
 ```
@@ -71,6 +74,23 @@ the-one-codex  ──> the-one-mcp
 
 All crates use `CoreError` from `the-one-core::error`. Library code uses `thiserror`, the binary (`the-one-mcp.rs`) uses `anyhow`. The `MemoryEngine` and `ProviderPool` return `Result<T, String>` internally — the broker maps these to `CoreError::Embedding` or `CoreError::Provider`.
 
+**v0.15.0 wire-level sanitization**: `transport/jsonrpc.rs` converts every `CoreError` into a client-safe envelope via `public_error_message`. `CoreError::Sqlite`/`Io`/`Json`/`Embedding` etc. surface only their `error_kind_label` (`"sqlite"`, `"io"`, …) to clients — never the inner rusqlite/serde/fs text. `InvalidRequest`/`NotEnabled`/`PolicyDenied`/`InvalidProjectConfig` carry deliberately-crafted human-readable messages and pass through verbatim. Every error response carries a `corr=<id>` that matches a `tracing::error!` line in the server log with full internal details. Use `the_one_core::audit::error_kind_label(&err)` for the same labels in audit rows.
+
+### Input Sanitization (v0.15.0+)
+
+All user-supplied names go through `the_one_core::naming`:
+- `sanitize_name(value, field)` — wing/hall/room/label/tag. Charset `[A-Za-z0-9 ._\-:]`, max 128. The `:` is allowed for namespaced hook names (`hook:precompact`). Blocks `..`, path separators, leading/trailing dot, control whitespace, non-ASCII.
+- `sanitize_project_id(value)` — `[A-Za-z0-9_\-]`, max 64, no leading/trailing dash.
+- `sanitize_action_key(value)` — `[A-Za-z0-9_.:\-]`, max 128, no whitespace. Used for action keys AND navigation node IDs.
+
+Every broker write entry point (`memory_ingest_conversation`, `memory_diary_add`, `memory_navigation_upsert_node`, `memory_navigation_link_tunnel`) calls the sanitizer first and returns `InvalidRequest` on failure.
+
+### Pagination & Audit (v0.15.0+)
+
+List/search endpoints use `the_one_core::pagination::PageRequest::decode(limit, cursor, default, max)`. Over-limit requests **return `InvalidRequest`** instead of silently truncating. Per-endpoint caps are declared in `the_one_core::storage::sqlite::page_limits`. Responses carry `next_cursor: Option<String>` — opaque, passed verbatim by clients.
+
+Audit log gets structured outcomes via `the_one_core::audit::{AuditRecord, AuditOutcome}` + `ProjectDatabase::record_audit(&record)`. Schema v7 adds `outcome` and `error_kind` columns. See `docs/guides/production-hardening-v0.15.md` for the full rationale.
+
 ## Code Conventions
 
 - `rustfmt` with `max_width = 100`
@@ -96,3 +116,6 @@ All crates use `CoreError` from `the-one-core::error`. Library code uses `thiser
 - Observability (v0.12.0): `BrokerMetrics` wrapped in `Arc<BrokerMetrics>` so watcher task can clone; 15 metric counters total (7 original + 8 new); `MetricsSnapshotResponse` fields added with `#[serde(default)]`
 - Retrieval benchmark (v0.9.0): `crates/the-one-memory/examples/retrieval_bench.rs`; requires running Qdrant; NOT in CI; run manually with `cargo run --release --example retrieval_bench -p the-one-memory --features tree-sitter-chunker`
 - Intel Mac (v0.11.0 flag in v0.12.0 release): `local-embeddings-dynamic` feature resolves libonnxruntime at runtime via `brew install onnxruntime`; mutually exclusive with `local-embeddings` (ort-download-binaries)
+- Production hardening (v0.15.0): schema v7 adds `outcome`/`error_kind` columns to `audit_events`; navigation node IDs widened from 12 to 32 hex chars; cursor pagination replaces silent truncation in every `list_*`/`search_*` endpoint; `the_one_core::naming` + `the_one_core::pagination` + `the_one_core::audit` modules; stdio integration tests in `crates/the-one-mcp/tests/stdio_write_path.rs`; cross-finding regression tests in `crates/the-one-mcp/tests/production_hardening.rs`; bench in `crates/the-one-core/examples/production_hardening_bench.rs`. See `docs/reviews/2026-04-10-mempalace-comparative-audit.md` and `docs/guides/production-hardening-v0.15.md`.
+- Lever 1 audit throughput (v0.15.1): SQLite opens with `PRAGMA synchronous=NORMAL` in WAL mode — 67× faster audit writes (~83µs/row vs ~5.56ms/row). Durability trade-off: safe against process crash (WAL captures every commit), exposed to < 1s of writes on OS crash. Standard choice for modern SQLite apps. See production-hardening-v0.15.md § 14.
+- Phase A multi-backend traits (v0.16.0-rc1): `VectorBackend` trait in `the_one_memory::vector_backend` and `StateStore` trait in `the_one_core::state_store`. `MemoryEngine` now holds `Option<Box<dyn VectorBackend>>` (was two concrete Option fields); canonical constructor `MemoryEngine::new_with_backend(embedding_provider, backend, max_chunk_tokens)`. `ProjectDatabase` implements `StateStore`. Diary upsert is now transactionally atomic (FTS5 index + main table in one `unchecked_transaction`). Adding a new backend (pgvector, Postgres state, Redis-AOF) requires only implementing the trait in a new file — no broker changes. See `docs/plans/2026-04-11-multi-backend-architecture.md` and `docs/guides/multi-backend-operations.md`.

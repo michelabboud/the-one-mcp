@@ -2,6 +2,241 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.16.0-rc1] - 2026-04-11
+
+Multi-backend architecture Phase A: trait extraction. Pure refactor,
+zero behaviour change, zero user-visible API changes. The architectural
+unlock for pgvector, Postgres state, Redis-AOF, and combined
+single-connection backends.
+
+### Added
+
+- **`the_one_memory::vector_backend`** — new module introducing
+  `trait VectorBackend` covering chunk, entity, relation, image, and
+  hybrid dense+sparse vector operations. `BackendCapabilities` struct
+  lets callers inspect which operations each backend supports.
+- **`the_one_core::state_store`** — new module introducing
+  `trait StateStore` covering all 22 broker-called methods on
+  `ProjectDatabase` (audit, profiles, approvals, conversation sources,
+  AAAK lessons, diary, navigation). `StateStoreCapabilities` struct
+  for FTS/transactions/durability reporting.
+- `impl VectorBackend for AsyncQdrantBackend` — full capabilities.
+- `impl VectorBackend for RedisVectorStore` — chunks-only, feature-
+  gated behind `redis-vectors`.
+- `impl StateStore for ProjectDatabase` — thin forwarding impl for
+  SQLite, zero behaviour change.
+- `MemoryEngine::new_with_backend(embedding_provider, backend,
+  max_chunk_tokens)` — canonical constructor. External crates can
+  now plug in alternative backends (pgvector, PG-combined,
+  Redis-combined, etc.) without touching `the_one_memory::lib`.
+- `vector_backend::BackendCapabilities::full(name)` and
+  `chunks_only(name)` builder helpers.
+- New file `docs/guides/multi-backend-operations.md` — operator-
+  facing guide to backend selection, config examples, trade-offs,
+  migration paths.
+- New plan `docs/plans/2026-04-11-multi-backend-architecture.md` —
+  the combined A1+A2 architecture with phase breakdown for B1–C.
+- New report `docs/plans/2026-04-11-next-steps-expansion.md` —
+  detailed expansion of the post-v0.15.1 roadmap.
+- New tests:
+  - `vector_backend::tests::backend_capabilities_full_reports_every_operation_supported`
+  - `vector_backend::tests::backend_capabilities_chunks_only_reports_only_chunks`
+  - `state_store::tests::sqlite_capabilities_reports_everything_true`
+
+### Changed
+
+- **`MemoryEngine` struct layout**: replaced the pair
+  `qdrant: Option<AsyncQdrantBackend>` + `redis: Option<RedisVectorStore>`
+  with a single `backend: Option<Box<dyn VectorBackend>>`. All 16
+  dispatch sites in `lib.rs` now call through the trait.
+- `MemoryEngine::vector_backend_name()` now derives from
+  `backend.capabilities().name` — backends self-identify instead of
+  the engine branching on concrete types.
+- `ProjectDatabase::upsert_diary_entry` now wraps the main INSERT +
+  DELETE FTS + INSERT FTS triple in a single `unchecked_transaction`
+  so a mid-method crash cannot leave the FTS5 index out of sync with
+  the main table. **Strict improvement** — no existing test observed
+  the previous non-atomic behaviour.
+- `AsyncQdrantBackend` gains a `project_id: String` field so the
+  trait's entity/relation methods can delegate to the existing
+  Qdrant helpers without requiring callers to pass `project_id`
+  through the trait interface.
+- `MemoryEngine::redis_backend()` accessor removed — callers use
+  `engine.vector_backend_name()` to identify the active backend.
+- The old `MemoryEngine::new_local`, `new_with_qdrant`, `new_api`,
+  and `new_with_redis` constructors are now thin wrappers around
+  `new_with_backend`. Same signatures, same semantics.
+
+### Notes for operators
+
+- **No action required to upgrade** from v0.15.x. The refactor is
+  transparent — same config, same tools, same broker endpoints.
+- The broker continues to call `ProjectDatabase::open(...)` directly
+  rather than going through the `StateStore` trait. The call-site
+  migration is deferred to a future phase; the trait exists today so
+  that downstream backend implementations (Postgres, Redis-AOF) can
+  be built and tested in parallel without touching the broker.
+
+## [0.15.1] - 2026-04-10
+
+Audit-write throughput optimization via `PRAGMA synchronous=NORMAL`
+in WAL mode. Measured 67× speedup against the v0.15.0 baseline.
+
+### Changed
+
+- **`ProjectDatabase::open`** now sets `PRAGMA synchronous=NORMAL` in
+  addition to the existing `PRAGMA journal_mode=WAL`. In WAL mode
+  this means `fsync()` happens only at checkpoint time, not on every
+  commit. Measured impact:
+  - 1 000 audit writes: 5.56 s → 83.23 ms (67× faster)
+  - 10 000 audit writes: 52.61 s → 896.72 ms (59× faster)
+  - per-row latency: ~5 ms → ~85 µs
+- `docs/guides/production-hardening-v0.15.md` § 14 gains a full
+  explanation of the durability trade-off:
+  - **Safe** against process crash (WAL file captures every commit).
+  - **Exposed** to OS crash / power loss — the last < 1s of writes
+    can be lost.
+  - Standard SQLite production setting used by Firefox, Android,
+    Safari, rqlite, Litestream, Turso. `synchronous=FULL` is
+    reserved for workloads where < 1s of write loss is unacceptable
+    (financial ledgers, medical records).
+
+### Added
+
+- New accessor `ProjectDatabase::synchronous_mode()` returning the
+  integer pragma value for introspection / regression testing.
+- New tests:
+  - `storage::sqlite::tests::test_audit_write_throughput_under_normal_sync`
+    — smoke test that 100 audit writes finish under 5 seconds,
+    catching accidental regressions to `synchronous=FULL`.
+  - `production_hardening::lever1_synchronous_is_normal_in_wal_mode`
+    — cross-cutting regression guard.
+- New plan `docs/plans/2026-04-10-audit-batching-lever2.md` (v2) +
+  draft version documenting the Lever 2 async-batching design for
+  future use. Lever 2 is NOT implemented; the v2 plan is ready-for-
+  implementation when/if audit writes become a real bottleneck above
+  the Lever 1 baseline.
+
+### Notes for operators
+
+- **No action required to upgrade.** The pragma change is applied on
+  `ProjectDatabase::open`; existing `.the-one/state.db` files keep
+  working without migration.
+
+## [0.15.0] - 2026-04-10
+
+Production hardening pass driven by the mempalace comparative audit
+(`docs/reviews/2026-04-10-mempalace-comparative-audit.md`). Addresses
+every finding from the C/H/M severity matrix: 5 critical, 5 high, 6
+medium. Bit-for-bit backward compatible with v0.14.3 on read paths.
+This is a hardening pass, not a feature release.
+
+### Added
+
+- **New module `the_one_core::naming`** — centralized input
+  sanitization used at every broker write entry point. Exports
+  `sanitize_name`, `sanitize_project_id`, `sanitize_action_key`,
+  `sanitize_optional_name`.
+- **New module `the_one_core::pagination`** — cursor-based pagination
+  primitives. Exports `Cursor`, `Page<T>`, `PageRequest`. Every list
+  and search endpoint now routes through `PageRequest::decode(...)`
+  which rejects over-limit requests with `InvalidRequest` instead of
+  silently truncating.
+- **New module `the_one_core::audit`** — structured audit record
+  types. Exports `AuditRecord`, `AuditOutcome` (`Ok`/`Error`/`Unknown`),
+  `error_kind_label(&CoreError) -> &'static str`.
+- **Schema migration v7** on `audit_events` adds two columns:
+  `outcome TEXT NOT NULL DEFAULT 'unknown'` and `error_kind TEXT`.
+  Plus two new indexes for cheap error-rate queries.
+- **`ProjectDatabase::record_audit(&AuditRecord)`** — preferred
+  structured write API since v0.15.0. Legacy
+  `record_audit_event(event_type, payload_json)` still works for
+  back-compat but writes `outcome='unknown'`.
+- **`ProjectDatabase::audit_outcome_count(outcome)`** — count rows
+  per outcome for dashboards / alerting.
+- **`list_*_paged` / `search_*_paged` variants** on `ProjectDatabase`
+  for `audit_events`, `diary_entries`, `aaak_lessons`,
+  `navigation_nodes`, `navigation_tunnels`.
+- **`list_navigation_tunnels_for_nodes(&[String], limit)`** — SQL-
+  side IN-clause filter (chunked by 400 to respect
+  SQLITE_MAX_VARIABLE_NUMBER). Replaces the v0.14.x "load every
+  tunnel into Rust and filter client-side" pattern.
+- **`the_one_mcp::transport::jsonrpc::public_error_message`** — new
+  chokepoint that converts every `CoreError` to a client-safe
+  `(code, public_message)` pair and emits a `tracing::error!` with
+  a correlation ID (`corr-<8hex>`) for server-side root-cause
+  lookup. Prevents rusqlite/std::io/serde internals from leaking to
+  MCP clients.
+- **`the_one_mcp::transport::stdio::serve_pipe`** — new free function
+  that drives the JSON-RPC dispatch loop against arbitrary async
+  pipes. Enables in-process integration testing via
+  `tokio::io::duplex`.
+- **New integration test suite `tests/stdio_write_path.rs`** — 9
+  end-to-end stdio JSON-RPC tests: initialize, tools/list,
+  `memory.diary.add` lands in SQLite, `memory.navigation.upsert_node`
+  lands + audits, over-limit pagination rejection, invalid-name
+  sanitizer message, correlation-ID envelope, concurrent writes.
+- **New integration test suite `tests/production_hardening.rs`** —
+  13 cross-finding regression guards, one per audit issue.
+- **New benchmark `examples/production_hardening_bench.rs`** —
+  measures audit log throughput, list pagination depth, diary list
+  latency, navigation tunnel SQL-vs-client filter trade-offs.
+- **New tool-description hygiene test** in `transport::tools::tests`
+  — fails the build if any tool description contains imperative
+  directives targeted at the AI client.
+- **New guide `docs/guides/production-hardening-v0.15.md`** —
+  operator-facing guide for every fix, with breaking-changes list,
+  rollback instructions, and regression-guard references.
+- **New findings report
+  `docs/reviews/2026-04-10-mempalace-comparative-audit.md`**.
+- Dependency: `base64 = "0.22"` in `the-one-core` (used by cursor
+  encoding in the pagination module).
+
+### Changed
+
+- **Navigation digest widened from 12 hex chars to 32 hex chars**
+  (48 bits → 128 bits of collision resistance). Seed format also
+  gains a `v2:` prefix and folds `project_id` into the input.
+  v0.14.x 12-char rows keep working on read.
+- **Every error-swallowing `let _ = ...` in `broker.rs` replaced**
+  with either proper propagation or `tracing::warn!` with structured
+  context. `tool_install` response `auto_enabled` no longer lies.
+- **Broker write entry points now sanitize every user-supplied name**
+  via `the_one_core::naming`: `memory_ingest_conversation`,
+  `memory_diary_add`, `memory_navigation_upsert_node`,
+  `memory_navigation_link_tunnel`.
+- **`memory_ingest_conversation` response `source_path`** is now
+  project-relative (or just the filename) instead of the absolute
+  host filesystem path.
+- **`memory_navigation_list` uses SQL-side tunnel filtering**.
+  Response gains `next_cursor` and `total_nodes` fields.
+- **`memory_navigation_traverse` uses paginated BFS**. Caps total
+  visited nodes at 2 000 and emits a `truncated: true` flag.
+- **Diary / navigation / audit list endpoints** reject over-limit
+  requests with `InvalidRequest` instead of silently clamping.
+
+### Fixed
+
+- Silent audit-row loss on unknown outcome (audit recording gap).
+- Navigation digest collision risk (48 → 128 bits).
+- O(N) fan-out in `navigation_list` / `navigation_traverse`.
+- Path-traversal in user-supplied wing/hall/room names.
+- rusqlite error text leaking to MCP clients.
+- Missing end-to-end stdio write-path tests.
+
+### Notes for operators
+
+- **Breaking change**: list endpoints now reject `limit >`
+  per-endpoint-max with `InvalidRequest`. Clients that previously
+  relied on silent truncation must either lower the limit or
+  paginate via `next_cursor`.
+- **Breaking change**: `memory.ingest_conversation` response
+  `source_path` is now project-relative.
+- **Breaking change**: strict name validation on wing/hall/room.
+  Colon-namespaced forms (`hook:precompact`) remain valid.
+- **Breaking change**: `tool_install` response `auto_enabled` now
+  reports the real outcome of the enable step.
+
 ## [0.14.3] - 2026-04-10
 
 ### Added

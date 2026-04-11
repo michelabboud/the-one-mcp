@@ -173,6 +173,13 @@ pub struct AsyncQdrantBackend {
     client: reqwest::Client,
     base_url: String,
     collection_name: String,
+    /// v0.16.0: the unsanitised project id, retained so the
+    /// [`VectorBackend`](crate::vector_backend::VectorBackend) trait impl
+    /// can call the existing entity/relation/image collection helpers
+    /// without requiring the caller to pass project_id back in. Pre-v0.16
+    /// code paths continue to pass project_id explicitly and are
+    /// unchanged.
+    project_id: String,
 }
 
 impl AsyncQdrantBackend {
@@ -209,6 +216,7 @@ impl AsyncQdrantBackend {
             client,
             base_url: base_url.trim_end_matches('/').to_string(),
             collection_name,
+            project_id: project_id.to_string(),
         })
     }
 
@@ -1201,6 +1209,226 @@ impl AsyncQdrantBackend {
             let _ = self.client.delete(&url).send().await;
         }
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// VectorBackend trait impl (v0.16.0 Phase A1)
+// ---------------------------------------------------------------------------
+//
+// Forwards every trait method to the corresponding Qdrant-native method.
+// Conversions between the neutral trait types (VectorPoint, VectorHit,
+// EntityPoint, etc.) and Qdrant-native types (QdrantPoint, QdrantPayload,
+// QdrantSearchResult, etc.) are thin field-for-field maps.
+//
+// Qdrant reports every capability as `true` because it's the reference
+// backend — every operation in the-one-mcp's memory layer is expressed
+// in terms of Qdrant's capabilities.
+
+use crate::vector_backend::{
+    BackendCapabilities, EntityHit as TraitEntityHit, EntityPoint as TraitEntityPoint, HybridHits,
+    HybridVectorPoint, RelationHit as TraitRelationHit, RelationPoint as TraitRelationPoint,
+    SparseVector, VectorBackend, VectorHit, VectorPoint,
+};
+use async_trait::async_trait;
+
+impl From<QdrantSearchResult> for VectorHit {
+    fn from(r: QdrantSearchResult) -> Self {
+        Self {
+            chunk_id: r.chunk_id,
+            source_path: r.source_path,
+            heading: r.heading,
+            chunk_index: r.chunk_index,
+            score: r.score,
+        }
+    }
+}
+
+impl From<VectorPoint> for QdrantPoint {
+    fn from(p: VectorPoint) -> Self {
+        Self {
+            id: p.id,
+            vector: p.vector,
+            payload: QdrantPayload {
+                chunk_id: p.payload.chunk_id,
+                source_path: p.payload.source_path,
+                heading: p.payload.heading,
+                chunk_index: p.payload.chunk_index,
+            },
+        }
+    }
+}
+
+impl From<HybridVectorPoint> for HybridPoint {
+    fn from(p: HybridVectorPoint) -> Self {
+        Self {
+            id: p.id,
+            dense: p.dense,
+            sparse: QdrantSparseVector {
+                indices: p.sparse.indices,
+                values: p.sparse.values,
+            },
+            payload: QdrantPayload {
+                chunk_id: p.payload.chunk_id,
+                source_path: p.payload.source_path,
+                heading: p.payload.heading,
+                chunk_index: p.payload.chunk_index,
+            },
+        }
+    }
+}
+
+impl From<TraitEntityPoint> for EntityPoint {
+    fn from(p: TraitEntityPoint) -> Self {
+        Self {
+            id: p.id,
+            vector: p.vector,
+            name: p.name,
+            entity_type: p.entity_type,
+            description: p.description,
+            source_chunks: p.source_chunks,
+        }
+    }
+}
+
+impl From<EntitySearchResult> for TraitEntityHit {
+    fn from(r: EntitySearchResult) -> Self {
+        Self {
+            name: r.name,
+            entity_type: r.entity_type,
+            description: r.description,
+            source_chunks: r.source_chunks,
+            score: r.score,
+        }
+    }
+}
+
+impl From<TraitRelationPoint> for RelationPoint {
+    fn from(p: TraitRelationPoint) -> Self {
+        Self {
+            id: p.id,
+            vector: p.vector,
+            source: p.source,
+            target: p.target,
+            relation_type: p.relation_type,
+            description: p.description,
+            source_chunks: p.source_chunks,
+        }
+    }
+}
+
+impl From<RelationSearchResult> for TraitRelationHit {
+    fn from(r: RelationSearchResult) -> Self {
+        Self {
+            source: r.source,
+            target: r.target,
+            relation_type: r.relation_type,
+            description: r.description,
+            source_chunks: r.source_chunks,
+            score: r.score,
+        }
+    }
+}
+
+#[async_trait]
+impl VectorBackend for AsyncQdrantBackend {
+    fn capabilities(&self) -> BackendCapabilities {
+        BackendCapabilities::full("qdrant")
+    }
+
+    async fn ensure_collection(&self, dims: usize) -> Result<(), String> {
+        self.ensure_collection(dims).await
+    }
+
+    async fn ensure_hybrid_collection(&self, dims: usize) -> Result<(), String> {
+        self.ensure_hybrid_collection(dims).await
+    }
+
+    async fn upsert_chunks(&self, points: Vec<VectorPoint>) -> Result<(), String> {
+        let native: Vec<QdrantPoint> = points.into_iter().map(Into::into).collect();
+        self.upsert_points(native).await
+    }
+
+    async fn upsert_hybrid_chunks(&self, points: Vec<HybridVectorPoint>) -> Result<(), String> {
+        let native: Vec<HybridPoint> = points.into_iter().map(Into::into).collect();
+        self.upsert_hybrid_points(native).await
+    }
+
+    async fn search_chunks(
+        &self,
+        query_vector: Vec<f32>,
+        top_k: usize,
+        score_threshold: f32,
+    ) -> Result<Vec<VectorHit>, String> {
+        let results = self.search(query_vector, top_k, score_threshold).await?;
+        Ok(results.into_iter().map(Into::into).collect())
+    }
+
+    async fn search_chunks_hybrid(
+        &self,
+        dense: Vec<f32>,
+        sparse: SparseVector,
+        top_k: usize,
+        score_threshold: f32,
+    ) -> Result<HybridHits, String> {
+        let native_sparse = QdrantSparseVector {
+            indices: sparse.indices,
+            values: sparse.values,
+        };
+        let (dense_results, sparse_results) = self
+            .search_hybrid(dense, native_sparse, top_k, score_threshold)
+            .await?;
+        Ok(HybridHits {
+            dense: dense_results.into_iter().map(Into::into).collect(),
+            sparse: sparse_results.into_iter().map(Into::into).collect(),
+        })
+    }
+
+    async fn delete_by_source_path(&self, source_path: &str) -> Result<(), String> {
+        self.delete_by_source_path(source_path).await
+    }
+
+    async fn ensure_entity_collection(&self, dims: usize) -> Result<(), String> {
+        self.create_entity_collection(&self.project_id, dims).await
+    }
+
+    async fn upsert_entities(&self, points: Vec<TraitEntityPoint>) -> Result<(), String> {
+        let native: Vec<EntityPoint> = points.into_iter().map(Into::into).collect();
+        self.upsert_entity_points(&self.project_id, native).await
+    }
+
+    async fn search_entities(
+        &self,
+        query_vector: Vec<f32>,
+        top_k: usize,
+        score_threshold: f32,
+    ) -> Result<Vec<TraitEntityHit>, String> {
+        let results = self
+            .search_entities(&self.project_id, query_vector, top_k, score_threshold)
+            .await?;
+        Ok(results.into_iter().map(Into::into).collect())
+    }
+
+    async fn ensure_relation_collection(&self, dims: usize) -> Result<(), String> {
+        self.create_relation_collection(&self.project_id, dims)
+            .await
+    }
+
+    async fn upsert_relations(&self, points: Vec<TraitRelationPoint>) -> Result<(), String> {
+        let native: Vec<RelationPoint> = points.into_iter().map(Into::into).collect();
+        self.upsert_relation_points(&self.project_id, native).await
+    }
+
+    async fn search_relations(
+        &self,
+        query_vector: Vec<f32>,
+        top_k: usize,
+        score_threshold: f32,
+    ) -> Result<Vec<TraitRelationHit>, String> {
+        let results = self
+            .search_relations(&self.project_id, query_vector, top_k, score_threshold)
+            .await?;
+        Ok(results.into_iter().map(Into::into).collect())
     }
 }
 
