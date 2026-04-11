@@ -68,12 +68,29 @@ Add to the **workspace** `Cargo.toml` (not the individual crate — respect the 
 
 ```toml
 sqlx = { version = "0.8", default-features = false, features = [
-    "runtime-tokio", "postgres", "macros", "migrate", "chrono", "uuid"
+    "runtime-tokio", "tls-rustls", "postgres", "macros", "migrate", "chrono", "uuid"
 ] }
 pgvector = { version = "0.4", features = ["sqlx"] }
 ```
 
-**Decision to verify with me before adding:** exact `sqlx` feature set. The plan lists `["runtime-tokio", "postgres", "macros"]` minimum; I may want to add `migrate` (for built-in migration runner), `chrono` (for `TIMESTAMPTZ` handling), and `uuid` (for project identifiers if we store them as `UUID` vs `TEXT`). Ask me to confirm the exact feature list before editing `Cargo.toml`. Default to the plan minimum if I'm not available.
+**TWO decision points to verify with me BEFORE adding** (these are the first things you ask when the fresh session starts — do not guess, do not copy from the plan text which is incomplete on both axes):
+
+**Decision A — TLS feature axis.** The plan lists `"runtime-tokio"` with no TLS. **That is insufficient for any production deployment.** Postgres-over-TLS is the default everywhere in managed cloud (AWS RDS, Supabase, GCP Cloud SQL, Azure Flexible Server) and most self-hosted setups. The three real options are:
+
+| Feature | Pulls | Use when |
+|---|---|---|
+| `runtime-tokio` alone | no TLS stack | Local dev only. **Never ship.** |
+| `runtime-tokio` + `tls-rustls` | `rustls` + `webpki-roots` | Pure-Rust TLS, no OpenSSL dep. My default recommendation — matches the rest of the workspace. Check `cargo tree | grep rustls` first to verify no existing `rustls` version conflict. |
+| `runtime-tokio` + `tls-native-tls` | `native-tls` (OpenSSL on Linux, SChannel on Windows, Secure Transport on macOS) | Only if the workspace already depends on `native-tls` and pulling rustls would double-up TLS stacks. |
+
+Ask me which TLS stack to pick. Default to `tls-rustls` if I'm not available because it has the smallest workspace blast radius — but STOP and report if `cargo tree` shows a pre-existing rustls version that would conflict.
+
+**Decision B — sqlx non-TLS feature set.** The plan minimum is `["runtime-tokio", "postgres", "macros"]`. Beyond those, consider:
+- `migrate` — enables `sqlx::migrate!` macro for schema bootstrap. **Recommended** so Phase 2 shares migration infrastructure with Phase 3's `PostgresStateStore`.
+- `chrono` — enables `TIMESTAMPTZ` ↔ `chrono::DateTime` conversion. **Recommended** — Postgres audit timestamps use timestamptz and Rust code expects DateTime.
+- `uuid` — enables `UUID` column type. **Optional** — only needed if project identifiers are stored as `UUID` rather than `TEXT`. Lean toward NOT adding this unless a clear need emerges, because it pulls `uuid` into the sqlx dependency tree.
+
+Ask me to confirm the exact feature list before editing `Cargo.toml`. Default to `["runtime-tokio", "tls-rustls", "postgres", "macros", "migrate", "chrono"]` if I'm not available.
 
 ### 2. New Cargo feature `pg-vectors`
 
@@ -111,13 +128,73 @@ impl VectorBackend for PgVectorBackend {
 }
 ```
 
-**Schema bootstrap** (runs on construction, idempotent):
+**Schema bootstrap strategy — use `sqlx::migrate!` with versioned files, NOT ad-hoc `CREATE TABLE IF NOT EXISTS`.**
+
+The naive approach is to run one big `CREATE TABLE IF NOT EXISTS` block at startup. **Do not do this.** Phase 4 (combined Postgres+pgvector) and Phase 7 (Redis-Vector parity) will need to evolve these tables — add columns, add indexes, add constraints. An idempotent one-shot bootstrap silently diverges between fresh installs and upgraded installs once the `CREATE TABLE` text changes, and the divergence is invisible until a query fails.
+
+Use `sqlx::migrate!` instead. Create the migration directory at **`crates/the-one-memory/migrations/pgvector/`** with versioned SQL files:
+
+```
+crates/the-one-memory/migrations/pgvector/
+├── 0001_extension_and_schema.sql   -- CREATE EXTENSION + CREATE SCHEMA
+├── 0002_chunks_table.sql           -- chunks table + HNSW index + 3 btree indexes
+├── 0003_entities_table.sql
+├── 0004_relations_table.sql
+└── 0005_images_table.sql
+```
+
+And at backend construction:
+
+```rust
+#[cfg(feature = "pg-vectors")]
+impl PgVectorBackend {
+    pub async fn new(config: &PgVectorConfig, url: &str, project_id: &str) -> Result<Self, String> {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(config.max_connections)
+            .min_connections(config.min_connections)
+            .acquire_timeout(Duration::from_millis(config.acquire_timeout_ms))
+            .idle_timeout(Some(Duration::from_millis(config.idle_timeout_ms)))
+            .max_lifetime(Some(Duration::from_millis(config.max_lifetime_ms)))
+            .connect(url)
+            .await
+            .map_err(|e| format!("pgvector pool connect: {e}"))?;
+
+        // Phase 2: preflight the `vector` extension before running migrations
+        // so the operator sees a targeted error message instead of a cryptic
+        // sqlx migration failure. See "Extension preconditions" below.
+        Self::preflight_vector_extension(&pool).await?;
+
+        // sqlx::migrate! reads the directory at compile time, embeds the
+        // SQL files into the binary, and applies them in order using its
+        // own `_sqlx_migrations` tracking table. Phase 3's PostgresStateStore
+        // will use a sibling `crates/the-one-core/migrations/postgres-state/`
+        // directory with the same macro — two independent migration trees
+        // that can evolve independently without stepping on each other.
+        sqlx::migrate!("./migrations/pgvector")
+            .run(&pool)
+            .await
+            .map_err(|e| format!("pgvector migrations: {e}"))?;
+
+        Ok(Self { pool, schema: config.schema.clone(), project_id: project_id.to_string(),
+                  hnsw_m: config.hnsw_m, hnsw_ef_construction: config.hnsw_ef_construction,
+                  hnsw_ef_search: config.hnsw_ef_search })
+    }
+}
+```
+
+The first migration (`0001_extension_and_schema.sql`) is:
 
 ```sql
 CREATE EXTENSION IF NOT EXISTS vector;
-CREATE SCHEMA IF NOT EXISTS <schema>;
+CREATE SCHEMA IF NOT EXISTS the_one;
+```
 
-CREATE TABLE IF NOT EXISTS <schema>.chunks (
+Note: `sqlx::migrate!` takes no schema parameter — migration SQL must hardcode the schema name OR the `PgVectorBackend::new` must `SET search_path` on the pool before running migrations. **Default: hardcode `the_one` in the .sql files.** If operators override `[vector.pgvector].schema` in config.toml, the schema override is for NEW installs only — documented clearly in the guide. Cross-schema migration is out of scope for Phase 2.
+
+The second migration (`0002_chunks_table.sql`) creates the actual table:
+
+```sql
+CREATE TABLE IF NOT EXISTS the_one.chunks (
     id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL,
     source_path TEXT NOT NULL,
@@ -129,34 +206,102 @@ CREATE TABLE IF NOT EXISTS <schema>.chunks (
     hall TEXT,
     room TEXT,
     content TEXT NOT NULL,
-    dense_vector vector(<DIMS>) NOT NULL,
+    dense_vector vector($DIMS) NOT NULL,
     sparse_vector_indices INTEGER[],
     sparse_vector_values REAL[],
     created_at_epoch_ms BIGINT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS chunks_dense_hnsw
-    ON <schema>.chunks USING hnsw (dense_vector vector_cosine_ops)
-    WITH (m = <hnsw_m>, ef_construction = <hnsw_ef_construction>);
+    ON the_one.chunks USING hnsw (dense_vector vector_cosine_ops)
+    WITH (m = 16, ef_construction = 100);
 
-CREATE INDEX IF NOT EXISTS chunks_project_idx ON <schema>.chunks (project_id);
-CREATE INDEX IF NOT EXISTS chunks_source_idx ON <schema>.chunks (project_id, source_path);
-CREATE INDEX IF NOT EXISTS chunks_palace_idx ON <schema>.chunks (project_id, wing, hall, room);
+CREATE INDEX IF NOT EXISTS chunks_project_idx  ON the_one.chunks (project_id);
+CREATE INDEX IF NOT EXISTS chunks_source_idx   ON the_one.chunks (project_id, source_path);
+CREATE INDEX IF NOT EXISTS chunks_palace_idx   ON the_one.chunks (project_id, wing, hall, room);
+```
 
--- Entities, relations, images tables mirror the same pattern.
+**Problem:** sqlx migrations cannot take runtime parameters — you can't substitute `$DIMS` or `$m` / `$ef_construction` into a migration .sql file. Two options:
+
+- **Option A (recommended):** hardcode dims to match the default quality-tier embedding provider (BGE-large-en-v1.5 = 1024 dims) in `0002_chunks_table.sql`. Refuse to boot if the active provider reports a different dim — `InvalidProjectConfig("pgvector schema was migrated with dim=1024; active embedding provider reports dim=768; recreate the pgvector schema against a matching provider or switch providers")`. This makes dim a schema-migration-level choice, which is correct — changing embedding providers means re-ingesting everything anyway.
+- **Option B:** skip `sqlx::migrate!` for the `CREATE TABLE` statement and use a hand-rolled idempotent `CREATE TABLE IF NOT EXISTS` executed AFTER migrations with the dim substituted at runtime. This gives dim flexibility at the cost of the migration tracker not knowing about the chunks table schema.
+
+**Ask me which option before committing.** My strong default is A — it's simpler, the dim is a breaking-change axis anyway, and Phase 4's combined Postgres will want migration-managed schemas for transactional consistency.
+
+Same pattern for `0003_entities_table.sql`, `0004_relations_table.sql`, `0005_images_table.sql` — each is one migration file, mirroring the chunks shape for its own vector type.
+
+**Hybrid search decision point** (unchanged from original prompt, still requires a brainstorming pass before committing):
+
+```
 -- Hybrid search: combine HNSW on dense_vector + GIN on a computed
 -- tsvector from content for sparse-like recall, OR implement sparse
--- via the `sparse_vector_indices`/`sparse_vector_values` arrays with
+-- via the sparse_vector_indices/sparse_vector_values arrays with
 -- a manual inner-product rewrite. Ask me which approach before
 -- committing to hybrid semantics — there's a real trade-off.
 ```
 
+**Extension preconditions — `preflight_vector_extension` must exist.**
+
+The naive `CREATE EXTENSION IF NOT EXISTS vector` inside migration `0001` works on Supabase (built-in), fails with an opaque error on AWS RDS unless the `vector` extension is in the parameter group's `shared_preload_libraries` AND the connecting role is `rds_superuser`, fails similarly on GCP Cloud SQL, and fails on self-hosted Postgres unless the connecting role has `CREATE` on the target database. A fresh session that ships Phase 2 without a preflight check will produce support tickets from every managed-Postgres user on day one.
+
+Implement `preflight_vector_extension(&pool)` to run BEFORE `sqlx::migrate!`:
+
+```rust
+async fn preflight_vector_extension(pool: &sqlx::PgPool) -> Result<(), String> {
+    // 1. Check if the extension is already installed (Supabase path).
+    let installed: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector')")
+        .fetch_one(pool)
+        .await
+        .map_err(|e| format!("preflight vector extension check: {e}"))?;
+    if installed {
+        return Ok(());
+    }
+
+    // 2. Not installed. Check if it's AVAILABLE to install (i.e. the
+    //    extension files are on disk but not yet CREATE EXTENSIONed).
+    let available: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_available_extensions WHERE name = 'vector')")
+        .fetch_one(pool)
+        .await
+        .map_err(|e| format!("preflight vector extension availability: {e}"))?;
+    if !available {
+        return Err(
+            "pgvector backend requires the `vector` extension, which is not installed \
+             on this Postgres instance and not available for installation. Install it \
+             first:\n\
+               - AWS RDS / Aurora Postgres: enable `vector` in the instance parameter group's \
+                 shared_preload_libraries, reboot the instance, then connect as rds_superuser.\n\
+               - Google Cloud SQL Postgres: set the `cloudsql.enable_pgvector` database flag.\n\
+               - Azure Database for PostgreSQL Flexible Server: enable `vector` in the \
+                 server parameter `azure.extensions`.\n\
+               - Supabase: pgvector is pre-installed, no action required.\n\
+               - Self-hosted Postgres: install the pgvector package for your distribution \
+                 (`apt install postgresql-16-pgvector` or build from source), then restart.".to_string()
+        );
+    }
+
+    // 3. Available but not yet installed. Try to CREATE EXTENSION.
+    //    This requires either superuser or CREATE privilege on the database.
+    sqlx::query("CREATE EXTENSION IF NOT EXISTS vector")
+        .execute(pool)
+        .await
+        .map_err(|e| format!(
+            "pgvector extension is available but CREATE EXTENSION failed: {e}. \
+             The connecting role needs CREATE privilege on this database, or \
+             you need to connect as a superuser once to install it. On AWS RDS, \
+             connect as rds_superuser. On Supabase, use the service_role connection."
+        ))?;
+    Ok(())
+}
+```
+
+This is defensive but not over-engineered — three short queries and one targeted error per path, no silent fallbacks.
+
 **Critical implementation notes:**
 
-- `<DIMS>` must come from `embedding_provider.dimensions()` at construction time, not hardcoded. Different Nomic/BGE tiers have different dims (384, 512, 768, 1024…). Store it once at bootstrap; refuse to load if a later provider reports a different value (return `InvalidProjectConfig` with both dims in the message).
+- `<DIMS>` must come from `embedding_provider.dimensions()` at construction time OR be hardcoded per Option A above. Either way, store the applied dim somewhere queryable (either the migration version itself or a `the_one.metadata` table) and refuse to load if a later provider reports a different value — `InvalidProjectConfig` with both dims in the message.
 - Batched upserts via multi-row `INSERT ... ON CONFLICT (id) DO UPDATE SET ...`. No N-query loops.
 - `pgvector::Vector` wraps `Vec<f32>` and implements `sqlx::Type<Postgres>` when the `sqlx` feature is on. Use it for bind parameters.
-- HNSW parameters (`m`, `ef_construction`, `ef_search`) come from `[vector.pgvector]` in `config.toml` with the defaults `m=16`, `ef_construction=100`, `ef_search=40` (per § 4 of the backend selection scheme in the Phase 1 resume plan).
+- HNSW parameters (`m`, `ef_construction`, `ef_search`) come from `[vector.pgvector]` in `config.toml` with the defaults `m=16`, `ef_construction=100`, `ef_search=40` (per § 4 of the backend selection scheme in the Phase 1 resume plan). **Note:** these can only be applied to NEW migrations, not retroactively to existing HNSW indexes, because Option A hardcodes them in the migration SQL. To tune HNSW on an existing install, operators run `DROP INDEX chunks_dense_hnsw; CREATE INDEX chunks_dense_hnsw ... WITH (m = X, ef_construction = Y);` manually — documented in the guide.
 
 ### 4. Env var parser + startup validator — `the_one_core::config::backend_selection`
 
@@ -208,6 +353,20 @@ impl BackendSelection {
 
 These errors are `InvalidProjectConfig`, which the v0.15.0 error sanitizer passes through verbatim — the operator sees the full message, the `corr=<id>` lands in logs.
 
+**Multi-error reporting order — fail on the first mismatch, in deterministic parse order.** If an operator sets both a bad `TYPE` and a missing `URL`, they see ONE error, not a collected list. The parse order is:
+
+1. `THE_ONE_STATE_TYPE` — validate as known enum value (or "unset")
+2. `THE_ONE_STATE_URL` — require iff `STATE_TYPE != unset && STATE_TYPE != sqlite`
+3. `THE_ONE_VECTOR_TYPE` — validate as known enum value (or "unset")
+4. `THE_ONE_VECTOR_URL` — require iff `VECTOR_TYPE != unset && VECTOR_TYPE != qdrant`
+5. Cross-axis asymmetry — one TYPE set, other unset → fail
+6. Combined matching — if either TYPE ends in `-combined`, both must be identical value
+7. Combined URL equality — if both TYPEs are `*-combined`, URLs must be byte-identical
+
+**Why first-match not collect-all:** collecting multiple validation errors sounds friendlier but (a) obscures the root cause when one error cascades (e.g. unknown TYPE makes the URL check meaningless), (b) adds test surface for every error-combination permutation, and (c) breaks the v0.15.0 "one `corr=<id>` per error" log invariant. First-match keeps the error envelope sane and matches the fail-fast philosophy of the rest of the backend selection scheme. Document the parse order in the function's doc comment so operators understand what they'll see.
+
+**Test isolation for validator tests — use `temp_env::with_vars`.** Every negative test must wrap its env var mutation in `temp_env::with_vars([...], || { ... })` so parallel `cargo test` runs don't poison each other. There are already working examples in `crates/the-one-core/src/config.rs` tests — grep for `temp_env` there and follow the same pattern. Do NOT use `std::env::set_var` directly in tests, ever — it breaks other tests running in the same process.
+
 ### 5. Config.toml section parser for `[vector.pgvector]`
 
 Add to the existing `config.rs` structure:
@@ -215,16 +374,48 @@ Add to the existing `config.rs` structure:
 ```rust
 #[derive(Debug, Clone, Deserialize)]
 pub struct VectorPgvectorConfig {
+    // ── Schema / HNSW tuning ──────────────────────────────────────────
     #[serde(default = "default_pgvector_schema")]
     pub schema: String,              // "the_one"
+
     #[serde(default = "default_hnsw_m")]
-    pub hnsw_m: i32,                 // 16
+    pub hnsw_m: i32,                 // 16 — HNSW graph connectivity
+
     #[serde(default = "default_hnsw_ef_construction")]
-    pub hnsw_ef_construction: i32,   // 100
+    pub hnsw_ef_construction: i32,   // 100 — HNSW build-time quality
+
     #[serde(default = "default_hnsw_ef_search")]
-    pub hnsw_ef_search: i32,         // 40
+    pub hnsw_ef_search: i32,         // 40 — HNSW query-time recall
+
+    // ── sqlx pool sizing ──────────────────────────────────────────────
+    //
+    // These are first-class config fields, not docs-only guidance. sqlx
+    // defaults are 10 max connections + 30s acquire timeout + no idle
+    // or max lifetime bounds — defensible for dev, wrong for production.
+    // Phase 2's first integration test under CI load will discover the
+    // defaults are wrong, so name them here.
+    #[serde(default = "default_pgvector_max_connections")]
+    pub max_connections: u32,        // 10
+
+    #[serde(default = "default_pgvector_min_connections")]
+    pub min_connections: u32,        // 2 — prevents cold-start latency spikes on first query
+
+    #[serde(default = "default_pgvector_acquire_timeout_ms")]
+    pub acquire_timeout_ms: u64,     // 30_000
+
+    #[serde(default = "default_pgvector_idle_timeout_ms")]
+    pub idle_timeout_ms: u64,        // 600_000 (10 min)
+
+    #[serde(default = "default_pgvector_max_lifetime_ms")]
+    pub max_lifetime_ms: u64,        // 1_800_000 (30 min, forces periodic reconnect)
 }
 ```
+
+All pool fields are applied via `sqlx::postgres::PgPoolOptions` in `PgVectorBackend::new` (see the example in § 3). The defaults are production-sane but operators can override in `config.toml` without a code change.
+
+**Why `min_connections = 2` not 0:** sqlx's default 0 means the pool is empty until the first query, which forces a cold TCP + TLS + auth handshake on the critical path of whatever broker handler runs first after a restart. With `min_connections = 2`, two connections are established at pool construction and stay warm. This matters most on managed Postgres where TLS handshake can add 100–300 ms.
+
+**Why `max_lifetime_ms = 30 min` not unlimited:** forces periodic reconnection to pick up credential rotation (IAM auth on AWS RDS, dynamic secrets from Vault, etc.) and to recover from network-level connection state that sqlx doesn't see (PGBouncer pool bounces, load-balancer reshards). 30 min is a production-default compromise between reconnect overhead and recovery latency.
 
 `{project_id}` substitution happens in `AppConfig::load()` via literal `.replace("{project_id}", project_id)` — no Jinja, no expressions, no escape hatches. If `THE_ONE_PROJECT_ID` is unset when a templated field is active, startup fails with an explicit error.
 
@@ -367,10 +558,15 @@ Phase 2 is one of the larger phases — ~800 LOC plus the docs + benches + negat
 
 ## First action when the fresh session starts
 
-1. Verify baseline per the block above (`git log`, `git status`, `cargo fmt/clippy/test`, release gate)
+1. Verify baseline per the block above (`git log`, `git status`, `cargo fmt/clippy/test`, release gate). Expected HEAD is at or after commit `549eec8` (the Phase 1 docs closeout); expected test baseline is **450 passing, 1 ignored**.
 2. Record the baseline count into `/tmp/the-one-baseline.txt`
-3. Read the § Phase 2 full deliverables above in order
-4. Stop and ask me: **which sqlx feature set to use** (the minimum `["runtime-tokio", "postgres", "macros"]` or the extended `["runtime-tokio", "postgres", "macros", "migrate", "chrono", "uuid"]`)
-5. Wait for my "continue" before adding any dependency to `Cargo.toml`
+3. Read the § Phase 2 full deliverables above in order — **in particular, do not skim § 3**, which has the migration strategy, the extension preflight, and the dim-vs-migration trade-off that everything downstream depends on.
+4. **Stop and ask me these four decision points in order, before touching `Cargo.toml` or any source file:**
+   - **A. sqlx TLS feature axis** (§ 1 Decision A): `tls-rustls`, `tls-native-tls`, or no TLS? Default recommendation: `tls-rustls`. STOP if `cargo tree | grep rustls` shows a pre-existing conflicting version.
+   - **B. sqlx non-TLS feature set** (§ 1 Decision B): default recommendation `["runtime-tokio", "tls-rustls", "postgres", "macros", "migrate", "chrono"]`. Omit `uuid` unless a clear need emerges.
+   - **C. Schema migration strategy** (§ 3 Options A vs B): use `sqlx::migrate!` with hardcoded `dim=1024` (Option A — my recommendation) or skip migrations for the chunks table and use runtime-substituted `CREATE TABLE IF NOT EXISTS` (Option B — more flexible, loses migration tracking).
+   - **D. Hybrid search semantics** (§ 3 near the end): tsvector + GIN for sparse-like recall, OR manual sparse arrays with inner-product rewrite? Needs its own brainstorming pass — both have real trade-offs.
+5. Wait for my answers to A–D before adding any dependency or writing any migration file.
+6. Once A–D are decided, proceed through § 1–10 in order, running the release artifact checks in § 10 before asking for commit authorization.
 
 Phase 0 and Phase 1 are shipped. Begin at Phase 2.
