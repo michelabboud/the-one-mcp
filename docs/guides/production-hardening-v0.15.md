@@ -537,476 +537,69 @@ see:
 
 ---
 
-## 15. v0.16.0 Phase 2 — pgvector backend setup + tuning
+## 15. v0.16.0 Phase 2 — pgvector backend (moved to standalone guide)
 
-Phase 2 ships `PgVectorBackend` as the first real alternative
-vector backend after the Phase A trait extraction. This section
-covers the operational surface: installing the extension, sizing
-the sqlx pool, tuning HNSW, and the migration-ownership model.
+Phase 2 ships `PgVectorBackend` as the first real alternative vector
+backend after the Phase A trait extraction — operators running managed
+Postgres can co-locate their vectors with their relational data instead
+of standing up a separate Qdrant service.
 
-### Installing pgvector on managed Postgres
+**The full operational content has moved to its own guide:**
+**[docs/guides/pgvector-backend.md](pgvector-backend.md)**. It covers:
 
-`PgVectorBackend::new` runs `preflight_vector_extension` before any
-migration, which performs three defensive checks and produces a
-targeted error message for each of the five common managed-Postgres
-environments when it can't find the extension:
+- Installing the `vector` extension on Supabase, AWS RDS / Aurora,
+  Google Cloud SQL, Azure Flexible Server, and self-hosted Postgres
+- The defensive `preflight_vector_extension` 3-query probe
+- Hand-rolled migration runner rationale (cargo `links` conflict vs
+  `sqlx::migrate!`) and SHA-256 checksum drift detection
+- Decision C: `dim=1024` hardcoded in the migration SQL
+- HNSW tuning (`m`, `ef_construction`, `ef_search`) with three
+  ownership models
+- HNSW vs IVFFlat trade-offs
+- sqlx connection pool sizing (`min_connections=2`, `max_lifetime=30min`)
+- Monitoring queries (`EXPLAIN ANALYZE`, index sizing)
+- Running the throughput bench
+- Migration from Qdrant
+- Decision D (hybrid search) deferral
 
-1. **Supabase** — pgvector is pre-installed on every project. No
-   action required. The preflight query sees `vector` in
-   `pg_extension` and returns `Ok(())`.
-2. **AWS RDS / Aurora Postgres** — `vector` ships with RDS Postgres
-   ≥ 15.3 but is not installed by default. Add it to the instance
-   parameter group's `shared_preload_libraries`, reboot the
-   instance, then connect as `rds_superuser` once so
-   `CREATE EXTENSION` succeeds. Subsequent broker startups see the
-   installed extension and skip the `CREATE`.
-3. **Google Cloud SQL Postgres** — set the database flag
-   `cloudsql.enable_pgvector` to `on` on the instance. Unlike RDS,
-   Cloud SQL doesn't require a separate `CREATE EXTENSION` step
-   once the flag is set.
-4. **Azure Database for PostgreSQL Flexible Server** — add `vector`
-   to the server parameter `azure.extensions`, then connect as any
-   member of `azure_pg_admin` for the one-time `CREATE EXTENSION`.
-5. **Self-hosted Postgres** — install the pgvector package for
-   your distribution (`apt install postgresql-16-pgvector` on
-   Debian/Ubuntu, `brew install pgvector` on macOS, or build from
-   source per the upstream README), restart Postgres, then connect
-   as a superuser once to `CREATE EXTENSION vector`.
+**Configuration reference for the `vector_pgvector` config block
+lives in [configuration.md](configuration.md#vector-backend--pgvector-v0160-phase-2).**
 
-The preflight's three probe queries (`pg_extension`,
-`pg_available_extensions`, `CREATE EXTENSION`) cover every
-permission model without needing operator-specific code paths.
-
-### Migration-ownership model
-
-Phase 2 uses a hand-rolled migration runner at
-`the_one_memory::pg_vector::migrations` instead of `sqlx::migrate!`.
-The bisection that led to this decision is in the
-`crates/the-one-memory/Cargo.toml` `pg-vectors` feature comment —
-short version: sqlx's `migrate` and `chrono` features both
-transitively reference `sqlx-sqlite?/…`, cargo's `links` conflict
-check pulls `sqlx-sqlite` into the resolution graph even though
-it's optional, and `sqlx-sqlite`'s `libsqlite3-sys 0.30.1` collides
-with `rusqlite 0.39`'s `libsqlite3-sys 0.37.0`. Dropping `migrate`
-sidesteps the entire conflict.
-
-The hand-rolled runner:
-
-- Embeds every `.sql` file in `crates/the-one-memory/migrations/pgvector/`
-  via `include_str!` at compile time.
-- Applies migration 0 (the tracking table itself) unconditionally —
-  the body is `CREATE TABLE IF NOT EXISTS`, so re-running it is
-  safe.
-- For migrations 1..N, checks the `the_one.pgvector_migrations`
-  table for an existing row at that version. If present, it
-  verifies the stored `SHA-256 BYTEA` checksum against the live
-  `include_str!`'d file contents; drift (i.e. someone edited the
-  migration file post-ship) refuses to continue and logs the
-  mismatch. If absent, it applies the migration in one
-  `raw_sql().execute()` call and inserts a tracking row.
-- Exposes `list_applied(&pool)` for observability and tests.
-
-Checksum drift detection is the guarantee that `sqlx::migrate!`
-provides for free and that hand-rolled runners most often lose.
-Phase 2 catches it with one extra `SELECT checksum` per migration
-per startup — negligible cost for the safety it buys.
-
-### Vector dimension is migration-bound
-
-**Decision C** (locked in during the Phase 2 brainstorm) hardcodes
-`dim=1024` into every `vector(...)` literal in
-`migrations/pgvector/000[234]_*.sql`. This matches the default
-quality-tier embedding provider (BGE-large-en-v1.5). The backend
-constructor reads `EmbeddingProvider::dimensions()` and refuses to
-start if the live provider reports a different dim — **you cannot
-silently swap embedding providers and keep the schema.**
-
-Reasons this is a feature, not a limitation:
-
-1. Changing an embedding provider changes the vector space. Even
-   if the dim matched, re-using old vectors with a new provider
-   produces semantically incoherent search results. Forcing a
-   schema migration makes the rebuild deliberate.
-2. Phase 4 (combined Postgres+pgvector) will want migration-managed
-   schemas for transactional consistency between state writes and
-   vector writes. Starting Phase 2 with migration tracking means
-   Phase 4 doesn't have to retrofit it.
-3. If operators need multi-dim support later, that's a new
-   migration file (`0006_reshape_chunks_dim.sql`) with a documented
-   downtime step — not a silent config toggle.
-
-### HNSW tuning
-
-Phase 2 ships HNSW indexes with `m = 16` and `ef_construction = 100`
-baked into the migration SQL. These are the pgvector defaults and
-the Qdrant defaults — a safe starting point for corpora up to
-~10 million chunks on 1024-dim vectors.
-
-**Three tunables, three ownership models:**
-
-| Parameter | When applied | How to change |
-|---|---|---|
-| `hnsw_m` (graph connectivity) | Migration time, in `CREATE INDEX ... WITH (m = 16, ef_construction = 100)` | DROP INDEX + CREATE INDEX with new value. Config field exists in `[vector.pgvector]` but only takes effect on a fresh schema. |
-| `hnsw_ef_construction` (build quality) | Migration time, same as `m` | Same DROP + CREATE recipe. |
-| `hnsw_ef_search` (query-time recall) | **Per-query** via `SET LOCAL hnsw.ef_search = N` inside the transaction wrapping the `SELECT ... ORDER BY dense_vector <=> $1`. | Change the config field in `[vector.pgvector]` and restart the broker. No DDL required. |
-
-The per-query `SET LOCAL` approach keeps `ef_search` scoped to the
-current transaction — important because pgvector treats it as a
-session GUC that otherwise leaks to other users of the same pool
-connection after it's returned.
-
-**Manual retune recipe** for `m` / `ef_construction`:
-
-```sql
--- Inside `psql`, connected as the schema owner:
-BEGIN;
-DROP INDEX the_one.chunks_dense_hnsw;
-CREATE INDEX chunks_dense_hnsw
-    ON the_one.chunks
-    USING hnsw (dense_vector vector_cosine_ops)
-    WITH (m = 32, ef_construction = 200);  -- your new tuning
-COMMIT;
-```
-
-Running this on a large index is minutes-to-hours depending on
-row count and will block INSERTs; plan for it during a
-maintenance window.
-
-### HNSW vs IVFFlat
-
-pgvector supports two index types: HNSW (default, higher recall)
-and IVFFlat (lower memory, worse recall on small datasets). Phase 2
-ships HNSW only because:
-
-- **Recall matters more than memory** at the-one-mcp scale — even
-  a "big" codebase is < 10M chunks, well inside HNSW's sweet spot.
-- **IVFFlat needs a pre-built trained list** — you seed it with a
-  sample of vectors, which complicates the zero-setup deployment
-  story. HNSW builds incrementally.
-- **Operators who genuinely need IVFFlat** can swap the index
-  manually (DROP INDEX + CREATE INDEX USING ivfflat). The broker
-  never inspects the index type, only the column type, so this
-  works without a binary rebuild.
-
-### sqlx connection pool sizing
-
-`VectorPgvectorConfig` exposes five pool fields with defaults
-aimed at managed-Postgres deployments:
-
-| Field | Default | Rationale |
-|---|---|---|
-| `max_connections` | 10 | Same as sqlx's default. Bumps up for high-QPS broker instances. |
-| `min_connections` | **2** | **Non-zero**. sqlx's default 0 means the first query after a restart pays full TCP + TLS + auth handshake latency (100–300 ms on RDS). Keeping 2 connections warm pays ≈ 2 × handshake once at startup in exchange for no cold-start tail latency. |
-| `acquire_timeout_ms` | 30_000 | How long a broker handler waits for a free connection. 30s is aggressive-but-not-insane; tune down on latency-sensitive setups. |
-| `idle_timeout_ms` | 600_000 | 10 min. Idle connections get reaped so long-idle broker instances don't hold pool slots indefinitely. |
-| `max_lifetime_ms` | **1_800_000** | 30 min. **Non-infinite**. Forces periodic reconnect to pick up: IAM credential rotation (AWS RDS dynamic secrets), Vault lease expiry, PGBouncer reshards, upstream load-balancer connection draining. sqlx's default `None` is fine for dev, wrong for production. |
-
-### Monitoring queries
-
-Three useful queries when diagnosing pgvector performance:
-
-```sql
--- How big is the HNSW index? (Rule of thumb: bytes ≈ 4 * dim * rows * m / 2.)
-SELECT pg_size_pretty(pg_relation_size('the_one.chunks_dense_hnsw'));
-
--- How many chunks per project?
-SELECT project_id, count(*) FROM the_one.chunks GROUP BY project_id ORDER BY count(*) DESC;
-
--- Is a query hitting the HNSW index?
-EXPLAIN (ANALYZE, BUFFERS)
-SELECT id, (1 - (dense_vector <=> '[0.1, 0.2, ...]'::vector)) AS score
-FROM the_one.chunks
-ORDER BY dense_vector <=> '[0.1, 0.2, ...]'::vector
-LIMIT 10;
-```
-
-The `EXPLAIN` output should contain `Index Scan using chunks_dense_hnsw`
-— if it shows `Seq Scan` instead, the query isn't routing through
-the index (common causes: missing `ORDER BY distance_op`, missing
-`LIMIT`, or the index not yet built).
-
-### Running the bench
-
-```bash
-# 1. Start pgvector-enabled Postgres:
-docker run --rm -d --name pgvector-bench \
-    -e POSTGRES_PASSWORD=pw -e POSTGRES_DB=bench \
-    -p 55432:5432 ankane/pgvector
-
-# 2. Run the bench in release mode:
-THE_ONE_VECTOR_TYPE=pgvector \
-THE_ONE_VECTOR_URL=postgres://postgres:pw@localhost:55432/bench \
-cargo run --release --example pgvector_bench \
-    -p the-one-memory --features pg-vectors
-```
-
-The bench prints chunk upsert throughput at batch sizes 50/200/1000
-and dense search latency percentiles (p50/p95/p99) over 100
-queries. Results go to the Phase 2 commit message body.
-
-### Migration from Qdrant
-
-**Not automated in Phase 2.** Switching from Qdrant to pgvector
-requires re-ingesting every source document against the pgvector
-backend — there's no "dump Qdrant + load pgvector" tooling, and
-there won't be, because the two backends use different internal
-representations and the reprocessing path is the same as a fresh
-ingest.
-
-Steps:
-
-1. Stand up a Postgres instance with pgvector extension installed
-   (see § above).
-2. Export the operator config: `THE_ONE_VECTOR_TYPE=pgvector` and
-   `THE_ONE_VECTOR_URL=<dsn>`.
-3. Restart the broker. It boots against the new backend, which
-   applies migrations on first connect.
-4. Re-run `project.init` on every project to trigger re-ingest
-   against the new backend. Qdrant data is left untouched — you
-   can delete the collection manually once you're confident the
-   pgvector backend is good.
+Commit `91ff224`, tag `v0.16.0-phase2`. Cargo feature `pg-vectors`
+(off by default).
 
 ---
 
-## 16. v0.16.0 Phase 3 — PostgresStateStore backend
+## 16. v0.16.0 Phase 3 — PostgresStateStore backend (moved to standalone guide)
 
 Phase 3 ships `PostgresStateStore` as the second-axis complement to
-Phase 2's pgvector. Operators can now run the-one-mcp against a
-managed Postgres instance (RDS, Cloud SQL, Azure, Supabase,
-self-hosted) with zero SQLite in the persistence layer.
+Phase 2's pgvector — operators can now run the-one-mcp against managed
+Postgres with zero SQLite in the persistence layer.
 
-### Setup
+**The full operational content has moved to its own guide:**
+**[docs/guides/postgres-state-backend.md](postgres-state-backend.md)**.
+It covers:
 
-Install Postgres ≥ 13. No extensions are required — PostgresStateStore
-only uses native features (`TSVECTOR`, GIN, `BIGSERIAL`, foreign keys,
-cascading deletes). pgvector is NOT a dependency of this backend; if
-you're only doing state (not vectors), any vanilla Postgres image
-works.
+- Setup (any vanilla Postgres ≥ 13 — no extensions needed)
+- The sync-over-async bridge via `tokio::task::block_in_place` +
+  `Handle::current().block_on` (and why the `StateStore` trait stays
+  sync)
+- FTS5 → tsvector translation with `content_tsv TSVECTOR` + GIN
+- Why `websearch_to_tsquery('simple', ...)` not `'english'`
+- Schema v7 parity in one migration (fresh Postgres installs have no
+  v1..v6 history)
+- Hand-rolled migration runner reusing the Phase 2 pattern
+- Statement timeout via sqlx's `after_connect` hook and pool sizing
+- BIGINT epoch_ms convention (no chrono, permanent)
+- Migration path from SQLite (re-ingest, not dump+load)
+- The 11 integration tests in `tests/postgres_state_roundtrip.rs`
+- Phase 4 combined-pool preview
 
-```bash
-# Minimal local setup:
-docker run --rm -d --name the-one-pg-state \
-    -e POSTGRES_PASSWORD=pw -e POSTGRES_DB=the_one \
-    -p 5432:5432 postgres:16
+**Configuration reference for the `state_postgres` config block
+lives in [configuration.md](configuration.md#state-store--postgres-v0160-phase-3).**
 
-# Configure the broker:
-export THE_ONE_STATE_TYPE=postgres
-export THE_ONE_STATE_URL=postgres://postgres:pw@localhost:5432/the_one
-
-# Rebuild with the feature:
-cargo build --release -p the-one-mcp --bin the-one-mcp \
-    --features pg-state
-```
-
-On first boot the hand-rolled migration runner creates the `the_one`
-schema, the `the_one.state_migrations` tracking table, and the full
-v7-equivalent schema (`project_profiles`, `approvals`, `audit_events`,
-`conversation_sources`, `aaak_lessons`, `diary_entries` + `content_tsv`
-+ GIN index, `navigation_nodes`, `navigation_tunnels`). Subsequent
-boots verify the tracking-table checksums and exit clean — idempotent.
-
-### Sync-over-async bridge
-
-The `StateStore` trait is sync (no async methods) — it inherited that
-constraint from `rusqlite::Connection`, which is `Send + !Sync`.
-Phase 1's broker chokepoint (`with_state_store`) holds the store's
-mutex guard across a sync closure specifically so the compiler
-refuses to hold a backend guard across an `.await`, preventing
-connection-pool deadlocks.
-
-sqlx is async top-to-bottom. The bridge:
-
-```rust
-fn block_on<F, R>(fut: F) -> R
-where
-    F: std::future::Future<Output = R>,
-{
-    tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::try_current()
-            .expect("PostgresStateStore methods must be called from a tokio runtime")
-            .block_on(fut)
-    })
-}
-```
-
-Every `impl StateStore for PostgresStateStore` method wraps its sqlx
-call chain in `block_on(async { ... })`. `block_in_place` tells tokio
-"this worker is about to do blocking work" so other async tasks
-migrate off; `Handle::current().block_on` drives the future to
-completion; the worker resumes async duty afterward.
-
-**Runtime requirement**: multi-threaded tokio runtime. The broker
-binary's `#[tokio::main]` default satisfies this. Tests must use
-`#[tokio::test(flavor = "multi_thread")]` — `current_thread` will
-panic at the `block_on` call.
-
-### FTS5 → tsvector translation
-
-SQLite's `diary_entries_fts` virtual table doesn't exist in Postgres.
-The Phase 3 schema replaces it with:
-
-```sql
-diary_entries.content_tsv TSVECTOR NOT NULL DEFAULT to_tsvector('simple', '')
-CREATE INDEX idx_diary_entries_content_tsv ON the_one.diary_entries USING GIN (content_tsv);
-```
-
-The `content_tsv` column is populated by the Rust layer in
-`upsert_diary_entry` as part of the same INSERT statement:
-
-```sql
-INSERT INTO the_one.diary_entries (..., content_tsv)
-VALUES (..., to_tsvector('simple', $N))
-ON CONFLICT ... DO UPDATE SET ..., content_tsv = EXCLUDED.content_tsv;
-```
-
-The tsvector input string is `COALESCE(mood, '') || ' ' || tags_join ||
-' ' || content` — same three fields FTS5 indexed, concatenated.
-
-Search uses `websearch_to_tsquery('simple', $1)`:
-
-```sql
-SELECT ... FROM the_one.diary_entries
-WHERE project_id = $1
-  AND content_tsv @@ websearch_to_tsquery('simple', $2)
-ORDER BY ts_rank(content_tsv, websearch_to_tsquery('simple', $2)) DESC, ...;
-```
-
-`websearch_to_tsquery` accepts plain user input ("quoted phrases",
-`-negation`, spaces-as-AND) and never panics. When the input
-produces zero tokens (common with pure-punctuation queries like
-`!@#`), the Rust layer falls through to a LIKE-based fallback:
-
-```sql
-SELECT ... FROM the_one.diary_entries
-WHERE project_id = $1
-  AND (content ILIKE $2 OR COALESCE(mood, '') ILIKE $2 OR tags_json ILIKE $2)
-ORDER BY entry_date DESC, ...;
-```
-
-### Why `'simple'` and not `'english'`
-
-`to_tsvector('english', 'running shoes')` applies the Snowball
-stemmer and produces the tokens `run` + `shoe`. Searching for
-`running` matches `run`, and searching for `shoes` matches `shoe`.
-That's fine for English prose — and catastrophic for code or
-non-English content:
-
-- Code snippets: `const DEFAULT_SCHEMA_VERSION` → stemmer emits
-  `default`, `schema`, `version` as if they were three English
-  words. Exact-match searches fail.
-- Korean / Japanese / Chinese: stemmer has no dictionary, tokens
-  get corrupted.
-- Mixed-language diaries: per-entry language detection isn't
-  possible.
-
-`'simple'` applies no stemming and no stop-words — just whitespace
-and punctuation tokenization. You get exact-word matching
-uniformly across languages and across prose/code content. Matches
-FTS5's default behaviour more closely than `'english'`.
-
-### Schema version parity
-
-Postgres ships the v7 shape in **one** migration (`0001_state_schema_v7.sql`)
-because a fresh install has no v1..v6 history to walk through.
-`PostgresStateStore::schema_version()` returns `1` (the highest
-applied migration version), NOT `7`. That's intentional —
-`schema_version()` is a per-backend concept, not a cross-backend
-parity number. The `CURRENT_SCHEMA_VERSION = 7` constant in
-`sqlite.rs` is SQLite-internal.
-
-Broker code that needs cross-backend behaviour should inspect
-`StateStoreCapabilities` instead of comparing version numbers.
-
-### Migration runner (reprise)
-
-Same hand-rolled pattern as `pg_vector::migrations` — see § 15 for
-the full rationale. Short version:
-
-- `sqlx::migrate!` was dropped from Decision B because sqlx's
-  `migrate` feature transitively references `sqlx-sqlite?/migrate`,
-  and cargo's `links` conflict check pulls `sqlx-sqlite` into the
-  resolution graph where it collides with `rusqlite 0.39`'s
-  `libsqlite3-sys 0.37`.
-- Phase 3's runner uses `include_str!` to embed the `.sql` files,
-  SHA-256 to detect drift, a `the_one.state_migrations` tracking
-  table, idempotent re-apply.
-- Phase 4's combined backend can share a single schema with
-  pgvector because the two tracking tables are distinct
-  (`pgvector_migrations` vs `state_migrations`).
-
-### Statement timeout and pool sizing
-
-`StatePostgresConfig.statement_timeout_ms` is applied at connection
-time via sqlx's `after_connect` hook:
-
-```rust
-pool_options = pool_options.after_connect(move |conn, _meta| {
-    Box::pin(async move {
-        let sql = format!("SET statement_timeout = '{timeout_ms}ms'");
-        sqlx::query(&sql).execute(conn).await.map(|_| ())
-    })
-});
-```
-
-Non-zero values enforce per-query wall-clock deadlines. Default 30s
-matches the pgvector backend's `acquire_timeout_ms` so a query that
-exhausts its statement budget and a handler that exhausts its
-acquire budget fail at roughly the same moment under load. `0`
-disables the timeout entirely.
-
-Pool sizing fields (`max_connections`, `min_connections`,
-`acquire_timeout_ms`, `idle_timeout_ms`, `max_lifetime_ms`) match
-the pgvector defaults field-for-field. Run two features together
-(`--features pg-state,pg-vectors`) and you get split pools with
-identical tuning, which is the right default for production.
-
-### BIGINT epoch_ms, no chrono
-
-Every timestamp column in the Phase 3 schema is `BIGINT` holding
-milliseconds since the Unix epoch. Timestamps are generated at
-bind time via `SystemTime::duration_since(UNIX_EPOCH)` — no
-`chrono`, no `TIMESTAMPTZ`. This is a workspace-wide convention
-(pgvector already did it) and sidesteps the sqlx `chrono` feature's
-cargo `links` conflict entirely. If you later need wall-clock-
-aware types on the Postgres side, do the conversion in the query
-layer (`to_timestamp(created_at_epoch_ms / 1000.0)`) — never add
-chrono to the dep graph.
-
-### Migration from SQLite
-
-**Not automated in Phase 3.** Switching from SQLite to Postgres
-requires re-running `project.init` against the new backend. The
-broker picks up the new `StateStore` on boot; existing
-audit/profile/diary history in the old SQLite DB is NOT migrated.
-If you need the history, export it with `sqlite3 state.db .dump`
-before the cutover and re-apply manually — there's no
-cross-backend migration tool and there won't be, because schema
-drift between backends is fine for a greenfield install but
-unsafe for a data migration.
-
-Typical cutover:
-
-```bash
-# 1. Stand up Postgres, stop the broker.
-# 2. Rebuild with the feature.
-# 3. Export the env vars:
-export THE_ONE_STATE_TYPE=postgres
-export THE_ONE_STATE_URL=postgres://...
-# 4. Restart the broker. First boot applies migrations.
-# 5. Re-run project.init on every project.
-```
-
-### Combined Postgres (Phase 4 preview)
-
-Phase 4 will add `THE_ONE_STATE_TYPE=postgres-combined` +
-`THE_ONE_VECTOR_TYPE=postgres-combined` with byte-identical URLs,
-and the broker will construct ONE `sqlx::PgPool` that serves both
-`StateStore` and `VectorBackend`. Transactional writes spanning
-state + vectors become possible (e.g. "ingest conversation AND
-record the audit row atomically"). The Phase 3 `state_postgres`
-config block and the Phase 2 `vector_pgvector` block stay as-is
-— Phase 4 just adds a dispatcher that reads both and spins up one
-pool.
+Commit `f010ed6`, tag `v0.16.0-phase3`. Cargo feature `pg-state`
+(off by default, composable with `pg-vectors`).
 
 ---
 

@@ -4,6 +4,245 @@
 
 ---
 
+## Upgrading to v0.16.0-phase3 (from v0.16.0-phase2)
+
+### New features (opt-in, non-breaking)
+
+- **`PostgresStateStore`** — full `StateStore` trait on Postgres (all 26
+  methods). Tsvector FTS replaces FTS5, schema v7 parity from day one,
+  BIGINT epoch_ms throughout. Activated via
+  `THE_ONE_STATE_TYPE=postgres` + `THE_ONE_STATE_URL=<dsn>`, off by default.
+- **New Cargo feature `pg-state`** on `the-one-core` + passthrough on
+  `the-one-mcp`. Composable with `pg-vectors`:
+  `--features pg-state,pg-vectors` ships split-pool Postgres on both axes.
+- **New `CoreError::Postgres(String)` variant** for backend runtime
+  errors. Short label `"postgres"` surfaced to clients; full text in
+  `tracing::error!` logs.
+- **`state_store_factory` is now `async`** — Phase 1's doc comment
+  pre-announced this. Internal broker change only; handlers unaffected.
+
+### Required action
+
+- **None.** Existing SQLite + Qdrant deployments keep working unchanged.
+  New features are opt-in via env vars + Cargo features.
+
+### To adopt PostgresStateStore
+
+1. Stand up Postgres ≥ 13 (no extensions required — uses only native
+   features). Managed Postgres (RDS, Cloud SQL, Azure, Supabase) works.
+2. Export the env vars:
+   ```bash
+   export THE_ONE_STATE_TYPE=postgres
+   export THE_ONE_STATE_URL=postgres://user:pw@db.internal:5432/the_one
+   ```
+3. Rebuild: `cargo build --release -p the-one-mcp --bin the-one-mcp --features pg-state`
+4. First boot applies the migrations automatically. See
+   [Postgres state backend guide](postgres-state-backend.md) for the full
+   sequence.
+
+### Migration from SQLite
+
+Not automated. Switching from SQLite to Postgres requires re-running
+`project.init` against the new backend — existing
+audit/profile/diary history in the old SQLite DB is NOT carried over.
+See the guide for the manual cutover procedure.
+
+### No breaking changes
+
+Broker API, MCP tool shapes, config-file format, and CLI adapters are
+unchanged.
+
+---
+
+## Upgrading to v0.16.0-phase2 (from v0.16.0-phase1)
+
+### New features (opt-in, non-breaking)
+
+- **`PgVectorBackend`** — first real alternative `VectorBackend` after the
+  Phase A trait extraction. Implements chunks + entities + relations on
+  pgvector (hybrid search deferred to Phase 2.5 as Decision D). Activated
+  via `THE_ONE_VECTOR_TYPE=pgvector` + `THE_ONE_VECTOR_URL=<dsn>`, off
+  by default.
+- **New `the_one_core::config::backend_selection` module** — parses the
+  four-variable `THE_ONE_{STATE,VECTOR}_{TYPE,URL}` env surface with
+  fail-loud validation (1 `BackendSelection::from_env` call covering all
+  § 3 rules from the backend selection scheme). See the "Multi-Backend
+  Selection" section of `configuration.md`.
+- **New `VectorPgvectorConfig`** in the config stack. Schema, HNSW
+  tunables, 5 sqlx pool-sizing fields with production-sane defaults.
+- **New Cargo feature `pg-vectors`** on `the-one-memory` + passthrough
+  on `the-one-mcp`. Off by default.
+- **New `CoreError::Postgres`** variant landed in Phase 3, but Phase 2's
+  pgvector code maps its errors to String-internal `VectorBackend` trait
+  results and then `CoreError::Embedding` at the broker boundary.
+
+### Required action
+
+- **None.** Existing Qdrant deployments keep working unchanged.
+
+### To adopt pgvector
+
+1. Stand up Postgres ≥ 13 with the `vector` extension available (Supabase
+   has it pre-installed; AWS RDS needs it in `shared_preload_libraries`;
+   see [pgvector backend guide](pgvector-backend.md) for per-provider
+   setup).
+2. Export:
+   ```bash
+   export THE_ONE_VECTOR_TYPE=pgvector
+   export THE_ONE_VECTOR_URL=postgres://user:pw@db.internal/the_one
+   ```
+3. Rebuild: `cargo build --release -p the-one-mcp --bin the-one-mcp --features pg-vectors`
+4. First boot runs `preflight_vector_extension` (defensive check with
+   targeted per-provider errors) and applies the five migration files.
+
+### Vector dimension is locked at 1024
+
+Decision C (locked in during the Phase 2 brainstorm) hardcodes `dim=1024`
+in every `vector(...)` literal in the migration SQL. This matches the
+default quality-tier embedding provider (BGE-large-en-v1.5). The backend
+constructor refuses to start if the live provider reports a different
+dim. If you need a different dimension, it's a new migration, not a
+runtime setting.
+
+### No breaking changes
+
+---
+
+## Upgrading to v0.16.0-phase1 (from v0.16.0-rc1)
+
+### Internal refactor only — no new features
+
+The broker's state-store access is now routed through a
+`state_by_project` cache via the Phase A `StateStore` trait. All 16
+`ProjectDatabase::open` call sites in `broker.rs` now go through a new
+`with_state_store(project_root, project_id, |store| ...)` sync closure.
+The inner lock is `std::sync::Mutex` (deliberately not tokio) so the
+guard is `!Send` — the compiler refuses to hold a backend connection
+across `.await`, which prevents the Postgres/Redis connection-pool
+deadlock pattern that will bite in Phase 3+.
+
+### Required action
+
+- **None.** Zero user-visible behaviour change. Tests passed 449 → 450
+  (+1 cache-reuse test). Existing projects work unchanged.
+
+---
+
+## Upgrading to v0.16.0-rc1 (from v0.15.1)
+
+### Internal refactor — Phase A multi-backend trait extraction
+
+- New `trait VectorBackend` in `the_one_memory::vector_backend` (chunks,
+  entities, relations, hybrid, persistence verification).
+- New `trait StateStore` in `the_one_core::state_store` (all 22
+  broker-called methods on `ProjectDatabase`).
+- `MemoryEngine` now holds `Option<Box<dyn VectorBackend>>` (was two
+  concrete `Option<T>` fields). Canonical constructor
+  `MemoryEngine::new_with_backend(embedding_provider, backend,
+  max_chunk_tokens)`.
+- `impl VectorBackend for AsyncQdrantBackend` (full) + `impl
+  VectorBackend for RedisVectorStore` (chunks-only, feature-gated).
+- `impl StateStore for ProjectDatabase` (thin forwarding, zero
+  behaviour change).
+- **Diary upsert atomicity fix**: main INSERT + DELETE FTS + INSERT FTS
+  wrapped in one `unchecked_transaction`. If your code inspects partial
+  diary FTS states, you may observe fewer transient inconsistencies.
+
+### Required action
+
+- **None.** v0.16.0-rc1 is a pure refactor — every v0.15.x test passes
+  bit-for-bit against it. Upgrade by rebuilding.
+
+### No breaking changes
+
+Broker API, MCP tool shapes, config-file format, and CLI adapters are
+unchanged.
+
+### Note: v0.15.0 + v0.15.1 + v0.16.0-rc1 bundled
+
+These three versions shipped as one commit (`5ff9872`) because three
+files carried interleaved changes across all three. The tag
+`v0.16.0-rc1` points at that commit, as do `v0.15.0` and `v0.15.1`.
+CHANGELOG.md has per-version sections.
+
+---
+
+## Upgrading to v0.15.1 (from v0.15.0)
+
+### Lever 1 — `synchronous=NORMAL` on WAL mode
+
+- `ProjectDatabase::open` now sets `PRAGMA synchronous=NORMAL` after
+  enabling WAL. Measured **67× faster** audit writes
+  (5.56 ms → 83 µs per row).
+- Durability trade-off: safe against process crash (WAL captures every
+  commit), exposed to **< 1 s of writes on OS crash**. This is the
+  standard modern-SQLite production setting used by Firefox, Android,
+  rqlite, Litestream, and Turso.
+- Two regression tests added (throughput smoke + cross-cutting guard).
+
+### Required action
+
+- **None.** If your threat model genuinely requires `synchronous=FULL`
+  (e.g. storing financial transactions), file an issue — we'd add a
+  `storage_synchronous_mode` config knob. Until then the default is
+  `NORMAL` and the `production_hardening_bench.rs` results only make
+  sense against that setting.
+
+### No breaking changes
+
+---
+
+## Upgrading to v0.15.0 (from v0.14.3)
+
+### Production hardening pass
+
+v0.15.0 addresses every finding from
+`docs/reviews/2026-04-10-mempalace-comparative-audit.md` (C1–C5, H1–H5,
+M1–M6). See [production-hardening-v0.15.md](production-hardening-v0.15.md)
+for the full 15-section writeup. Highlights:
+
+- **Cursor pagination** replaces silent truncation on every list/search
+  endpoint. **Potentially breaking** for clients that pass oversized
+  `limit` values: over-limit requests now return `CoreError::InvalidRequest`
+  instead of silently clamping. Fix: read `CURSOR_MAX` per endpoint from
+  `the_one_core::storage::sqlite::page_limits` and respect the cap, or
+  pass `0` to use the endpoint's default.
+- **Input sanitization** at every broker write entry point via
+  `sanitize_name` / `sanitize_project_id` / `sanitize_action_key`.
+  Previously-loose names (e.g. leading `.`, embedded path separators,
+  non-ASCII) now fail-loud with `InvalidRequest`.
+- **Error envelope sanitization** — internal `rusqlite::Error` /
+  `serde_json::Error` / `std::io::Error` text no longer leaks to clients.
+  Only the kind label (`"sqlite"`, `"io"`, `"json"`, ...) + a
+  correlation ID is surfaced. Full text stays in `tracing::error!` logs.
+- **Navigation node digest widened** 12 → 32 hex chars (48 → 128 bits).
+  Existing rows with 12-char digests keep working — the widening
+  applies to new insertions only.
+- **Schema v7** adds `outcome` + `error_kind` columns to `audit_events`
+  with indexes. Existing v6 rows get `outcome='unknown'` and
+  `error_kind=NULL` automatically.
+
+### Required action
+
+- **Audit your client code for oversized `limit` values.** If you pass
+  `limit=10000` to a list endpoint whose `_MAX` is 500, v0.14.x silently
+  truncated; v0.15.0 returns `InvalidRequest`. Fix: use the endpoint's
+  `_DEFAULT` (pass `limit: 0`) or cap to `_MAX`.
+- **Review any client code that parses error messages** — the
+  sanitizer only passes `InvalidRequest`, `NotEnabled`, `PolicyDenied`,
+  and `InvalidProjectConfig` verbatim. Everything else becomes the
+  short label + correlation ID.
+
+### New guide
+
+[production-hardening-v0.15.md](production-hardening-v0.15.md) is the
+definitive reference for this release. Read § 1–§ 13 for the original
+v0.15.0 hardening, § 14 for v0.15.1 Lever 1, § 15 for v0.16.0-phase2
+pgvector, § 16 for v0.16.0-phase3 Postgres state, § 17 for v0.16.0-rc1
+Phase A trait extraction.
+
+---
+
 ## Upgrading to v0.14.3 (from v0.14.2)
 
 ### New features (non-breaking)

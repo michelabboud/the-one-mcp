@@ -172,6 +172,139 @@ Environment variable overrides:
 
 ---
 
+### Multi-Backend Selection (v0.16.0+)
+
+v0.16.0 introduces pluggable backends on **both** axes — state store AND
+vector backend — via four env vars parsed at broker startup. The legacy
+`vector_backend` field above still works (for Qdrant vs Redis), but Phase 2
+and Phase 3 add new backends that are selected through the unified env
+surface instead. Read this section if you plan to run the-one-mcp on
+Postgres (either axis), or if you want to understand the complete
+selection surface.
+
+**Four env vars**, two per axis, parallel naming:
+
+```bash
+THE_ONE_STATE_TYPE=<sqlite|postgres|redis|postgres-combined|redis-combined>
+THE_ONE_STATE_URL=<connection string, may carry credentials>
+THE_ONE_VECTOR_TYPE=<qdrant|pgvector|redis-vectors|postgres-combined|redis-combined>
+THE_ONE_VECTOR_URL=<connection string, may carry credentials>
+```
+
+Valid combinations shipping today:
+
+| `STATE_TYPE` | `VECTOR_TYPE` | Cargo features | Shipped in |
+|---|---|---|---|
+| unset (= `sqlite`) | unset (= `qdrant`) | (default) | v0.15.x baseline |
+| unset | `pgvector` | `pg-vectors` | v0.16.0 Phase 2 |
+| `postgres` | unset | `pg-state` | v0.16.0 Phase 3 |
+| `postgres` | `pgvector` | `pg-state,pg-vectors` | v0.16.0 Phase 3 (split pools) |
+| `postgres-combined` | `postgres-combined` | (planned) | v0.16.0 Phase 4 (combined pool) |
+| `redis` | any | (planned) | v0.16.0 Phase 5 |
+| `redis-combined` | `redis-combined` | (planned) | v0.16.0 Phase 6 |
+
+**Fail-loud startup validation** — the broker parses these env vars once at
+`McpBroker::try_new_with_policy` and enforces every rule below. Any
+violation produces `CoreError::InvalidProjectConfig` with a targeted error
+message:
+
+| Input state | Broker behaviour |
+|---|---|
+| All four unset | `(Sqlite, Qdrant)` default. Zero behaviour change from v0.15.x. |
+| One `TYPE` set, other `TYPE` unset | **FAIL LOUD** — `"THE_ONE_STATE_TYPE=postgres set but THE_ONE_VECTOR_TYPE is unset; both axes must be explicit when either is overridden."` |
+| `TYPE` set but matching `URL` unset | **FAIL LOUD** — `"THE_ONE_STATE_TYPE=postgres requires THE_ONE_STATE_URL to be set."` |
+| Unknown `TYPE` value | **FAIL LOUD with the enum list** — `"Unknown THE_ONE_STATE_TYPE=pgsql; expected one of: sqlite, postgres, redis, postgres-combined, redis-combined"` |
+| Combined `TYPE`s with mismatched values | **FAIL LOUD** — `"Combined backends must match: THE_ONE_STATE_TYPE=postgres-combined requires THE_ONE_VECTOR_TYPE=postgres-combined"` |
+| Both `*-combined`, URL mismatch | **FAIL LOUD with both URLs echoed** — `"Combined postgres-combined: THE_ONE_STATE_URL and THE_ONE_VECTOR_URL must be byte-identical; got state_url=X vs vector_url=Y"` |
+| Both non-combined, same URL | **Allowed, silent.** Operator opts into split pools sharing one host. |
+
+**First-match failure** — validation runs top-to-bottom and fails on the
+first violation. Collecting all errors would obscure cascading root causes
+(unknown `TYPE` makes the URL check meaningless); first-match keeps the
+v0.15.0 "one `corr=<id>` per error" envelope invariant.
+
+**Test isolation pattern** — the parser is covered by 12 tests in
+`the_one_core::config::backend_selection::tests` (8 negative + 4 positive
+controls), all wrapped in `temp_env::with_vars` so parallel `cargo test`
+runs don't poison each other. Never set `THE_ONE_*` env vars directly in a
+test — use `temp_env::with_vars` instead.
+
+---
+
+### Vector Backend — pgvector (v0.16.0 Phase 2)
+
+Tuning knobs for the `PgVectorBackend` live in a nested `vector_pgvector`
+block on `config.json`. Every field has a serde `default`, so the block is
+optional — operators who just want the defaults can omit it entirely.
+
+```json
+{
+  "vector_pgvector": {
+    "schema": "the_one",
+    "hnsw_m": 16,
+    "hnsw_ef_construction": 100,
+    "hnsw_ef_search": 40,
+    "max_connections": 10,
+    "min_connections": 2,
+    "acquire_timeout_ms": 30000,
+    "idle_timeout_ms": 600000,
+    "max_lifetime_ms": 1800000
+  }
+}
+```
+
+| Field | Default | Notes |
+|---|---|---|
+| `schema` | `"the_one"` | Postgres schema the migrations write into. Changing only affects **new installs**. |
+| `hnsw_m` | `16` | HNSW graph connectivity. Migration-time only — drops + recreates the index to retune. |
+| `hnsw_ef_construction` | `100` | HNSW build-time quality. Migration-time only. |
+| `hnsw_ef_search` | `40` | HNSW query-time recall. **Runtime-tunable** — applied per search via `SET LOCAL hnsw.ef_search`. |
+| `max_connections` | `10` | sqlx pool max. |
+| `min_connections` | `2` | Non-zero to avoid cold-start TCP+TLS+auth latency on the first query after a restart. |
+| `acquire_timeout_ms` | `30000` | How long a broker handler waits for a free connection. |
+| `idle_timeout_ms` | `600000` (10 min) | Idle connection TTL. |
+| `max_lifetime_ms` | `1800000` (30 min) | Forces periodic reconnect to pick up IAM credential rotation, PGBouncer reshards, etc. |
+
+See the full [pgvector backend guide](pgvector-backend.md) for installation
+per managed-Postgres provider (Supabase, RDS, Cloud SQL, Azure,
+self-hosted), migration ownership model, `dim=1024` Decision C rationale,
+HNSW vs IVFFlat trade-offs, and monitoring queries.
+
+---
+
+### State Store — Postgres (v0.16.0 Phase 3)
+
+Tuning knobs for the `PostgresStateStore` live in a nested `state_postgres`
+block, structurally parallel to `vector_pgvector`. Same defaults strategy —
+omit the block for production-sane defaults.
+
+```json
+{
+  "state_postgres": {
+    "schema": "the_one",
+    "statement_timeout_ms": 30000,
+    "max_connections": 10,
+    "min_connections": 2,
+    "acquire_timeout_ms": 30000,
+    "idle_timeout_ms": 600000,
+    "max_lifetime_ms": 1800000
+  }
+}
+```
+
+| Field | Default | Notes |
+|---|---|---|
+| `schema` | `"the_one"` | Same schema as pgvector by default, so Phase 4's combined deployment shares one namespace. |
+| `statement_timeout_ms` | `30000` (30s) | Applied per-connection via `SET statement_timeout` in sqlx's `after_connect` hook. `0` disables entirely (Postgres default). |
+| `max_connections` ... `max_lifetime_ms` | (same defaults as `vector_pgvector`) | Field shapes deliberately parallel so Phase 4 combined can share one tuning surface. |
+
+See the full [Postgres state backend guide](postgres-state-backend.md) for
+the sync-over-async bridge rationale, FTS5 → tsvector translation details,
+`'simple'` vs `'english'` tokenizer choice, schema v7 parity, migration
+path from SQLite, and the Phase 4 combined preview.
+
+---
+
 ### Embeddings (text)
 
 | Field | Type | Default | Description |

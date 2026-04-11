@@ -63,7 +63,7 @@ the-one-mcp broker
     +-- MCP Primitives       30 tools + 3 resource types (docs/project/catalog)
     +-- Tool Catalog         365 curated tools, SQLite + Qdrant semantic search
     +-- Project Lifecycle    Detect languages/frameworks, fingerprint caching
-    +-- Knowledge (RAG)      fastembed (384-1024 dim) + Qdrant or Redis/RediSearch
+    +-- Knowledge (RAG)      fastembed (384-1024 dim) + Qdrant / pgvector / Redis
     +-- Code Chunker         Tree-sitter AST chunking for 13 languages
     +-- Documents (CRUD)     Managed folder with soft-delete, auto-sync
     +-- Auto-Reindex         File watcher for markdown + images
@@ -71,8 +71,38 @@ the-one-mcp broker
     +-- Policy Engine        Configurable limits + risk-tier approval gates
     +-- Backup / Restore     Gzipped tar of project state + catalog + registry
     +-- Observability        Metrics counters + audit events via `observe`
-    +-- SQLite               Project state, catalog, approvals, audit trail
+    +-- State Store          SQLite (default) or Postgres (v0.16.0-phase3)
+    +-- Vector Backend       Qdrant (default) / pgvector (v0.16.0-phase2) / Redis
 ```
+
+### Multi-backend selection (v0.16.0)
+
+Both the **state store** and the **vector backend** are pluggable. The default is
+SQLite + Qdrant (same as v0.15.x). Operators running managed Postgres can opt into
+pgvector and/or `PostgresStateStore` via four env vars and feature-gated builds:
+
+```bash
+# SQLite state + pgvector vectors (split-pool, single-axis switch):
+export THE_ONE_VECTOR_TYPE=pgvector
+export THE_ONE_VECTOR_URL=postgres://user:pw@db.internal/the_one
+cargo build --release -p the-one-mcp --bin the-one-mcp --features pg-vectors
+
+# Postgres state + Qdrant vectors (opposite single-axis switch):
+export THE_ONE_STATE_TYPE=postgres
+export THE_ONE_STATE_URL=postgres://user:pw@db.internal/the_one
+cargo build --release -p the-one-mcp --bin the-one-mcp --features pg-state
+
+# Both — two independent pools:
+export THE_ONE_STATE_TYPE=postgres THE_ONE_VECTOR_TYPE=pgvector
+export THE_ONE_STATE_URL=... THE_ONE_VECTOR_URL=...
+cargo build --release -p the-one-mcp --bin the-one-mcp --features pg-state,pg-vectors
+```
+
+Combined single-pool (`postgres-combined`) ships in Phase 4. See the
+[pgvector backend guide](docs/guides/pgvector-backend.md), the
+[Postgres state backend guide](docs/guides/postgres-state-backend.md), and
+the [multi-backend operations guide](docs/guides/multi-backend-operations.md)
+for the full matrix and tuning surface.
 
 ## 30 MCP Tools
 
@@ -136,6 +166,9 @@ Enable with `"image_embedding_enabled": true` in config. OCR text extraction ava
 | [API Reference](docs/guides/api-reference.md) | All 30 tools + MCP resources schema |
 | [Conversation Memory Guide](docs/guides/conversation-memory.md) | Import transcripts, use palace metadata filters, build wake-up packs |
 | [MemPalace Operations Guide](docs/guides/mempalace-operations.md) | AAAK lessons, diary flows, drawers/closets/tunnels, and profile presets |
+| [pgvector Backend](docs/guides/pgvector-backend.md) | **v0.16.0 Phase 2** — Postgres + `vector` extension for semantic search. HNSW tuning, managed-Postgres setup, migration ownership |
+| [Postgres State Backend](docs/guides/postgres-state-backend.md) | **v0.16.0 Phase 3** — Full `StateStore` trait on Postgres. tsvector FTS, schema v7, sync-over-async bridge, pool sizing |
+| [Multi-Backend Operations](docs/guides/multi-backend-operations.md) | **v0.16.0** — Backend matrix, env-var selection (`THE_ONE_STATE_TYPE`/`THE_ONE_VECTOR_TYPE`), deployment topologies |
 | [Redis Vector Backend](docs/guides/redis-vector-backend.md) | Optional Redis/RediSearch backend settings and persistence expectations |
 | [Conversation Memory Benchmarking](docs/benchmarks/conversation-memory-benchmark.md) | Repro checklist for long-memory evaluation runs |
 | [MCP Resources Guide](docs/guides/mcp-resources.md) | `resources/list`, `resources/read`, `the-one://` URI scheme |
@@ -181,20 +214,23 @@ bash scripts/build.sh release --status # check workflow progress
 
 Releases are **manual only** — tagging does not auto-trigger builds. You decide when to build artifacts.
 
-## Stats (v0.14.3)
+## Stats (v0.16.0-phase3)
 
 | Metric | Count |
 |--------|-------|
 | MCP Tools | 30 |
 | MCP Resource Types | 3 (`docs`, `project`, `catalog`) |
 | Admin UI Pages | 8 (home, dashboard, ingest, graph, images, config, audit, swagger) |
-| Tests | 387 passing (+1 ignored) |
-| Rust LOC | ~26,500 |
+| Tests (default build) | 466 passing (+1 ignored) |
+| Tests (`--features pg-state,pg-vectors`) | 495 passing (+1 ignored) |
+| Rust LOC | ~30,000 |
 | JSON Schemas | 35 |
 | Catalog Tools | 365 across 10 languages + 8 categories |
 | Supported Code Languages (chunker) | 13 |
 | `maintain` actions | 15 |
 | Metrics counters | 15 |
+| Vector Backends | 3 (Qdrant default, pgvector, Redis-Vector) |
+| State Store Backends | 2 (SQLite default, Postgres) |
 | Supported Platforms | 6 (Linux/macOS/Windows x86-64 + ARM64) |
 | Supported AI CLIs | 4 (Claude Code, Gemini CLI, OpenCode, Codex) |
 

@@ -276,6 +276,236 @@ and loads:
 2. `~/.the-one/registry/custom-<client>.json` (per-CLI, e.g. `custom-claude.json`)
 3. `~/.the-one/registry/recommended.json` (curated recommendations)
 
+## Multi-Backend Architecture (v0.16.0+)
+
+v0.16.0 made persistence **pluggable along two orthogonal axes** — state
+store and vector backend — without changing any broker handler code.
+This section documents the architectural unlock.
+
+### The two traits (Phase A — v0.16.0-rc1)
+
+Phase A ships two parallel traits, one per axis:
+
+```rust
+// crates/the-one-memory/src/vector_backend.rs
+#[async_trait]
+pub trait VectorBackend: Send + Sync {
+    fn capabilities(&self) -> BackendCapabilities;
+    async fn ensure_collection(&self, dims: usize) -> Result<(), String>;
+    async fn upsert_chunks(&self, points: Vec<VectorPoint>) -> Result<(), String>;
+    async fn search_chunks(&self, query: Vec<f32>, top_k: usize, threshold: f32)
+        -> Result<Vec<VectorHit>, String>;
+    // ...plus entity, relation, hybrid, persistence-verification methods
+}
+
+// crates/the-one-core/src/state_store.rs
+pub trait StateStore: Send {
+    fn project_id(&self) -> &str;
+    fn schema_version(&self) -> Result<i64, CoreError>;
+    fn capabilities(&self) -> StateStoreCapabilities;
+    fn upsert_project_profile(&self, profile_json: &str) -> Result<(), CoreError>;
+    fn record_audit(&self, record: &AuditRecord) -> Result<(), CoreError>;
+    fn upsert_diary_entry(&self, entry: &DiaryEntry) -> Result<(), CoreError>;
+    // ...26 methods total covering every broker-callable write/read
+}
+```
+
+**Key design choice**: `VectorBackend` is async (`#[async_trait]`),
+`StateStore` is sync. The reason is `rusqlite::Connection`: it's
+`Send + !Sync`, so holding a connection guard across an `.await` is
+impossible by construction. Async state-store methods would need a
+tokio mutex, but that reintroduces the "guard held across `.await`"
+deadlock pattern the sync trait prevents. sqlx-based backends
+(`PostgresStateStore`) bridge async-to-sync internally — see the
+"Sync-over-async bridge" section below.
+
+**Capability reporting**: `BackendCapabilities` and
+`StateStoreCapabilities` structs are static per-backend reports.
+Callers inspect `.hybrid`, `.fts`, `.transactions`, etc. to decide
+whether to route an operation through the backend or take a fallback
+path. Phase 2's pgvector sets `hybrid = false` (Decision D deferred);
+Phase 3's Postgres state sets every capability `true`.
+
+### Broker cache + sync closure chokepoint (Phase 1 — v0.16.0-phase1)
+
+The broker holds a per-project cache of state stores:
+
+```rust
+state_by_project: RwLock<HashMap<String, Arc<std::sync::Mutex<Box<dyn StateStore + Send>>>>>
+```
+
+Every broker method that needs state-store access routes through a
+single chokepoint:
+
+```rust
+self.with_state_store(project_root, project_id, |store: &dyn StateStore| {
+    store.upsert_project_profile(profile_json)?;
+    store.record_audit(&record)?;
+    Ok(some_value)
+}).await
+```
+
+The closure is **synchronous** on purpose. The inner lock is
+`std::sync::Mutex` (deliberately NOT `tokio::sync::Mutex`) so its
+guard is `!Send`. The compiler refuses any attempt to hold the guard
+across an `.await` point — which is exactly the restriction that
+prevents Postgres/Redis pool checkouts from being held across
+asynchronous work and causing pool exhaustion under load.
+
+`get_or_init_state_store` uses a **double-check-under-write-lock**
+pattern so the cold path constructs the new store OUTSIDE the write
+lock. Two concurrent cache-miss requests for different projects don't
+serialize through the factory — load-bearing for Phase 3+ where
+factories are async and do network I/O (TCP + TLS handshake + sqlx
+`SET statement_timeout` on every fresh pool connection).
+
+### Env var selection scheme (Phase 2 — v0.16.0-phase2)
+
+Four env vars, two per axis, parsed once at broker construction by
+`BackendSelection::from_env`:
+
+```bash
+THE_ONE_STATE_TYPE=<sqlite|postgres|redis|postgres-combined|redis-combined>
+THE_ONE_STATE_URL=<connection string>
+THE_ONE_VECTOR_TYPE=<qdrant|pgvector|redis-vectors|postgres-combined|redis-combined>
+THE_ONE_VECTOR_URL=<connection string>
+```
+
+**Closed enums + fail-loud validation** — unknown TYPE values, missing
+URLs, asymmetric specification (one side set, other unset), mismatched
+combined TYPEs, and mismatched combined URLs all produce
+`CoreError::InvalidProjectConfig` with targeted error messages at
+startup. The parser is covered by 12 unit tests (8 negative + 4
+positive controls, all `temp_env::with_vars`-isolated).
+
+**Secrets live in env vars**, tuning knobs live in `config.json`
+(`vector_pgvector` and `state_postgres` blocks). Clean separation:
+credentials in `$THE_ONE_STATE_URL`, HNSW parameters in
+`config.json`. See [configuration.md](configuration.md#multi-backend-selection-v0160)
+for the validation rule table and the field-by-field tuning surface.
+
+### pgvector backend (Phase 2 — v0.16.0-phase2)
+
+`crates/the-one-memory/src/pg_vector.rs` (~860 LOC) implements
+`VectorBackend` against pgvector. Key elements:
+
+- **Defensive extension preflight** — `preflight_vector_extension`
+  runs three probe queries (`pg_extension`, `pg_available_extensions`,
+  `CREATE EXTENSION`) with targeted error messages for Supabase / AWS
+  RDS / GCP Cloud SQL / Azure Flexible Server / self-hosted.
+- **Hand-rolled migration runner** — replaces `sqlx::migrate!` because
+  sqlx's `migrate` feature transitively references `sqlx-sqlite?/…`
+  weak-deps that cargo's `links` conflict check pulls into the graph,
+  colliding with rusqlite 0.39's `libsqlite3-sys ^0.37`. Runner uses
+  `include_str!` to embed `.sql` files, SHA-256 checksums for drift
+  detection, and a `the_one.pgvector_migrations` tracking table.
+- **Batched upserts** via `INSERT ... SELECT * FROM UNNEST($1::text[],
+  $2::vector[], ...)` — one round trip per batch, no N-query loop.
+- **HNSW query-time tuning** — `SET LOCAL hnsw.ef_search = N` inside
+  a per-search transaction. Scoped to the transaction so the setting
+  doesn't leak to other pool connections.
+- **Dim hardcoded to 1024** (Decision C, BGE-large-en-v1.5 quality
+  tier) — the backend constructor refuses to boot if the live provider
+  reports a different dim.
+
+### PostgresStateStore backend (Phase 3 — v0.16.0-phase3)
+
+`crates/the-one-core/src/storage/postgres.rs` (~1,350 LOC) implements
+every `StateStore` trait method on Postgres. Key elements:
+
+- **Sync-over-async bridge** — every trait method wraps sqlx calls in
+  `block_on(async { ... })`:
+
+  ```rust
+  fn block_on<F, R>(fut: F) -> R
+  where
+      F: std::future::Future<Output = R>,
+  {
+      tokio::task::block_in_place(|| {
+          tokio::runtime::Handle::try_current()
+              .expect("must be called from a tokio runtime")
+              .block_on(fut)
+      })
+  }
+  ```
+
+  `block_in_place` tells tokio "this worker is about to do blocking
+  work" so other async tasks migrate off; `Handle::current().block_on`
+  drives the future to completion; the worker resumes async duty
+  afterward. **Requires multi-threaded tokio runtime** — the broker
+  binary's `#[tokio::main]` default satisfies this; tests use
+  `#[tokio::test(flavor = "multi_thread")]`.
+
+- **FTS5 → tsvector translation** — SQLite's `diary_entries_fts`
+  virtual table becomes a `content_tsv TSVECTOR` column on
+  `diary_entries` + a GIN index + `websearch_to_tsquery('simple', $1)`
+  for matching + `ts_rank` for ordering + LIKE fallback for empty
+  tsquery inputs. `'simple'` (not `'english'`) tokenization because
+  stemming breaks exact matches on English code identifiers and
+  produces wrong results on non-English content.
+
+- **Schema v7 parity in one migration** — Postgres ships
+  `audit_events.outcome` + `error_kind` columns from day one (no
+  incremental v1..v6 walk-through). `schema_version()` returns the
+  highest applied migration version (`1` for Phase 3), not the SQLite
+  schema version (`7`). Per-backend number, not cross-backend parity.
+
+- **BIGINT epoch_ms throughout** — no chrono, no TIMESTAMPTZ. Matches
+  Phase 2's pgvector convention and side-steps the cargo `links`
+  conflict on sqlx's `chrono` feature permanently.
+
+- **New `CoreError::Postgres(String)` variant** — surgical addition
+  (3 touches: enum, label in `error_kind_label`, exhaustive test in
+  `production_hardening.rs`). The wire-level sanitizer passes the
+  short `"postgres"` label to clients and keeps full error text in
+  `tracing::error!` logs.
+
+### Factory dispatcher (Phase 2 + Phase 3)
+
+`McpBroker::state_store_factory` is `async` as of Phase 3 (Phase 1's
+doc comment pre-announced this). It branches on the parsed
+`BackendSelection.state`:
+
+```rust
+async fn state_store_factory(
+    &self,
+    project_root: &Path,
+    project_id: &str,
+) -> Result<Box<dyn StateStore + Send>, CoreError> {
+    match self.backend_selection.state {
+        StateTypeChoice::Sqlite => Ok(Box::new(ProjectDatabase::open(...)?)),
+        StateTypeChoice::Postgres => self.construct_postgres_state_store(project_id).await,
+        StateTypeChoice::Redis => Err(CoreError::NotEnabled("Phase 5".into())),
+        StateTypeChoice::PostgresCombined => Err(CoreError::NotEnabled("Phase 4".into())),
+        StateTypeChoice::RedisCombined => Err(CoreError::NotEnabled("Phase 6".into())),
+    }
+}
+```
+
+The vector axis has a parallel branch in `build_memory_engine` that
+short-circuits to `build_pgvector_memory_engine` when
+`BackendSelection.vector == Pgvector`, falling through to the legacy
+`config.vector_backend` string-based path otherwise.
+
+### Cross-phase relationship
+
+| Phase | What it ships | What it unlocks |
+|---|---|---|
+| A (rc1) | Two traits + capability structs + Qdrant/Redis/SQLite impls | Everything below |
+| 1 | `state_by_project` cache + sync-closure chokepoint | Phase 3+ async factories without pool deadlocks |
+| 2 | pgvector backend + env var parser + startup validator | Alternative vector backend; env-driven selection |
+| 3 | PostgresStateStore + `state_store_factory` async | Alternative state backend; cross-axis deployment |
+| 4 (pending) | Combined Postgres+pgvector (one pool, two trait roles) | Transactional writes spanning state + vectors |
+| 5 (pending) | Redis state in three durability modes | Cache + persistent + AOF deployments |
+| 6 (pending) | Combined Redis+RediSearch | One fred client, two trait roles |
+| 7 (pending) | Redis-Vector entity/relation parity + v0.16.0 GA | Close the capability gap across backends |
+
+See [multi-backend-operations.md](multi-backend-operations.md) for
+the operator-facing deployment matrix and
+[pgvector-backend.md](pgvector-backend.md) /
+[postgres-state-backend.md](postgres-state-backend.md) for the
+per-backend setup guides.
+
 ## Tool Dispatch Architecture
 
 The 19 MCP tools are split into two groups:
