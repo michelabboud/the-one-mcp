@@ -17,7 +17,6 @@
 
 use the_one_core::contracts::{
     AaakLesson, ApprovalScope, DiaryEntry, MemoryNavigationNode, MemoryNavigationNodeKind,
-    MemoryNavigationTunnel,
 };
 use the_one_core::state_store::StateStore;
 use the_one_core::storage::redis::{RedisStateConfig, RedisStateStore};

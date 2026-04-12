@@ -127,6 +127,11 @@ pub struct McpBroker {
     /// stable struct shape via `..Default::default()` patterns).
     #[cfg(all(feature = "pg-state", feature = "pg-vectors"))]
     combined_pg_pool_by_project: RwLock<HashMap<String, sqlx::postgres::PgPool>>,
+    /// v0.16.0 Phase 6 — per-project shared `fred::Client` cache for
+    /// the combined Redis+RediSearch backend. Same pattern as the
+    /// Postgres combined pool cache.
+    #[cfg(all(feature = "redis-state", feature = "redis-vectors"))]
+    combined_redis_client_by_project: RwLock<HashMap<String, fred::clients::Client>>,
     /// v0.16.0 Phase 2 — parsed once at broker construction from the
     /// four `THE_ONE_{STATE,VECTOR}_{TYPE,URL}` env vars. Every
     /// factory call site reads this instead of re-parsing the env
@@ -240,6 +245,8 @@ impl McpBroker {
             state_by_project: RwLock::new(HashMap::new()),
             #[cfg(all(feature = "pg-state", feature = "pg-vectors"))]
             combined_pg_pool_by_project: RwLock::new(HashMap::new()),
+            #[cfg(all(feature = "redis-state", feature = "redis-vectors"))]
+            combined_redis_client_by_project: RwLock::new(HashMap::new()),
             backend_selection,
             global_registry_path,
             policy,
@@ -342,9 +349,10 @@ impl McpBroker {
                 self.construct_postgres_combined_state_store(project_root, project_id)
                     .await
             }
-            StateTypeChoice::RedisCombined => Err(CoreError::NotEnabled(
-                "THE_ONE_STATE_TYPE=redis-combined is planned for Phase 6".to_string(),
-            )),
+            StateTypeChoice::RedisCombined => {
+                self.construct_redis_combined_state_store(project_root, project_id)
+                    .await
+            }
         }
     }
 
@@ -528,6 +536,112 @@ impl McpBroker {
         }
     }
 
+    /// v0.16.0 Phase 6 — combined Redis+RediSearch state store.
+    /// Same refined Option Y pattern as Phase 4's Postgres combined:
+    /// gets a shared fred::Client from a per-project cache, constructs
+    /// a `RedisStateStore::from_client` from the shared client.
+    async fn construct_redis_combined_state_store(
+        &self,
+        project_root: &Path,
+        project_id: &str,
+    ) -> Result<Box<dyn StateStore + Send>, CoreError> {
+        #[cfg(not(all(feature = "redis-state", feature = "redis-vectors")))]
+        {
+            let _ = (project_root, project_id);
+            Err(CoreError::InvalidProjectConfig(
+                "THE_ONE_STATE_TYPE=redis-combined requires BOTH `redis-state` and \
+                 `redis-vectors` Cargo features; this binary was built without at \
+                 least one. Rebuild with `--features redis-state,redis-vectors`."
+                    .to_string(),
+            ))
+        }
+
+        #[cfg(all(feature = "redis-state", feature = "redis-vectors"))]
+        {
+            use the_one_core::storage::redis::{RedisStateConfig, RedisStateStore};
+
+            let client = self
+                .get_or_init_combined_redis_client(project_root, project_id)
+                .await?;
+
+            let app_config = AppConfig::load(project_root, RuntimeOverrides::default())?;
+            let redis_config = RedisStateConfig {
+                prefix: app_config.state_redis.prefix.clone(),
+                require_aof: app_config.state_redis.require_aof,
+                db_number: app_config.state_redis.db_number,
+            };
+
+            let store = RedisStateStore::from_client(client, &redis_config, project_id).await?;
+            Ok(Box::new(store))
+        }
+    }
+
+    /// v0.16.0 Phase 6 — get or create a shared fred::Client for the
+    /// combined Redis+RediSearch backend.
+    #[cfg(all(feature = "redis-state", feature = "redis-vectors"))]
+    async fn get_or_init_combined_redis_client(
+        &self,
+        _project_root: &Path,
+        project_id: &str,
+    ) -> Result<fred::clients::Client, CoreError> {
+        let key = format!("redis_combined::{project_id}");
+
+        // Fast path.
+        if let Some(existing) = self.combined_redis_client_by_project.read().await.get(&key) {
+            return Ok(existing.clone());
+        }
+
+        // Cold path — build client from URL.
+        let url = self.backend_selection.state_url.as_deref().ok_or_else(|| {
+            CoreError::InvalidProjectConfig(
+                "THE_ONE_STATE_TYPE=redis-combined requires THE_ONE_STATE_URL".to_string(),
+            )
+        })?;
+
+        let config = fred::types::config::Config::from_url(url)
+            .map_err(|e| CoreError::Redis(format!("invalid url: {e}")))?;
+        let client = fred::clients::Client::new(config, None, None, None);
+        client
+            .init()
+            .await
+            .map_err(|e| CoreError::Redis(format!("connect: {e}")))?;
+
+        // AOF check if configured.
+        {
+            use the_one_core::config::AppConfig as AC;
+            if let Ok(app_config) = AC::load(_project_root, RuntimeOverrides::default()) {
+                if app_config.state_redis.require_aof {
+                    // Reuse the verify_aof logic from the state store module.
+                    let info: String = client
+                        .info(Some(fred::types::InfoKind::Persistence))
+                        .await
+                        .map_err(|e| CoreError::Redis(format!("INFO persistence: {e}")))?;
+                    let aof_on = info
+                        .lines()
+                        .find(|l| l.starts_with("aof_enabled:"))
+                        .and_then(|l| l.strip_prefix("aof_enabled:"))
+                        .map(|v| v.trim() == "1")
+                        .unwrap_or(false);
+                    if !aof_on {
+                        let _ = client.quit().await;
+                        return Err(CoreError::InvalidProjectConfig(
+                            "redis-combined with require_aof=true but aof_enabled:0".to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+
+        // Double-check under write lock.
+        let mut map = self.combined_redis_client_by_project.write().await;
+        if let Some(existing) = map.get(&key) {
+            let _ = client.quit().await;
+            return Ok(existing.clone());
+        }
+        map.insert(key, client.clone());
+        Ok(client)
+    }
+
     /// Look up the cached state store for a project, constructing it on
     /// first access.
     ///
@@ -640,6 +754,14 @@ impl McpBroker {
             let mut pools = self.combined_pg_pool_by_project.write().await;
             for (_, pool) in pools.drain() {
                 pool.close().await;
+            }
+        }
+
+        #[cfg(all(feature = "redis-state", feature = "redis-vectors"))]
+        {
+            let mut clients = self.combined_redis_client_by_project.write().await;
+            for (_, client) in clients.drain() {
+                let _ = client.quit().await;
             }
         }
 
@@ -809,6 +931,18 @@ impl McpBroker {
         // builder owns both trait roles. The state-store factory
         // runs its own shared-pool lookup via the same cache, so
         // the pool is only built once across the two trait roles.
+        // v0.16.0 Phase 6 — combined Redis+RediSearch fast path.
+        if self.backend_selection.vector == VectorTypeChoice::RedisCombined {
+            return self
+                .build_redis_combined_memory_engine(
+                    &config,
+                    project_root,
+                    project_id,
+                    max_chunk_tokens,
+                )
+                .await;
+        }
+
         if self.backend_selection.vector == VectorTypeChoice::PostgresCombined {
             return self
                 .build_postgres_combined_memory_engine(
@@ -1366,6 +1500,92 @@ impl McpBroker {
             }
 
             Ok(engine)
+        }
+    }
+
+    /// v0.16.0 Phase 6 — combined Redis+RediSearch memory engine.
+    /// Same refined Option Y pattern as Phase 4's Postgres combined:
+    /// gets a shared fred::Client, builds a `RedisVectorStore::new`
+    /// from the shared client, wraps in a `MemoryEngine`.
+    async fn build_redis_combined_memory_engine(
+        &self,
+        config: &AppConfig,
+        project_root: &Path,
+        project_id: &str,
+        max_chunk_tokens: usize,
+    ) -> Result<MemoryEngine, CoreError> {
+        #[cfg(not(all(feature = "redis-state", feature = "redis-vectors")))]
+        {
+            let _ = (config, project_root, project_id, max_chunk_tokens);
+            Err(CoreError::InvalidProjectConfig(
+                "THE_ONE_VECTOR_TYPE=redis-combined requires BOTH `redis-state` and \
+                 `redis-vectors` Cargo features."
+                    .to_string(),
+            ))
+        }
+
+        #[cfg(all(feature = "redis-state", feature = "redis-vectors"))]
+        {
+            let client = self
+                .get_or_init_combined_redis_client(project_root, project_id)
+                .await?;
+
+            let redis_index_name = config
+                .redis_index_name
+                .clone()
+                .unwrap_or_else(|| "the_one_memories".to_string());
+
+            // Build the embedding provider (same local/api split as other paths).
+            if config.embedding_provider == "api" {
+                return Err(CoreError::InvalidProjectConfig(
+                    "redis-combined currently supports local embeddings only; set \
+                     embedding_provider to 'local'"
+                        .to_string(),
+                ));
+            }
+
+            #[cfg(feature = "local-embeddings")]
+            {
+                let provider =
+                    the_one_memory::embeddings::FastEmbedProvider::new(&config.embedding_model)
+                        .map_err(CoreError::Embedding)?;
+                let dim = provider.dimensions();
+
+                let redis_store =
+                    the_one_memory::RedisVectorStore::new(client, &redis_index_name, dim)
+                        .map_err(CoreError::Embedding)?;
+
+                let mut engine = MemoryEngine::new_with_backend(
+                    Box::new(provider),
+                    Some(Box::new(redis_store)),
+                    max_chunk_tokens,
+                );
+                engine.set_project_id(project_id.to_string());
+
+                #[cfg(feature = "local-embeddings")]
+                if config.reranker_enabled {
+                    if let Ok(reranker) =
+                        the_one_memory::reranker::FastEmbedReranker::new(&config.reranker_model)
+                    {
+                        engine.set_reranker(Box::new(reranker));
+                    }
+                }
+
+                let graph_path = config.project_state_dir.join("knowledge_graph.json");
+                if let Ok(graph) =
+                    the_one_memory::graph::KnowledgeGraph::load_from_file(&graph_path)
+                {
+                    *engine.graph_mut() = graph;
+                }
+
+                Ok(engine)
+            }
+            #[cfg(not(feature = "local-embeddings"))]
+            {
+                Err(CoreError::Embedding(
+                    "redis-combined requires `local-embeddings` Cargo feature".to_string(),
+                ))
+            }
         }
     }
 

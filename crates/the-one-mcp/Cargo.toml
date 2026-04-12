@@ -49,7 +49,7 @@ pg-state = ["the-one-core/pg-state", "dep:sqlx"]
 # additionally activates Phase 6's combined shared-client path when
 # both THE_ONE_STATE_TYPE and THE_ONE_VECTOR_TYPE are set to
 # `redis-combined` with byte-identical URLs.
-redis-state = ["the-one-core/redis-state"]
+redis-state = ["the-one-core/redis-state", "dep:fred"]
 
 [[bin]]
 name = "the-one-mcp"
@@ -90,5 +90,10 @@ sqlx = { version = "0.8.6", default-features = false, features = [
     "postgres",
     "macros",
 ], optional = true }
+# v0.16.0 Phase 6 — fred as a direct optional dep so the broker's
+# combined Redis+RediSearch module can cache fred::Client handles
+# in `combined_redis_client_by_project`. Same pattern as sqlx for
+# the Postgres combined path.
+fred = { workspace = true, optional = true }
 
 [dev-dependencies]
