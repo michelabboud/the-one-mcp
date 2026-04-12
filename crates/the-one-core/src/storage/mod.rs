@@ -6,3 +6,8 @@ pub mod sqlite;
 // that Phase 2's pgvector backend worked around).
 #[cfg(feature = "pg-state")]
 pub mod postgres;
+
+// v0.16.0 Phase 5 — Redis StateStore backend (cache + persistent
+// modes). Gated on `redis-state` feature; off by default.
+#[cfg(feature = "redis-state")]
+pub mod redis;

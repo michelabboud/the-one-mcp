@@ -1,3 +1,10 @@
+// v0.16.0 Phase 5: fred's async client types increase the async
+// state-machine depth past rustc's default recursion limit of 128
+// when `redis-state` is enabled alongside the existing async
+// broker factories. 256 is the standard bump for complex async
+// codebases (tokio docs recommend it).
+#![recursion_limit = "256"]
+
 pub mod adapter_core;
 pub mod api;
 pub mod backup;

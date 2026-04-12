@@ -103,6 +103,7 @@ fn c1_error_kind_label_covers_every_core_error_variant() {
         (CoreError::NotEnabled("x".into()), "not_enabled"),
         (CoreError::InvalidRequest("x".into()), "invalid_request"),
         (CoreError::Postgres("x".into()), "postgres"),
+        (CoreError::Redis("x".into()), "redis"),
     ];
     for (err, expected) in cases {
         assert_eq!(error_kind_label(err), *expected);

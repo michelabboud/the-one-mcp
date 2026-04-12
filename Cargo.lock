@@ -4279,6 +4279,7 @@ name = "the-one-core"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "fred",
  "rusqlite",
  "serde",
  "serde_json",

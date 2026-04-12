@@ -42,6 +42,14 @@ pg-vectors = ["the-one-memory/pg-vectors", "dep:sqlx"]
 # instead of the two split-pool factories. No separate feature flag
 # required; the dispatcher is enabled whenever both features are on.
 pg-state = ["the-one-core/pg-state", "dep:sqlx"]
+# v0.16.0 Phase 5 — Redis StateStore backend. Passthrough to
+# the-one-core's `redis-state` feature. Composable with `redis-vectors`
+# (the existing memory-crate feature): `--features redis-state,redis-vectors`
+# gives you Redis state + Redis vectors in split-client mode, and
+# additionally activates Phase 6's combined shared-client path when
+# both THE_ONE_STATE_TYPE and THE_ONE_VECTOR_TYPE are set to
+# `redis-combined` with byte-identical URLs.
+redis-state = ["the-one-core/redis-state"]
 
 [[bin]]
 name = "the-one-mcp"

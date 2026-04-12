@@ -137,6 +137,68 @@ impl Default for StatePostgresConfig {
     }
 }
 
+// ── v0.16.0 Phase 5 Redis state defaults ─────────────────────────────
+
+fn default_redis_state_prefix() -> String {
+    "the_one_state".to_string()
+}
+
+fn default_redis_state_require_aof() -> bool {
+    false
+}
+
+fn default_redis_state_db_number() -> u8 {
+    0
+}
+
+/// Runtime configuration for the Redis `StateStore` backend
+/// (v0.16.0 Phase 5). Read from `config.json` under `state_redis`.
+///
+/// ## Modes
+///
+/// The durability mode is **not** a config field — it's derived from
+/// `require_aof`:
+///
+/// - `require_aof = false` → **cache mode**. The store works but
+///   makes zero persistence guarantees. Data is lost on Redis
+///   restart.
+/// - `require_aof = true` → **persistent mode**. At startup, the
+///   store queries `INFO persistence` and refuses to boot if
+///   `aof_enabled:0`. Operators must configure Redis with
+///   `appendonly yes` and an appropriate `appendfsync` setting.
+///
+/// A third mode — *combined-with-RediSearch* — is handled by
+/// Phase 6's dispatcher, not by this config.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct StateRedisConfig {
+    /// Key prefix for all state keys. Derived from `{project_id}`
+    /// at runtime to give automatic multi-tenant isolation.
+    /// Default: `"the_one_state"`. The actual per-project prefix
+    /// is `{prefix}:{project_id}:`.
+    #[serde(default = "default_redis_state_prefix")]
+    pub prefix: String,
+
+    /// If `true`, the store calls `INFO persistence` at startup
+    /// and refuses to boot if `aof_enabled:0`. Set this to `true`
+    /// for production deployments where state loss is unacceptable.
+    #[serde(default = "default_redis_state_require_aof")]
+    pub require_aof: bool,
+
+    /// Redis database number (`SELECT <db>`). Default 0.
+    #[serde(default = "default_redis_state_db_number")]
+    pub db_number: u8,
+}
+
+impl Default for StateRedisConfig {
+    fn default() -> Self {
+        Self {
+            prefix: default_redis_state_prefix(),
+            require_aof: default_redis_state_require_aof(),
+            db_number: default_redis_state_db_number(),
+        }
+    }
+}
+
 // ── v0.16.0 Phase 2 pgvector defaults ────────────────────────────────
 //
 // Every field on `VectorPgvectorConfig` has a serde `default = "..."`
@@ -533,6 +595,12 @@ pub struct AppConfig {
     /// filled in; operators override via the `state_postgres` key in
     /// `config.json`.
     pub state_postgres: StatePostgresConfig,
+
+    /// v0.16.0 Phase 5 — Redis StateStore backend tuning (prefix,
+    /// require_aof, db_number). Always present with defaults filled
+    /// in; operators override via the `state_redis` key in
+    /// `config.json`.
+    pub state_redis: StateRedisConfig,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -589,6 +657,9 @@ struct FileConfig {
     // backend don't carry an empty block. Filled in from
     // `StatePostgresConfig::default()` on resolution.
     state_postgres: Option<StatePostgresConfig>,
+    // v0.16.0 Phase 5 — same pattern as state_postgres. Optional so
+    // operators who don't use Redis state don't carry an empty block.
+    state_redis: Option<StateRedisConfig>,
 }
 
 impl AppConfig {
@@ -647,6 +718,8 @@ impl AppConfig {
             vector_pgvector: None,
             // v0.16.0 Phase 3 — same pattern as vector_pgvector.
             state_postgres: None,
+            // v0.16.0 Phase 5 — same pattern.
+            state_redis: None,
         };
 
         apply_file_layer(&global_state_dir.join("config.json"), &mut merged)?;
@@ -761,6 +834,8 @@ impl AppConfig {
             vector_pgvector: merged.vector_pgvector.unwrap_or_default(),
             // v0.16.0 Phase 3 — same treatment.
             state_postgres: merged.state_postgres.unwrap_or_default(),
+            // v0.16.0 Phase 5 — same treatment.
+            state_redis: merged.state_redis.unwrap_or_default(),
         })
     }
 }

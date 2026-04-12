@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 //! Integration test for the stdio JSON-RPC write path.
 //!
 //! # Motivation

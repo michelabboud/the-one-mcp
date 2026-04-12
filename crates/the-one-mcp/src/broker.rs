@@ -334,11 +334,10 @@ impl McpBroker {
                 self.construct_postgres_state_store(project_root, project_id)
                     .await
             }
-            StateTypeChoice::Redis => Err(CoreError::NotEnabled(
-                "THE_ONE_STATE_TYPE=redis is planned for Phase 5; use sqlite or postgres \
-                 until then"
-                    .to_string(),
-            )),
+            StateTypeChoice::Redis => {
+                self.construct_redis_state_store(project_root, project_id)
+                    .await
+            }
             StateTypeChoice::PostgresCombined => {
                 self.construct_postgres_combined_state_store(project_root, project_id)
                     .await
@@ -485,6 +484,46 @@ impl McpBroker {
                 crate::postgres_combined::mirror_state_postgres_config(&app_config.state_postgres);
 
             let store = PostgresStateStore::from_pool(pool, &pg_config, project_id);
+            Ok(Box::new(store))
+        }
+    }
+
+    /// v0.16.0 Phase 5 — Redis state store (two modes: cache + persistent).
+    /// When `redis-state` is NOT compiled in, returns `InvalidProjectConfig`.
+    async fn construct_redis_state_store(
+        &self,
+        project_root: &Path,
+        project_id: &str,
+    ) -> Result<Box<dyn StateStore + Send>, CoreError> {
+        #[cfg(not(feature = "redis-state"))]
+        {
+            let _ = (project_root, project_id);
+            Err(CoreError::InvalidProjectConfig(
+                "THE_ONE_STATE_TYPE=redis requires the `redis-state` Cargo feature; this \
+                 binary was built without it. Rebuild with `--features redis-state` or unset \
+                 THE_ONE_STATE_TYPE to use the default SQLite backend."
+                    .to_string(),
+            ))
+        }
+
+        #[cfg(feature = "redis-state")]
+        {
+            use the_one_core::storage::redis::{RedisStateConfig, RedisStateStore};
+
+            let url = self.backend_selection.state_url.as_deref().ok_or_else(|| {
+                CoreError::InvalidProjectConfig(
+                    "THE_ONE_STATE_TYPE=redis requires THE_ONE_STATE_URL to be set".to_string(),
+                )
+            })?;
+
+            let app_config = AppConfig::load(project_root, RuntimeOverrides::default())?;
+            let redis_config = RedisStateConfig {
+                prefix: app_config.state_redis.prefix.clone(),
+                require_aof: app_config.state_redis.require_aof,
+                db_number: app_config.state_redis.db_number,
+            };
+
+            let store = RedisStateStore::new(&redis_config, url, project_id).await?;
             Ok(Box::new(store))
         }
     }
