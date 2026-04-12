@@ -584,6 +584,8 @@ impl McpBroker {
         _project_root: &Path,
         project_id: &str,
     ) -> Result<fred::clients::Client, CoreError> {
+        use fred::interfaces::ClientLike;
+
         let key = format!("redis_combined::{project_id}");
 
         // Fast path.
@@ -759,6 +761,7 @@ impl McpBroker {
 
         #[cfg(all(feature = "redis-state", feature = "redis-vectors"))]
         {
+            use fred::interfaces::ClientLike;
             let mut clients = self.combined_redis_client_by_project.write().await;
             for (_, client) in clients.drain() {
                 let _ = client.quit().await;
@@ -1546,14 +1549,19 @@ impl McpBroker {
 
             #[cfg(feature = "local-embeddings")]
             {
+                use the_one_memory::embeddings::EmbeddingProvider as _;
+
                 let provider =
                     the_one_memory::embeddings::FastEmbedProvider::new(&config.embedding_model)
                         .map_err(CoreError::Embedding)?;
                 let dim = provider.dimensions();
 
-                let redis_store =
-                    the_one_memory::RedisVectorStore::new(client, &redis_index_name, dim)
-                        .map_err(CoreError::Embedding)?;
+                let redis_store = the_one_memory::redis_vectors::RedisVectorStore::new(
+                    client,
+                    &redis_index_name,
+                    dim,
+                )
+                .map_err(CoreError::Embedding)?;
 
                 let mut engine = MemoryEngine::new_with_backend(
                     Box::new(provider),

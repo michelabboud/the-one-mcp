@@ -427,11 +427,223 @@ impl RedisVectorStore {
         parse_search_results(value, &self.chunk_key_prefix(), score_threshold)
     }
 
+    // ── Entity / relation support (Phase 7) ─────────────────────────
+
+    fn entity_key(&self, entity_id: &str) -> String {
+        format!("mem:{}:entity:{}", self.index_name, entity_id)
+    }
+
+    fn entity_key_prefix(&self) -> String {
+        format!("mem:{}:entity:", self.index_name)
+    }
+
+    fn entity_index_name(&self) -> String {
+        format!("{}_entities", self.index_name)
+    }
+
+    fn relation_key(&self, relation_id: &str) -> String {
+        format!("mem:{}:relation:{}", self.index_name, relation_id)
+    }
+
+    fn relation_key_prefix(&self) -> String {
+        format!("mem:{}:relation:", self.index_name)
+    }
+
+    fn relation_index_name(&self) -> String {
+        format!("{}_relations", self.index_name)
+    }
+
+    async fn ensure_entity_index(&self) -> Result<(), String> {
+        self.ensure_started().await?;
+
+        let idx_name = self.entity_index_name();
+        let prefix = self.entity_key_prefix();
+
+        let schema = vec![
+            SearchSchema {
+                field_name: "name".into(),
+                alias: None,
+                kind: SearchSchemaKind::Text {
+                    sortable: false,
+                    unf: false,
+                    nostem: true,
+                    phonetic: None,
+                    weight: None,
+                    withsuffixtrie: false,
+                    noindex: false,
+                },
+            },
+            SearchSchema {
+                field_name: "entity_type".into(),
+                alias: None,
+                kind: SearchSchemaKind::Tag {
+                    sortable: false,
+                    unf: false,
+                    separator: None,
+                    casesensitive: false,
+                    withsuffixtrie: false,
+                    noindex: false,
+                },
+            },
+            SearchSchema {
+                field_name: "description".into(),
+                alias: None,
+                kind: SearchSchemaKind::Text {
+                    sortable: false,
+                    unf: false,
+                    nostem: false,
+                    phonetic: None,
+                    weight: None,
+                    withsuffixtrie: false,
+                    noindex: false,
+                },
+            },
+            SearchSchema {
+                field_name: "embedding".into(),
+                alias: None,
+                kind: SearchSchemaKind::Custom {
+                    name: "VECTOR".into(),
+                    arguments: vec![
+                        "HNSW".into(),
+                        6usize.try_into().map_err(|e| format!("{e}"))?,
+                        "TYPE".into(),
+                        "FLOAT32".into(),
+                        "DIM".into(),
+                        self.embedding_dim.try_into().map_err(|e| format!("{e}"))?,
+                        "DISTANCE_METRIC".into(),
+                        "COSINE".into(),
+                    ],
+                },
+            },
+        ];
+
+        let options = FtCreateOptions {
+            on: Some(IndexKind::Hash),
+            prefixes: vec![prefix.into()],
+            skipinitialscan: true,
+            ..Default::default()
+        };
+
+        match self
+            .client
+            .ft_create::<Value, _>(&idx_name, options, schema)
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(err) => {
+                let msg = err.to_string();
+                if msg.contains("already exists") {
+                    Ok(())
+                } else {
+                    Err(format!("entity index create: {msg}"))
+                }
+            }
+        }
+    }
+
+    async fn ensure_relation_index(&self) -> Result<(), String> {
+        self.ensure_started().await?;
+
+        let idx_name = self.relation_index_name();
+        let prefix = self.relation_key_prefix();
+
+        let schema = vec![
+            SearchSchema {
+                field_name: "source".into(),
+                alias: None,
+                kind: SearchSchemaKind::Tag {
+                    sortable: false,
+                    unf: false,
+                    separator: None,
+                    casesensitive: false,
+                    withsuffixtrie: false,
+                    noindex: false,
+                },
+            },
+            SearchSchema {
+                field_name: "target".into(),
+                alias: None,
+                kind: SearchSchemaKind::Tag {
+                    sortable: false,
+                    unf: false,
+                    separator: None,
+                    casesensitive: false,
+                    withsuffixtrie: false,
+                    noindex: false,
+                },
+            },
+            SearchSchema {
+                field_name: "relation_type".into(),
+                alias: None,
+                kind: SearchSchemaKind::Tag {
+                    sortable: false,
+                    unf: false,
+                    separator: None,
+                    casesensitive: false,
+                    withsuffixtrie: false,
+                    noindex: false,
+                },
+            },
+            SearchSchema {
+                field_name: "description".into(),
+                alias: None,
+                kind: SearchSchemaKind::Text {
+                    sortable: false,
+                    unf: false,
+                    nostem: false,
+                    phonetic: None,
+                    weight: None,
+                    withsuffixtrie: false,
+                    noindex: false,
+                },
+            },
+            SearchSchema {
+                field_name: "embedding".into(),
+                alias: None,
+                kind: SearchSchemaKind::Custom {
+                    name: "VECTOR".into(),
+                    arguments: vec![
+                        "HNSW".into(),
+                        6usize.try_into().map_err(|e| format!("{e}"))?,
+                        "TYPE".into(),
+                        "FLOAT32".into(),
+                        "DIM".into(),
+                        self.embedding_dim.try_into().map_err(|e| format!("{e}"))?,
+                        "DISTANCE_METRIC".into(),
+                        "COSINE".into(),
+                    ],
+                },
+            },
+        ];
+
+        let options = FtCreateOptions {
+            on: Some(IndexKind::Hash),
+            prefixes: vec![prefix.into()],
+            skipinitialscan: true,
+            ..Default::default()
+        };
+
+        match self
+            .client
+            .ft_create::<Value, _>(&idx_name, options, schema)
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(err) => {
+                let msg = err.to_string();
+                if msg.contains("already exists") {
+                    Ok(())
+                } else {
+                    Err(format!("relation index create: {msg}"))
+                }
+            }
+        }
+    }
+
     async fn ensure_started(&self) -> Result<(), String> {
         self.started
             .get_or_try_init(|| async {
-                let _: fred::types::ConnectHandle = self
-                    .client
+                self.client
                     .init()
                     .await
                     .map_err(|e| format!("failed to initialize Redis client: {e}"))?;
@@ -482,7 +694,7 @@ fn source_path_hash(source_path: &str) -> String {
 }
 
 fn vector_to_bytes(vector: &[f32]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(vector.len() * std::mem::size_of::<f32>());
+    let mut bytes = Vec::with_capacity(std::mem::size_of_val(vector));
     for value in vector {
         bytes.extend_from_slice(&value.to_le_bytes());
     }
@@ -544,6 +756,119 @@ fn parse_search_results(
     Ok(results)
 }
 
+fn parse_entity_results(
+    value: Value,
+    prefix: &str,
+    threshold: f32,
+) -> Result<Vec<EntityHit>, String> {
+    let Value::Array(mut vals) = value else {
+        return Ok(Vec::new());
+    };
+    if vals.is_empty() {
+        return Ok(Vec::new());
+    }
+    vals.remove(0); // count
+
+    let mut results = Vec::new();
+    let mut i = 0;
+    while i + 2 < vals.len() {
+        let key_str = vals[i].clone().convert::<String>().unwrap_or_default();
+        let score = 1.0 - parse_score(vals[i + 1].clone())?;
+        let fields = &vals[i + 2];
+
+        if score >= threshold {
+            let get = |name: &str| -> String {
+                if let Value::Array(arr) = fields {
+                    let mut j = 0;
+                    while j + 1 < arr.len() {
+                        if let Some(k) = arr[j].as_str() {
+                            if k == name {
+                                return arr[j + 1].clone().convert::<String>().unwrap_or_default();
+                            }
+                        }
+                        j += 2;
+                    }
+                }
+                String::new()
+            };
+            let _ = key_str.strip_prefix(prefix);
+            let source_chunks: Vec<String> =
+                serde_json::from_str(&get("source_chunks")).unwrap_or_default();
+            results.push(EntityHit {
+                name: get("name"),
+                entity_type: get("entity_type"),
+                description: get("description"),
+                source_chunks,
+                score,
+            });
+        }
+        i += 3;
+    }
+    results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    Ok(results)
+}
+
+fn parse_relation_results(
+    value: Value,
+    prefix: &str,
+    threshold: f32,
+) -> Result<Vec<RelationHit>, String> {
+    let Value::Array(mut vals) = value else {
+        return Ok(Vec::new());
+    };
+    if vals.is_empty() {
+        return Ok(Vec::new());
+    }
+    vals.remove(0);
+
+    let mut results = Vec::new();
+    let mut i = 0;
+    while i + 2 < vals.len() {
+        let key_str = vals[i].clone().convert::<String>().unwrap_or_default();
+        let score = 1.0 - parse_score(vals[i + 1].clone())?;
+        let fields = &vals[i + 2];
+
+        if score >= threshold {
+            let get = |name: &str| -> String {
+                if let Value::Array(arr) = fields {
+                    let mut j = 0;
+                    while j + 1 < arr.len() {
+                        if let Some(k) = arr[j].as_str() {
+                            if k == name {
+                                return arr[j + 1].clone().convert::<String>().unwrap_or_default();
+                            }
+                        }
+                        j += 2;
+                    }
+                }
+                String::new()
+            };
+            let _ = key_str.strip_prefix(prefix);
+            let source_chunks: Vec<String> =
+                serde_json::from_str(&get("source_chunks")).unwrap_or_default();
+            results.push(RelationHit {
+                source: get("source"),
+                target: get("target"),
+                relation_type: get("relation_type"),
+                description: get("description"),
+                source_chunks,
+                score,
+            });
+        }
+        i += 3;
+    }
+    results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    Ok(results)
+}
+
 fn parse_score(value: Value) -> Result<f32, String> {
     if let Some(score) = value.as_f64() {
         return Ok(score as f32);
@@ -571,13 +896,24 @@ fn parse_score(value: Value) -> Result<f32, String> {
 // because Redis stores the content as a searchable hash field. Callers that
 // route to a Redis backend without a content field will see a clear error.
 
-use crate::vector_backend::{BackendCapabilities, VectorBackend, VectorHit, VectorPoint};
+use crate::vector_backend::{
+    BackendCapabilities, EntityHit, EntityPoint, RelationHit, RelationPoint, VectorBackend,
+    VectorHit, VectorPoint,
+};
 use async_trait::async_trait;
 
 #[async_trait]
 impl VectorBackend for RedisVectorStore {
     fn capabilities(&self) -> BackendCapabilities {
-        BackendCapabilities::chunks_only("redis-vectors")
+        BackendCapabilities {
+            name: "redis-vectors",
+            chunks: true,
+            hybrid: false,
+            entities: true,
+            relations: true,
+            images: false,
+            persistence_verifiable: true,
+        }
     }
 
     async fn ensure_collection(&self, _dims: usize) -> Result<(), String> {
@@ -651,6 +987,188 @@ impl VectorBackend for RedisVectorStore {
     async fn verify_persistence(&self) -> Result<(), String> {
         self.verify_persistence().await
     }
+
+    // ── Entity operations (Phase 7) ───────────────────────────────
+
+    async fn ensure_entity_collection(&self, _dims: usize) -> Result<(), String> {
+        self.ensure_entity_index().await
+    }
+
+    async fn upsert_entities(&self, points: Vec<EntityPoint>) -> Result<(), String> {
+        if points.is_empty() {
+            return Ok(());
+        }
+        self.ensure_entity_index().await?;
+
+        for p in &points {
+            if p.vector.len() != self.embedding_dim {
+                return Err(format!(
+                    "entity {} dim mismatch: expected {}, got {}",
+                    p.id,
+                    self.embedding_dim,
+                    p.vector.len()
+                ));
+            }
+            let key = self.entity_key(&p.id);
+            let mut fields = Map::new();
+            fields.insert("name".into(), p.name.clone().into());
+            fields.insert("entity_type".into(), p.entity_type.clone().into());
+            fields.insert("description".into(), p.description.clone().into());
+            fields.insert(
+                "source_chunks".into(),
+                serde_json::to_string(&p.source_chunks)
+                    .unwrap_or_else(|_| "[]".to_string())
+                    .into(),
+            );
+            let emb = vector_to_bytes(&p.vector);
+            fields.insert("embedding".into(), emb.as_slice().into());
+
+            let _: Value = self
+                .client
+                .hset(&key, fields)
+                .await
+                .map_err(|e| format!("redis hset entity {}: {e}", p.id))?;
+        }
+        Ok(())
+    }
+
+    async fn search_entities(
+        &self,
+        query_vector: Vec<f32>,
+        top_k: usize,
+        score_threshold: f32,
+    ) -> Result<Vec<EntityHit>, String> {
+        if top_k == 0 {
+            return Ok(Vec::new());
+        }
+        self.ensure_entity_index().await?;
+
+        let idx = self.entity_index_name();
+        let prefix = self.entity_key_prefix();
+        let raw_query = format!("*=>[KNN {} @embedding $BLOB AS score]", top_k);
+        let query_blob = vector_to_bytes(&query_vector);
+        let command = CustomCommand::new("FT.SEARCH", ClusterHash::FirstKey, false);
+        let args: Vec<Value> = vec![
+            idx.into(),
+            raw_query.into(),
+            "PARAMS".into(),
+            2i64.into(),
+            "BLOB".into(),
+            query_blob.as_slice().into(),
+            "RETURN".into(),
+            4i64.into(),
+            "name".into(),
+            "entity_type".into(),
+            "description".into(),
+            "source_chunks".into(),
+            "WITHSCORES".into(),
+            "LIMIT".into(),
+            0i64.into(),
+            (top_k as i64).into(),
+            "DIALECT".into(),
+            2i64.into(),
+        ];
+
+        let value: Value = self
+            .client
+            .custom::<Value, _>(command, args)
+            .await
+            .map_err(|e| format!("redis entity search: {e}"))?;
+
+        parse_entity_results(value, &prefix, score_threshold)
+    }
+
+    // ── Relation operations (Phase 7) ─────────────────────────────
+
+    async fn ensure_relation_collection(&self, _dims: usize) -> Result<(), String> {
+        self.ensure_relation_index().await
+    }
+
+    async fn upsert_relations(&self, points: Vec<RelationPoint>) -> Result<(), String> {
+        if points.is_empty() {
+            return Ok(());
+        }
+        self.ensure_relation_index().await?;
+
+        for p in &points {
+            if p.vector.len() != self.embedding_dim {
+                return Err(format!(
+                    "relation {} dim mismatch: expected {}, got {}",
+                    p.id,
+                    self.embedding_dim,
+                    p.vector.len()
+                ));
+            }
+            let key = self.relation_key(&p.id);
+            let mut fields = Map::new();
+            fields.insert("source".into(), p.source.clone().into());
+            fields.insert("target".into(), p.target.clone().into());
+            fields.insert("relation_type".into(), p.relation_type.clone().into());
+            fields.insert("description".into(), p.description.clone().into());
+            fields.insert(
+                "source_chunks".into(),
+                serde_json::to_string(&p.source_chunks)
+                    .unwrap_or_else(|_| "[]".to_string())
+                    .into(),
+            );
+            let emb = vector_to_bytes(&p.vector);
+            fields.insert("embedding".into(), emb.as_slice().into());
+
+            let _: Value = self
+                .client
+                .hset(&key, fields)
+                .await
+                .map_err(|e| format!("redis hset relation {}: {e}", p.id))?;
+        }
+        Ok(())
+    }
+
+    async fn search_relations(
+        &self,
+        query_vector: Vec<f32>,
+        top_k: usize,
+        score_threshold: f32,
+    ) -> Result<Vec<RelationHit>, String> {
+        if top_k == 0 {
+            return Ok(Vec::new());
+        }
+        self.ensure_relation_index().await?;
+
+        let idx = self.relation_index_name();
+        let prefix = self.relation_key_prefix();
+        let raw_query = format!("*=>[KNN {} @embedding $BLOB AS score]", top_k);
+        let query_blob = vector_to_bytes(&query_vector);
+        let command = CustomCommand::new("FT.SEARCH", ClusterHash::FirstKey, false);
+        let args: Vec<Value> = vec![
+            idx.into(),
+            raw_query.into(),
+            "PARAMS".into(),
+            2i64.into(),
+            "BLOB".into(),
+            query_blob.as_slice().into(),
+            "RETURN".into(),
+            5i64.into(),
+            "source".into(),
+            "target".into(),
+            "relation_type".into(),
+            "description".into(),
+            "source_chunks".into(),
+            "WITHSCORES".into(),
+            "LIMIT".into(),
+            0i64.into(),
+            (top_k as i64).into(),
+            "DIALECT".into(),
+            2i64.into(),
+        ];
+
+        let value: Value = self
+            .client
+            .custom::<Value, _>(command, args)
+            .await
+            .map_err(|e| format!("redis relation search: {e}"))?;
+
+        parse_relation_results(value, &prefix, score_threshold)
+    }
 }
 
 #[cfg(test)]
@@ -669,6 +1187,20 @@ mod tests {
         assert!(schema.contains("source_path"));
         assert!(schema.contains("content"));
         assert!(schema.contains("DIM 1024"));
+    }
+
+    #[test]
+    fn redis_vector_store_capabilities_include_entities_and_relations() {
+        use crate::vector_backend::VectorBackend;
+        let store =
+            RedisVectorStore::new_for_test("redis://127.0.0.1:6379", "the_one_memories", 1024)
+                .expect("store");
+        let caps = store.capabilities();
+        assert!(caps.chunks);
+        assert!(caps.entities);
+        assert!(caps.relations);
+        assert!(!caps.hybrid);
+        assert!(!caps.images);
     }
 
     #[test]
