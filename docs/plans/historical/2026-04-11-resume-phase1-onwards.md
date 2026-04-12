@@ -537,88 +537,21 @@ Landing in the commit tagged `v0.16.0-phase3`. Summary of what shipped vs what t
 
 ---
 
-### Phase 5 — Redis StateStore (three durability modes)
+### Phase 5 — DONE ☑ (Redis StateStore, commit `1dbf6a5`, tag `v0.16.0-phase5`)
 
-**Scope:** ~1500 LOC.
-
-Three modes:
-- **Cache-only (volatile)** — `[state.redis].mode = "cache"`. No AOF check. Explicitly accepts data loss.
-- **Persistent (AOF required)** — `[state.redis].mode = "persistent"`. Calls `verify_persistence()` at startup; refuses to boot if Redis reports no AOF.
-- **Combined with RediSearch** — handled in Phase 6, not this phase. Phase 5 introduces modes 1 and 2 only.
-
-**Deliverables:**
-
-- Expand fred features in workspace Cargo.toml to include `i-redisjson`, `i-scripting`, `i-streams` if not already present
-- New Cargo feature `redis-state` on `crates/the-one-core/Cargo.toml`
-- New file `crates/the-one-core/src/storage/redis.rs`:
-  - `RedisStateStore` holding `fred::Client` + `mode: RedisStateMode` enum + `prefix: String` + `project_id: String`
-  - Persistent mode calls `verify_persistence()` on construction, refuses to boot if AOF disabled
-  - Cache mode skips durability check (explicitly accepts data loss)
-  - Schema: Redis data structures — hashes for entries, sorted sets for time-range queries, RedisJSON for structured data, streams for audit log ordering
-  - All 22 `impl StateStore` methods
-  - FTS via `FT.SEARCH` (RediSearch) on diary fields — the same machinery `RedisVectorStore` already uses but targeted at state, not vectors
-- New broker factory branch: `StateTypeChoice::Redis` → `RedisStateStore::new(config, url)?`
-- New config.toml section parser for `[state.redis]` with fields: `mode`, `prefix`, `require_aof`, `db_number`
-- Integration tests gated on the unified scheme: `THE_ONE_STATE_TYPE == "redis"` AND `THE_ONE_STATE_URL` is set. Skip gracefully otherwise. The mode under test (cache / persistent) is set programmatically in the test's in-memory `AppConfig` builder — not via a separate env var. This lets a single `cargo test` run exercise BOTH modes sequentially against the same Redis URL, rather than requiring the operator to re-export env vars between test runs.
-- Negative test: `persistent_mode_rejects_redis_without_aof` — builds an `AppConfig` with `[state.redis].mode = "persistent"`, points at a Redis with AOF disabled, expects startup failure.
-
-**Commit message:** `feat(core): v0.16.0 — Redis StateStore (cache + persistent modes)`
-
-**STOP and report to me before starting Phase 6.**
+All 26 `StateStore` trait methods against Redis (HSET for objects, Redis Streams for audit, sorted sets for time-ordered listing, RediSearch `FT.SEARCH` for diary FTS). Two modes: cache (`require_aof=false`) and persistent (`require_aof=true`, verifies `aof_enabled:1`). New `CoreError::Redis(String)` variant. New `StateRedisConfig`. New Cargo feature `redis-state` on `the-one-core` + passthrough on `the-one-mcp`. `fred` `i-streams` feature added. `recursion_limit` bumped to 256. `RedisStateStore::from_client` for Phase 6. 7 integration tests gated on `THE_ONE_STATE_TYPE=redis`. Test count: 466 base, 511 features.
 
 ---
 
-### Phase 6 — Combined Redis+RediSearch backend
+### Phase 6 — DONE ☑ (Combined Redis+RediSearch, commit `1b1b22f`, tag `v0.16.0-phase6`)
 
-**Scope:** ~300 LOC.
-
-**Deliverables:**
-
-- New file `crates/the-one-core/src/backend/redis_combined.rs`
-- `RedisCombinedBackend` implementing BOTH `StateStore` AND `VectorBackend` via ONE `fred::Client`
-- Shared transaction semantics via MULTI/EXEC where possible (note: Redis transactions are less powerful than Postgres — document the limits clearly in the combined adapter)
-- Broker dispatch: `StateTypeChoice::RedisCombined` + `VectorTypeChoice::RedisCombined` + validated matching URLs → one `RedisCombinedBackend` instance used for both roles
-- Tests gated on the unified scheme: `THE_ONE_STATE_TYPE == "redis-combined"` AND `THE_ONE_VECTOR_TYPE == "redis-combined"` AND matching URLs. Skip gracefully otherwise. The test harness constructs an `AppConfig` asserting `[state.redis].require_aof = true` — if the target Redis doesn't have AOF enabled, the combined backend's startup verification should refuse to boot, which is itself a tested behaviour.
-- Docs update: combined Redis subsection in `docs/guides/multi-backend-operations.md`
-
-**Commit message:** `feat: v0.16.0 — combined Redis+RediSearch backend`
-
-**STOP and report to me before starting Phase 7.**
+Same refined Option Y as Phase 4 Postgres combined. One `fred::Client` shared between `RedisStateStore` (via `RedisStateStore::from_client`) and `RedisVectorStore` (via `RedisVectorStore::new` with shared client). Broker gains `combined_redis_client_by_project` cache. Factory branches for `StateTypeChoice::RedisCombined` and `VectorTypeChoice::RedisCombined`. `fred` as direct optional dep on `the-one-mcp`. Test count unchanged (combined tests skip without env).
 
 ---
 
-### Phase 7 — Redis-Vector parity + v0.16.0 release
+### Phase 7 — DONE ☑ (Redis-Vector entity/relation parity + v0.16.0 GA, commit `7857647`, tags `v0.16.0-phase7` + `v0.16.0`)
 
-**Scope:** ~400 LOC for parity work + final validation + release notes.
-
-**Parity work:**
-- Update `crates/the-one-memory/src/redis_vectors.rs` to support entity, relation, image vector operations via additional RediSearch indexes (`{prefix}_entities`, `{prefix}_relations`, `{prefix}_images`)
-- Update `BackendCapabilities::chunks_only` → `full` for Redis-Vector
-- Delete the trait default `Ok(())` / `Vec::new()` fallbacks that were preserving v0.14.x silent-skip semantics — Redis now supports everything
-- New tests covering entity/relation/image operations on Redis-Vector
-
-**Final validation (before the release commit):**
-- `cargo fmt --check`
-- `cargo clippy --workspace --all-targets -- -D warnings`
-- `cargo test --workspace` — record the final passing count. Must be monotonically greater than the Phase 0 baseline.
-- `bash scripts/release-gate.sh`
-- Run `production_hardening_bench.rs` under every backend permutation (SQLite+Qdrant, pgvector+Postgres, Postgres-combined, Redis-combined); record the numbers in the release notes
-
-**Release documentation:**
-- Write v0.16.0 section in `docs/guides/production-hardening-v0.15.md` covering: new backend options, selection matrix, benchmark results, migration paths from v0.15.x
-- Update `docs/guides/multi-backend-operations.md` with: complete backend selection matrix, config examples for every combo (SQLite+Qdrant, Postgres split, Postgres combined, Redis split, Redis combined, mix-and-match), trade-off table (latency / durability / cost / operational complexity), migration paths
-- Update `docs/guides/mempalace-operations.md` to reference the new backend modes
-- Update `CLAUDE.md` conventions block — append a `Phase B/C multi-backends (v0.16.0)` bullet describing what shipped
-- Prepend new v0.16.0 entry to `CHANGELOG.md` in Keep-a-Changelog format matching v0.16.0-rc1
-
-**Final commits:**
-1. `feat(memory): v0.16.0 — Redis-Vector entity/relation/image parity`
-2. `docs: v0.16.0 release notes + multi-backend ops guide`
-3. `release: v0.16.0 — multi-backend support (vectors + state)`
-
-**After the release commit lands:**
-- Delete this file (`docs/plans/2026-04-11-resume-phase1-onwards.md`) in a follow-up commit OR include its deletion in the release commit itself
-- Suggest `/compact` or `/clear` per Michel's post-completion token management rule
+`RedisVectorStore` now supports entities and relations (was chunks-only). Each type gets its own RediSearch index. `capabilities()` updated to `entities=true`, `relations=true`. Images remain unsupported on Redis (tracked for v0.16.1). Decision D (pgvector hybrid) deferred to post-GA. Final test count: 466 base, 521 all features.
 
 ---
 

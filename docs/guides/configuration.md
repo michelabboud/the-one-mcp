@@ -1,6 +1,6 @@
 # Configuration Reference
 
-> v0.16.0-phase4 — authoritative source: `crates/the-one-core/src/config.rs` and `crates/the-one-core/src/limits.rs`. See § Multi-Backend Selection (v0.16.0+) below for the Phase 2/3/4 pgvector + Postgres state + combined config additions.
+> v0.16.0 GA — authoritative source: `crates/the-one-core/src/config.rs` and `crates/the-one-core/src/limits.rs`. See § Multi-Backend Selection (v0.16.0+) below for the full pgvector + Postgres state + Redis state + combined backend config additions.
 
 ## Overview
 
@@ -200,8 +200,8 @@ Valid combinations shipping today:
 | `postgres` | unset | `pg-state` | v0.16.0 Phase 3 |
 | `postgres` | `pgvector` | `pg-state,pg-vectors` | v0.16.0 Phase 3 (split pools) |
 | `postgres-combined` | `postgres-combined` | `pg-state,pg-vectors` | v0.16.0 Phase 4 (combined pool) |
-| `redis` | any | (planned) | v0.16.0 Phase 5 |
-| `redis-combined` | `redis-combined` | (planned) | v0.16.0 Phase 6 |
+| `redis` | any | `redis-state` (+ vector feature as needed) | v0.16.0 Phase 5 |
+| `redis-combined` | `redis-combined` | `redis-state,redis-vectors` | v0.16.0 Phase 6 (combined client) |
 
 > **Combined deployments reuse both config sections.** When
 > `postgres-combined` is set on both axes, the broker reads
@@ -316,6 +316,28 @@ the sync-over-async bridge rationale, FTS5 → tsvector translation details,
 migration path from SQLite. For the combined-pool variant shipped in
 Phase 4 (one `sqlx::PgPool` serving both trait roles), see the
 [combined Postgres backend guide](combined-postgres-backend.md).
+
+---
+
+### State Store — Redis (v0.16.0 Phase 5)
+
+Tuning knobs for the `RedisStateStore` live in a nested `state_redis`
+block.
+
+```json
+{
+  "state_redis": {
+    "require_aof": true
+  }
+}
+```
+
+| Field | Default | Notes |
+|---|---|---|
+| `require_aof` | `true` | When `true`, the backend verifies `aof_enabled:1` at startup and refuses to boot without AOF. Set to `false` for cache-only (volatile) mode. |
+
+On the **combined** path (Phase 6, `redis-combined`), the state-side
+`state_redis` config applies to the shared `fred::Client`.
 
 ---
 

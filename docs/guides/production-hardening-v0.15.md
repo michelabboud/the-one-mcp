@@ -726,7 +726,35 @@ until you opt into a new backend.
 
 ---
 
-## 18. See also
+## 18. Redis StateStore (Phase 5 — v0.16.0-phase5)
+
+Phase 5 ships a full `RedisStateStore` implementing all 26
+`StateStore` trait methods. Two modes: cache (`require_aof=false`)
+and persistent (`require_aof=true`). New `CoreError::Redis(String)`
+variant with `"redis"` label in `error_kind_label`. See
+[multi-backend-operations.md](multi-backend-operations.md) for the
+complete backend matrix and config examples.
+
+## 19. Combined Redis+RediSearch (Phase 6 — v0.16.0-phase6)
+
+Phase 6 ships the combined Redis+RediSearch backend following the
+same refined Option Y pattern as Phase 4's Postgres combined. One
+`fred::Client` shared between `RedisStateStore` and
+`RedisVectorStore`. See
+[multi-backend-operations.md](multi-backend-operations.md) for
+activation via `redis-combined`.
+
+## 20. Redis-Vector entity/relation parity (Phase 7 — v0.16.0 GA)
+
+Phase 7 closes the capability gap on `RedisVectorStore`: entities
+and relations are now supported (was chunks-only). Each type gets
+its own RediSearch index. Images remain unsupported on Redis
+(tracked for v0.16.1). Decision D (pgvector hybrid search) is
+deferred to post-GA.
+
+---
+
+## 21. See also
 
 - **Findings report:** `docs/reviews/2026-04-10-mempalace-comparative-audit.md`
 - **Operational runbook:** `docs/guides/mempalace-operations.md`

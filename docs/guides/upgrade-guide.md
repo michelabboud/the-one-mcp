@@ -4,6 +4,58 @@
 
 ---
 
+## Upgrading to v0.16.0 GA (from v0.16.0-phase4)
+
+### New features (opt-in, non-breaking)
+
+- **Phase 5 — Redis StateStore** with two durability modes: cache
+  (`require_aof=false`, volatile) and persistent (`require_aof=true`,
+  verifies `aof_enabled:1` at startup). All 26 `StateStore` trait
+  methods implemented via HSET, Redis Streams, sorted sets, and
+  RediSearch `FT.SEARCH`. New Cargo feature `redis-state`. New
+  `CoreError::Redis(String)` variant. New `StateRedisConfig` in
+  `config.json`.
+- **Phase 6 — Combined Redis+RediSearch** single-client backend.
+  Parallel shape to Phase 4's Postgres combined: one `fred::Client`
+  shared between `RedisStateStore` and `RedisVectorStore`. Activated
+  via `THE_ONE_STATE_TYPE=redis-combined` +
+  `THE_ONE_VECTOR_TYPE=redis-combined` with byte-identical URLs.
+- **Phase 7 — Redis-Vector entity/relation parity.** `RedisVectorStore`
+  now supports entities and relations (was chunks-only). Each type gets
+  its own RediSearch index. Images remain unsupported on Redis (tracked
+  for v0.16.1).
+
+### Required action
+
+- **None.** Existing deployments (SQLite, Postgres split/combined)
+  keep working unchanged. Redis backends are strictly additive.
+
+### To adopt Redis state
+
+1. Stand up Redis 7+ with the RediSearch module loaded.
+2. Export env vars:
+   ```bash
+   export THE_ONE_STATE_TYPE=redis
+   export THE_ONE_STATE_URL=redis://localhost:6379
+   export THE_ONE_VECTOR_TYPE=qdrant  # or pgvector, etc.
+   export THE_ONE_VECTOR_URL=...
+   ```
+3. Rebuild: `cargo build --release -p the-one-mcp --bin the-one-mcp --features redis-state`
+4. For persistent mode, set `state_redis.require_aof = true` in `config.json`
+   and ensure your Redis instance has `appendonly yes`.
+
+### To adopt combined Redis
+
+Same binary as above with both `redis-state` and `redis-vectors` features.
+Set both TYPEs to `redis-combined` with byte-identical URLs.
+
+### No breaking changes
+
+- Broker API, MCP tool shapes, config-file format, and CLI adapters
+  are unchanged.
+
+---
+
 ## Upgrading to v0.16.0-phase4 (from v0.16.0-phase3)
 
 ### New features (opt-in, non-breaking)

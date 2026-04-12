@@ -1,6 +1,6 @@
 # The-One MCP Complete Guide
 
-> **Current version**: v0.16.0-phase4. The v0.16.0 line introduced
+> **Current version**: v0.16.0 GA. The v0.16.0 line introduced
 > multi-backend support — see § 1.1 "Multi-backend architecture
 > (v0.16.0+)" below. The default deployment (SQLite + Qdrant) is
 > unchanged; everything here still works for that path.
@@ -46,7 +46,10 @@ Shipping today:
 | `postgres` | `pgvector` | `pg-state,pg-vectors` | v0.16.0 Phase 3 (split pools, two independent sqlx pools) |
 | `postgres-combined` | `postgres-combined` | `pg-state,pg-vectors` | v0.16.0 Phase 4 (ONE shared sqlx pool, byte-identical URLs) |
 
-Pending in the v0.16.0 roadmap: Redis state modes (Phase 5), combined Redis+RediSearch (Phase 6), Redis-Vector full parity + v0.16.0 GA (Phase 7).
+Also shipping in v0.16.0 GA:
+
+| `redis` | `qdrant` | `redis-state` | v0.16.0 Phase 5 (cache or persistent mode) |
+| `redis-combined` | `redis-combined` | `redis-state,redis-vectors` | v0.16.0 Phase 6 (ONE shared fred client, byte-identical URLs) |
 
 Deep-dive guides:
 - [pgvector-backend.md](pgvector-backend.md) — Phase 2 standalone guide (split-pool vectors)

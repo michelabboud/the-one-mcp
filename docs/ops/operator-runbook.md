@@ -1,7 +1,7 @@
 # The-One MCP Operator Runbook
 
 Last updated: 2026-04-12
-Applies to: v0.16.0-phase4 (`v1beta` schema, multi-backend v0.16.0)
+Applies to: v0.16.0 GA (`v1beta` schema, multi-backend v0.16.0)
 
 ## 1. Service Health Checklist
 
@@ -10,15 +10,12 @@ Applies to: v0.16.0-phase4 (`v1beta` schema, multi-backend v0.16.0)
 cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-# Expected: 466 passing, 0 failing, 1 ignored (v0.16.0-phase4 baseline)
+# Expected: 466 passing, 0 failing, 1 ignored (v0.16.0 GA baseline)
 
-# With Phase 2 + Phase 3 + Phase 4 feature-gated backends
-# (pgvector split + combined, Postgres state split + combined)
-cargo clippy --workspace --all-targets --features pg-state,pg-vectors -- -D warnings
-cargo test --workspace --features pg-state,pg-vectors
-# Expected: 504 passing, 0 failing, 1 ignored
-# (466 base + 4 Phase 4 mirror unit + 5 Phase 4 integration
-#  + 13 Phase 2 pgvector gated + 16 Phase 3 postgres-state gated)
+# With all feature-gated backends
+cargo clippy --workspace --all-targets --features pg-state,pg-vectors,redis-state -- -D warnings
+cargo test --workspace --features pg-state,pg-vectors,redis-state
+# Expected: 521 passing, 0 failing, 1 ignored
 
 # Verify binary builds — default and feature-gated
 cargo build --release -p the-one-mcp --bin the-one-mcp
@@ -207,7 +204,7 @@ THE_ONE_VECTOR_TYPE=<qdrant|pgvector|redis-vectors|postgres-combined|redis-combi
 THE_ONE_VECTOR_URL=<connection string>
 ```
 
-Shipping today (v0.16.0-phase4):
+Shipping in v0.16.0 GA:
 
 | State | Vector | Features | Notes |
 |---|---|---|---|
@@ -215,10 +212,9 @@ Shipping today (v0.16.0-phase4):
 | `sqlite` | `pgvector` | `pg-vectors` | Phase 2 — single-axis Postgres |
 | `postgres` | `qdrant` | `pg-state` | Phase 3 — single-axis Postgres |
 | `postgres` | `pgvector` | `pg-state,pg-vectors` | Phase 3 — split-pool on both axes |
-| `postgres-combined` | `postgres-combined` | `pg-state,pg-vectors` | Phase 4 — ONE shared sqlx pool, byte-identical URLs |
-
-Pending: `redis` + `redis-combined` (Phases 5–6), `redis-vectors`
-at full parity (Phase 7).
+| `postgres-combined` | `postgres-combined` | `pg-state,pg-vectors` | Phase 4 — ONE shared sqlx pool |
+| `redis` | `qdrant`/`pgvector` | `redis-state` (+ vector feature) | Phase 5 — cache or persistent mode |
+| `redis-combined` | `redis-combined` | `redis-state,redis-vectors` | Phase 6 — ONE shared fred client |
 
 **Tuning knobs** live in `config.json` under `vector_pgvector` (HNSW
 parameters + pool sizing) and `state_postgres` (statement timeout +

@@ -1,7 +1,7 @@
 # The-One MCP API Reference
 
 > Complete reference for all 30 MCP tools + 3 MCP resource types exposed by
-> the-one-mcp. Current version: v0.16.0-phase4. Tool and resource shapes are
+> the-one-mcp. Current version: v0.16.0 GA. Tool and resource shapes are
 > unchanged since v0.12.0 — v0.15/v0.16 work is additive and backend-internal.
 >
 > Tools are invoked via JSON-RPC 2.0 over stdio/SSE/stream. Every tool call uses

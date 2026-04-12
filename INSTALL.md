@@ -92,10 +92,26 @@ cargo build --release -p the-one-mcp --bin the-one-mcp --features pg-state,pg-ve
 # One credential, one pgbouncer entry, one PITR backup window.
 ```
 
+```bash
+# Redis state (Phase 5) — cache or persistent mode:
+# Activated at runtime via:
+#   THE_ONE_STATE_TYPE=redis
+#   THE_ONE_STATE_URL=redis://localhost:6379
+# Persistent mode enforces AOF via state_redis.require_aof=true in config.
+cargo build --release -p the-one-mcp --bin the-one-mcp --features redis-state
+
+# Combined Redis — ONE fred::Client for state + vectors (Phase 6):
+#   THE_ONE_STATE_TYPE=redis-combined
+#   THE_ONE_VECTOR_TYPE=redis-combined
+#   THE_ONE_STATE_URL=redis://localhost:6379
+#   THE_ONE_VECTOR_URL=redis://localhost:6379   # byte-identical
+cargo build --release -p the-one-mcp --bin the-one-mcp --features redis-state,redis-vectors
+```
+
 Runtime selection happens through env vars, not config files, so
 the same binary can point at different backends across
-environments. Feature gates the sqlx dependency; without them sqlx
-is not in the dep tree.
+environments. Feature gates the sqlx/fred dependencies; without
+them those crates are not in the dep tree.
 
 - See [docs/guides/configuration.md § Multi-Backend Selection](docs/guides/configuration.md#multi-backend-selection-v0160)
   for the full `THE_ONE_{STATE,VECTOR}_{TYPE,URL}` surface and

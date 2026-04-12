@@ -71,8 +71,8 @@ the-one-mcp broker
     +-- Policy Engine        Configurable limits + risk-tier approval gates
     +-- Backup / Restore     Gzipped tar of project state + catalog + registry
     +-- Observability        Metrics counters + audit events via `observe`
-    +-- State Store          SQLite (default) / Postgres (split, phase3) / Postgres combined (phase4)
-    +-- Vector Backend       Qdrant (default) / pgvector (split, phase2) / pgvector combined (phase4) / Redis
+    +-- State Store          SQLite / Postgres (split/combined) / Redis (cache/persistent/combined)
+    +-- Vector Backend       Qdrant / pgvector (split/combined) / Redis-Vector (chunks+entities+relations)
 ```
 
 ### Multi-backend selection (v0.16.0)
@@ -104,14 +104,27 @@ export THE_ONE_VECTOR_URL='postgres://user:pw@db.internal/the_one'
 cargo build --release -p the-one-mcp --bin the-one-mcp --features pg-state,pg-vectors
 ```
 
-Combined single-pool (`postgres-combined`) ships in v0.16.0 Phase 4 — one
-credential to rotate, one pgbouncer entry, one PITR backup window, one set
-of IAM grants. See the
-[combined Postgres backend guide](docs/guides/combined-postgres-backend.md),
-the [pgvector backend guide](docs/guides/pgvector-backend.md), the
-[Postgres state backend guide](docs/guides/postgres-state-backend.md), and
-the [multi-backend operations guide](docs/guides/multi-backend-operations.md)
-for the full matrix, tuning surface, and split-vs-combined decision guide.
+Combined single-pool (`postgres-combined`) and combined single-client
+(`redis-combined`) both ship in v0.16.0 GA. Redis state supports two
+durability modes: cache (volatile) and persistent (AOF-required).
+
+```bash
+# Redis state + Qdrant vectors:
+export THE_ONE_STATE_TYPE=redis THE_ONE_VECTOR_TYPE=qdrant
+export THE_ONE_STATE_URL=redis://localhost:6379 THE_ONE_VECTOR_URL=http://localhost:6333
+cargo build --release -p the-one-mcp --bin the-one-mcp --features redis-state
+
+# Combined Redis — ONE fred::Client serving both roles:
+export THE_ONE_STATE_TYPE=redis-combined THE_ONE_VECTOR_TYPE=redis-combined
+export THE_ONE_STATE_URL=redis://localhost:6379 THE_ONE_VECTOR_URL=redis://localhost:6379
+cargo build --release -p the-one-mcp --bin the-one-mcp --features redis-state,redis-vectors
+```
+
+See the [multi-backend operations guide](docs/guides/multi-backend-operations.md)
+for the full matrix, tuning surface, and decision flowchart. Backend-specific
+guides: [pgvector](docs/guides/pgvector-backend.md),
+[Postgres state](docs/guides/postgres-state-backend.md),
+[combined Postgres](docs/guides/combined-postgres-backend.md).
 
 ## 30 MCP Tools
 
@@ -223,7 +236,7 @@ bash scripts/build.sh release --status # check workflow progress
 
 Releases are **manual only** — tagging does not auto-trigger builds. You decide when to build artifacts.
 
-## Stats (v0.16.0-phase4)
+## Stats (v0.16.0 GA)
 
 | Metric | Count |
 |--------|-------|
@@ -231,16 +244,16 @@ Releases are **manual only** — tagging does not auto-trigger builds. You decid
 | MCP Resource Types | 3 (`docs`, `project`, `catalog`) |
 | Admin UI Pages | 8 (home, dashboard, ingest, graph, images, config, audit, swagger) |
 | Tests (default build) | 466 passing (+1 ignored) |
-| Tests (`--features pg-state,pg-vectors`) | 504 passing (+1 ignored) |
-| Rust LOC | ~30,000 |
+| Tests (all features) | 521 passing (+1 ignored) |
+| Rust LOC | ~32,000 |
 | JSON Schemas | 35 |
 | Catalog Tools | 365 across 10 languages + 8 categories |
 | Supported Code Languages (chunker) | 13 |
 | `maintain` actions | 15 |
 | Metrics counters | 15 |
-| Vector Backends | 3 (Qdrant default, pgvector split, pgvector combined) + Redis-Vector |
-| State Store Backends | 3 (SQLite default, Postgres split, Postgres combined) |
-| Combined single-pool backends | 1 shipped (Postgres+pgvector, Phase 4); Redis+RediSearch planned (Phase 6) |
+| Vector Backends | 4 (Qdrant default, pgvector split/combined, Redis-Vector with entity/relation support) |
+| State Store Backends | 5 (SQLite default, Postgres split/combined, Redis cache/persistent) |
+| Combined single-pool backends | 2 shipped (Postgres+pgvector, Redis+RediSearch) |
 | Supported Platforms | 6 (Linux/macOS/Windows x86-64 + ARM64) |
 | Supported AI CLIs | 4 (Claude Code, Gemini CLI, OpenCode, Codex) |
 

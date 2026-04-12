@@ -483,8 +483,12 @@ async fn state_store_factory(
             // wrapped via PostgresStateStore::from_pool.
             self.construct_postgres_combined_state_store(project_root, project_id).await
         }
-        StateTypeChoice::Redis => Err(CoreError::NotEnabled("Phase 5".into())),
-        StateTypeChoice::RedisCombined => Err(CoreError::NotEnabled("Phase 6".into())),
+        StateTypeChoice::Redis => {
+            self.construct_redis_state_store(project_root, project_id).await
+        }
+        StateTypeChoice::RedisCombined => {
+            self.construct_redis_combined_state_store(project_root, project_id).await
+        }
     }
 }
 ```
@@ -507,9 +511,9 @@ legacy `config.vector_backend` string-based path.
 | 2 | pgvector backend + env var parser + startup validator | Alternative vector backend; env-driven selection |
 | 3 | PostgresStateStore + `state_store_factory` async | Alternative state backend; cross-axis deployment |
 | 4 (shipped) | Combined Postgres+pgvector (one `sqlx::PgPool`, two trait roles) via `from_pool` constructors + `combined_pg_pool_by_project` cache | Operational unity (one credential, one pgbouncer entry, one PITR window); foundation for future cross-trait transactions |
-| 5 (pending) | Redis state in three durability modes | Cache + persistent + AOF deployments |
-| 6 (pending) | Combined Redis+RediSearch | One fred client, two trait roles |
-| 7 (pending) | Redis-Vector entity/relation parity + v0.16.0 GA | Close the capability gap across backends |
+| 5 (shipped) | Redis `StateStore` with cache/persistent modes + `require_aof` enforcement | Cache + persistent AOF deployments on the state axis |
+| 6 (shipped) | Combined Redis+RediSearch (one `fred::Client`, two trait roles) via `from_client` + `combined_redis_client_by_project` cache | Operational unity for Redis-first infrastructure |
+| 7 (shipped, v0.16.0 GA) | Redis-Vector entity/relation parity | Close the capability gap; images deferred to v0.16.1 |
 
 See [multi-backend-operations.md](multi-backend-operations.md) for
 the operator-facing deployment matrix and

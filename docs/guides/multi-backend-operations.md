@@ -1,6 +1,6 @@
 # Multi-Backend Operations Guide
 
-**Target version:** v0.16.0-phase4+
+**Target version:** v0.16.0 GA
 **Audience:** operators deploying the-one-mcp in production.
 
 As of v0.16.0-rc1, the-one-mcp's persistence layer is split into two
@@ -21,32 +21,34 @@ combination.
 
 ### Vector backends
 
-| Backend        | Status (v0.16.0-phase4) | Capabilities                                             | Feature flag       |
-|----------------|-------------------------|----------------------------------------------------------|--------------------|
-| **Qdrant**     | First-class             | chunks, hybrid, entities, relations, images              | default            |
-| **pgvector (split)**   | **First-class (v0.16.0 Phase 2)** | chunks, entities, relations (hybrid = Decision D, deferred) | `pg-vectors`       |
-| **pgvector (combined)** | **First-class (v0.16.0 Phase 4)** | same as split; shares one `sqlx::PgPool` with `PostgresStateStore` | `pg-state,pg-vectors` |
-| **Redis-Vector** | Second-class          | chunks only (+ persistence check)                        | `redis-vectors`    |
-| **In-memory**  | Fallback                | keyword search only                                      | always available   |
+| Backend        | Status (v0.16.0 GA) | Capabilities                                             | Feature flag       |
+|----------------|---------------------|----------------------------------------------------------|--------------------|
+| **Qdrant**     | First-class         | chunks, hybrid, entities, relations, images              | default            |
+| **pgvector (split)**   | **First-class (Phase 2)** | chunks, entities, relations (hybrid = Decision D, deferred) | `pg-vectors`       |
+| **pgvector (combined)** | **First-class (Phase 4)** | same as split; shares one `sqlx::PgPool` with `PostgresStateStore` | `pg-state,pg-vectors` |
+| **Redis-Vector** | **First-class (Phase 7)** | chunks, entities, relations (+ persistence check). Images unsupported (v0.16.1). | `redis-vectors`    |
+| **Redis-Vector (combined)** | **First-class (Phase 6)** | same as above; shares one `fred::Client` with `RedisStateStore` | `redis-state,redis-vectors` |
+| **In-memory**  | Fallback            | keyword search only                                      | always available   |
 
 ### State store backends
 
-| Backend        | Status (v0.16.0-phase4)   | Capabilities                        | Feature flag       |
-|----------------|---------------------------|-------------------------------------|--------------------|
-| **SQLite**     | First-class               | FTS5, transactions, WAL             | default            |
-| **Postgres (split)**   | **First-class (v0.16.0 Phase 3)** | tsvector FTS, full ACID, BIGINT epoch_ms | `pg-state` |
-| **Postgres (combined)** | **First-class (v0.16.0 Phase 4)** | same as split; shares one `sqlx::PgPool` with `PgVectorBackend` | `pg-state,pg-vectors` |
-| **Redis-AOF**  | Planned (Phase 5)         | RedisJSON + persistence             | `redis-state` (future) |
-| **Redis cache**| Planned (Phase 5)         | volatile, fast                      | `redis-state` (future) |
+| Backend        | Status (v0.16.0 GA)   | Capabilities                        | Feature flag       |
+|----------------|-------------------------|-------------------------------------|--------------------|
+| **SQLite**     | First-class             | FTS5, transactions, WAL             | default            |
+| **Postgres (split)**   | **First-class (Phase 3)** | tsvector FTS, full ACID, BIGINT epoch_ms | `pg-state` |
+| **Postgres (combined)** | **First-class (Phase 4)** | same as split; shares one `sqlx::PgPool` with `PgVectorBackend` | `pg-state,pg-vectors` |
+| **Redis persistent** | **First-class (Phase 5)** | RediSearch FTS, HSET objects, Redis Streams, AOF enforced | `redis-state` |
+| **Redis cache** | **First-class (Phase 5)** | same data structures, volatile (no AOF check) | `redis-state` |
+| **Redis (combined)** | **First-class (Phase 6)** | same as above; shares one `fred::Client` with `RedisVectorStore` | `redis-state,redis-vectors` |
 
 ### Combined single-connection backends
 
 | Backend                    | Status              | Benefit                               |
 |----------------------------|---------------------|---------------------------------------|
-| SQLite + Qdrant sidecar    | First-class today   | Default deployment                    |
-| SQLite + Redis-Vector      | Supported today     | Low-latency small deployments         |
-| **Postgres + pgvector**    | **First-class (v0.16.0 Phase 4)** | One DB, one `sqlx::PgPool`, one credential, one backup target |
-| **Redis + RediSearch + AOF** | Planned (Phase 6) | One Redis, everything in one process  |
+| SQLite + Qdrant sidecar    | First-class         | Default deployment                    |
+| SQLite + Redis-Vector      | Supported           | Low-latency small deployments         |
+| **Postgres + pgvector**    | **First-class (Phase 4)** | One DB, one `sqlx::PgPool`, one credential, one backup target |
+| **Redis + RediSearch + AOF** | **First-class (Phase 6)** | One Redis, one `fred::Client`, everything in one process |
 
 ---
 
@@ -279,19 +281,42 @@ combined migration tool) — is in the standalone
 [`combined-postgres-backend.md`](combined-postgres-backend.md)
 guide.
 
-### Planned: Redis + RediSearch + AOF (combined)
+### Redis state (v0.16.0 Phase 5)
+
+```bash
+export THE_ONE_STATE_TYPE=redis
+export THE_ONE_STATE_URL=redis://localhost:6379
+export THE_ONE_VECTOR_TYPE=qdrant
+export THE_ONE_VECTOR_URL=http://localhost:6333
+```
 
 ```json
 {
-  "vector_backend": "redis",
-  "state_backend": "redis",
-  "redis_url": "redis://localhost:6379",
-  "redis_persistence_required": true
+  "state_redis": {
+    "require_aof": true
+  }
 }
 ```
 
-Same pattern: when both point at Redis, one `fred::Client` handles
-both roles.
+Two durability modes: persistent (`require_aof=true`, verifies
+`aof_enabled:1` at startup, refuses to boot without AOF) and cache
+(`require_aof=false`, volatile, explicitly accepts data loss).
+Rebuild: `cargo build --release -p the-one-mcp --bin the-one-mcp
+--features redis-state`.
+
+### Redis + RediSearch combined (v0.16.0 Phase 6)
+
+```bash
+export THE_ONE_STATE_TYPE=redis-combined
+export THE_ONE_STATE_URL=redis://localhost:6379
+export THE_ONE_VECTOR_TYPE=redis-combined
+export THE_ONE_VECTOR_URL=redis://localhost:6379   # byte-identical
+```
+
+One `fred::Client` handles both the `StateStore` and `VectorBackend`
+trait roles. Same refined Option Y pattern as Postgres combined.
+Rebuild: `cargo build --release -p the-one-mcp --bin the-one-mcp
+--features redis-state,redis-vectors`.
 
 ---
 
@@ -347,7 +372,7 @@ Operator decision guide — pick based on your priorities:
 | Maximum durability    | SQLite + Qdrant (with Qdrant backups) | WAL + Qdrant snapshots, no single point of failure |
 | Existing Postgres stack, operational unity | Postgres + pgvector (combined, Phase 4) | One credential, one pool, one backup target |
 | Existing Postgres stack, independent budgets | Postgres + pgvector (split, Phase 2+3) | Tune state and vectors separately |
-| Existing Redis stack  | Redis + RediSearch (future)        | One service to run, microsecond latencies      |
+| Existing Redis stack  | Redis + RediSearch combined (Phase 6) | One service to run, microsecond latencies   |
 | Large corpus (100M+)  | Qdrant                             | Dedicated vector DB scales better than pgvector past ~10M |
 | Small corpus (<1M)    | pgvector or Redis-Vector (future)  | Cheaper to operate, no sidecar                 |
 | Regulated / ACID critical | Postgres + pgvector (combined, Phase 4) | Shared pool is the foundation for cross-trait transactions (Phase 4.5+) |
@@ -362,7 +387,8 @@ Operator decision guide — pick based on your priorities:
 | Qdrant         | Safe against process crash. Depends on Qdrant's own persistence config. | Configure via Qdrant operator. |
 | Redis-Vector (AOF appendfsync=everysec) | Safe against process crash. OS crash can lose < 1s. | Set `redis_persistence_required: true`. |
 | Redis (no AOF) | Volatile. Data lost on restart.             | Use only when you explicitly want a cache. |
-| Postgres (planned) | Safe against OS crash via fsync on commit. | Default Postgres behaviour. |
+| Postgres (split or combined) | Safe against OS crash via fsync on commit. | Default Postgres behaviour. |
+| Redis persistent (AOF, `require_aof=true`) | Safe against process crash. OS crash can lose < 1s (appendfsync=everysec). | Phase 5 default for persistent mode. |
 
 If your workload cannot tolerate the < 1s loss window on SQLite,
 the-one-mcp supports overriding with `PRAGMA synchronous=FULL`
@@ -468,13 +494,16 @@ side's data in via `pg_dump` / `pg_restore`; the standalone
 combined guide has the exact commands. See
 [`combined-postgres-backend.md § 8`](combined-postgres-backend.md#8-migration-from-split-pool-postgres--different-databases).
 
-### Redis migrations (Phases 5 + 6, pending)
+### SQLite → Redis (shipped in v0.16.0 Phase 5)
 
-Redis state store ships in Phase 5 (three durability modes: cache,
-persistent with AOF, combined). Combined Redis+RediSearch ships in
-Phase 6. Migration paths for those will follow the same
-re-ingestion pattern as SQLite → Postgres — no automated cross-
-backend tooling.
+Same pattern as SQLite → Postgres: no automated migration.
+Re-run `project.init` against the Redis backend. Audit history
+and diary entries from the old SQLite DB are NOT carried over.
+
+1. Stand up Redis 7+ with the RediSearch module.
+2. Rebuild with `--features redis-state`.
+3. Export: `THE_ONE_STATE_TYPE=redis THE_ONE_STATE_URL=redis://...`
+4. Restart. For persistent mode, set `state_redis.require_aof = true`.
 
 ---
 
@@ -488,7 +517,8 @@ Backend-specific health checks:
 - **Qdrant**: HTTP `/healthz` on the Qdrant URL
 - **Redis**: `INFO persistence` + `FT._LIST` for index status
 - **SQLite**: `PRAGMA integrity_check` via the backup action
-- **Postgres** (future): `SELECT 1` + `pg_stat_activity`
+- **Postgres**: `SELECT 1` + `pg_stat_activity`
+- **Redis state**: `INFO persistence` (AOF status) + `INFO server`
 
 ---
 
@@ -501,7 +531,8 @@ where `vector_backend` is an external service (Qdrant / Redis-Vector
 / pgvector) and `state_backend` is SQLite.
 
 **Q: Can I run Redis cache-mode for state and Qdrant for vectors?**
-Yes (once Redis state mode ships in Phase B3). This gives you a
+Yes (shipped in Phase 5). Set `THE_ONE_STATE_TYPE=redis` with
+`state_redis.require_aof = false` in config. This gives you a
 volatile state store — audit events and diary entries survive only
 until the Redis instance restarts. Useful for ephemeral
 experimentation but not production.
@@ -542,8 +573,10 @@ Start here
     │    └─ No → SQLite + Qdrant (default)
     │
     ├─ Do you already run Redis?
-    │    └─ Yes → Redis + RediSearch (once combined mode ships, Phase 6)
-    │              otherwise SQLite + Redis-Vector
+    │    ├─ Yes, want operational unity
+    │    │    → Redis + RediSearch combined (Phase 6)
+    │    └─ Yes, vectors elsewhere
+    │         → Redis state (Phase 5) + Qdrant/pgvector
     │
     ├─ Corpus > 10M vectors?
     │    └─ Yes → SQLite + Qdrant (Qdrant scales better)
@@ -595,12 +628,10 @@ Start here
 
 ### Plans + trait source
 
-- `docs/plans/2026-04-11-resume-phase1-onwards.md` — canonical Phase
-  1–7 execution plan with DONE blocks for Phases 0–4.
-- `docs/plans/2026-04-11-resume-phase4-prompt.md` — standalone resume
-  prompt that drove the Phase 4 session (kept in tree as a
-  reference for the decision trail behind the refined Option Y
-  architecture).
+- `docs/plans/historical/2026-04-11-resume-phase1-onwards.md` — archived
+  Phase 1–7 execution plan with DONE blocks for all phases.
+- `docs/plans/historical/2026-04-11-resume-phase4-prompt.md` — archived
+  resume prompt for the Phase 4 session.
 - `docs/guides/mempalace-operations.md` — memory palace configuration
   (orthogonal to backend choice).
 - `docs/reviews/2026-04-10-mempalace-comparative-audit.md` — why the

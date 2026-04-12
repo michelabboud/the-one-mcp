@@ -2,9 +2,41 @@
 
 All notable changes to this project are documented in this file.
 
-## [Unreleased]
+## [v0.16.0] - 2026-04-12
 
 ### Added
+
+- **v0.16.0 Phase 7 — Redis-Vector entity/relation parity** (commit
+  `7857647`, tags `v0.16.0-phase7` + `v0.16.0`). `RedisVectorStore`
+  now supports entities and relations (was chunks-only). Each type
+  gets its own RediSearch index. `capabilities()` updated to
+  `entities=true`, `relations=true`. Images remain unsupported on
+  Redis (tracked for v0.16.1). Decision D (pgvector hybrid) deferred
+  to post-GA. Test count: 466 base, 521 all features.
+
+- **v0.16.0 Phase 6 — combined Redis+RediSearch backend** (commit
+  `1b1b22f`, tag `v0.16.0-phase6`). Same refined Option Y pattern as
+  Phase 4 Postgres combined. One `fred::Client` shared between
+  `RedisStateStore` (via `RedisStateStore::from_client`) and
+  `RedisVectorStore` (via `RedisVectorStore::new` with shared
+  client). Broker gains `combined_redis_client_by_project` cache.
+  Factory branches for `StateTypeChoice::RedisCombined` and
+  `VectorTypeChoice::RedisCombined`. `fred` added as direct optional
+  dep on `the-one-mcp`. Test count unchanged (combined tests skip
+  without env).
+
+- **v0.16.0 Phase 5 — Redis StateStore** (commit `1dbf6a5`, tag
+  `v0.16.0-phase5`). All 26 `StateStore` trait methods against Redis
+  (HSET for objects, Redis Streams for audit, sorted sets for
+  time-ordered listing, RediSearch `FT.SEARCH` for diary FTS). Two
+  modes: cache (`require_aof=false`) and persistent
+  (`require_aof=true`, verifies `aof_enabled:1`). New
+  `CoreError::Redis(String)` variant. New `StateRedisConfig`. New
+  Cargo feature `redis-state` on `the-one-core` + passthrough on
+  `the-one-mcp`. `fred` `i-streams` feature added.
+  `recursion_limit` bumped to 256. `RedisStateStore::from_client`
+  for Phase 6. 7 integration tests gated on
+  `THE_ONE_STATE_TYPE=redis`. Test count: 466 base, 511 features.
 
 - **v0.16.0 Phase 4 — combined Postgres+pgvector backend** (pending
   commit, tag `v0.16.0-phase4`). Ships the first *combined
