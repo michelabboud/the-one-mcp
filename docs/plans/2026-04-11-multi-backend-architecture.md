@@ -85,6 +85,17 @@ fix the implementation with `unchecked_transaction()`. **Decision: fix
 in SqliteStateStore as part of this refactor.** The trait doesn't need
 a transaction primitive because no other method batches writes.
 
+> **STATUS (2026-04-12):** this is the original architecture sketch
+> written before execution started. Phases 0–4 have shipped; the
+> actual shapes differ from some sketches below (notably § 7's
+> "combined backend" file location and the "one struct, two impls"
+> pattern — Phase 4 shipped a *dispatcher* refinement instead of a
+> named combined type). The canonical shipped-vs-planned delta for
+> every phase lives in
+> `docs/plans/2026-04-11-resume-phase1-onwards.md` (look for the
+> "DONE" block under each phase). Use that file, not this one, as
+> the source of truth for what currently exists.
+
 ## 4. Architecture — two traits, optionally combined
 
 ### 4.1 `trait VectorBackend`

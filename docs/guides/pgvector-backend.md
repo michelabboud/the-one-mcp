@@ -190,8 +190,10 @@ drifted.
 
 Phase 3's state-store runner uses a **distinct tracking table**
 (`the_one.state_migrations` vs pgvector's `the_one.pgvector_migrations`)
-so Phase 4's combined deployment (`postgres-combined` TYPE on both
-axes) can share one schema without collision.
+so the Phase 4 combined deployment (`postgres-combined` TYPE on
+both axes) shares one schema without collision. Both runners are
+idempotent and coexist cleanly — see
+[`combined-postgres-backend.md`](combined-postgres-backend.md).
 
 ---
 
@@ -211,10 +213,12 @@ Reasons this is a feature, not a limitation:
    if the dim matched numerically, re-using old vectors with a new
    provider produces semantically incoherent search results. Forcing
    a schema migration makes the rebuild deliberate.
-2. **Phase 4** (combined Postgres+pgvector) will want migration-
-   managed schemas for transactional consistency between state
-   writes and vector writes. Starting Phase 2 with migration
-   tracking means Phase 4 doesn't have to retrofit it.
+2. **Combined Postgres+pgvector (shipped in Phase 4)** shares
+   this schema with `PostgresStateStore` via a single
+   `sqlx::PgPool`. The migration-tracked schema makes the
+   combined path's zero-data-copy split → combined transition
+   possible — the combined adapter reuses the same migrations
+   already applied by the split-pool Phase 2/3 builds.
 3. **If you need multi-dim support later**, that's a new migration
    file (`0005_reshape_chunks_dim.sql`) with a documented downtime
    step — not a silent config toggle.
@@ -391,23 +395,37 @@ need a schema migration to ship β.
 
 ---
 
-## 12. Phase 4 combined preview
+## 12. Combined Postgres+pgvector (shipped in v0.16.0 Phase 4)
 
-Phase 4 will add `THE_ONE_STATE_TYPE=postgres-combined` +
-`THE_ONE_VECTOR_TYPE=postgres-combined` with byte-identical URLs.
-When both are set, the broker constructs **one** `sqlx::PgPool` that
-serves both `StateStore` AND `VectorBackend` trait roles.
-Transactional writes spanning state + vectors become possible (e.g.
-"ingest a conversation AND record the audit row atomically").
+Phase 4 is live. Setting `THE_ONE_STATE_TYPE=postgres-combined` +
+`THE_ONE_VECTOR_TYPE=postgres-combined` with byte-identical URLs
+makes the broker construct **one** `sqlx::PgPool` that serves both
+the `StateStore` trait role and the `VectorBackend` trait role
+against a single Postgres database. The operational win is one
+credential to rotate, one pgbouncer entry, one PITR backup window,
+and one set of IAM grants — not a new named backend type or new
+trait methods.
 
-The Phase 2 `vector_pgvector` tuning block and the Phase 3
-`state_postgres` block stay as-is — Phase 4 just adds a dispatcher
-that reads both and spins up one pool.
+This pgvector guide stays focused on the **split-pool** shape
+(separate pool for vectors, potentially on a different database
+from state) because the tuning knobs are the same on both paths.
+The only asymmetry is that on the combined path, this config's
+pool-sizing fields (`max_connections`, `min_connections`, the
+timeout fields) are **ignored** — the state config's pool-sizing
+wins. HNSW tuning (`hnsw_m`, `hnsw_ef_construction`, `hnsw_ef_search`)
+still applies on both paths because those are migration- and
+query-time settings, not pool settings.
 
 The distinct tracking tables (`pgvector_migrations` vs
-`state_migrations`) are precisely what lets Phase 4 share one schema
-without the two hand-rolled runners stepping on each other's
-versions.
+`state_migrations`) are what let Phase 4 share one schema without
+the two hand-rolled runners stepping on each other's versions.
+Both runners are idempotent, so a split-pool → combined migration
+against the same database is a zero-data-copy dispatcher swap.
+
+Full operational reference — topology, the "state config wins"
+rule, verification queries, migration paths, and what Phase 4
+deliberately does NOT ship — lives in the Phase 4 standalone
+guide: **[combined-postgres-backend.md](combined-postgres-backend.md)**.
 
 ---
 

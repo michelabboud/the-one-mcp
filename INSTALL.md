@@ -77,7 +77,19 @@ cargo build --release -p the-one-mcp --bin the-one-mcp --features pg-vectors
 cargo build --release -p the-one-mcp --bin the-one-mcp --features pg-state
 
 # Both — split-pool Postgres on both axes (two independent pools):
+# Activated at runtime via:
+#   THE_ONE_STATE_TYPE=postgres   THE_ONE_VECTOR_TYPE=pgvector
+#   THE_ONE_STATE_URL=...          THE_ONE_VECTOR_URL=...
 cargo build --release -p the-one-mcp --bin the-one-mcp --features pg-state,pg-vectors
+
+# Combined — ONE shared sqlx::PgPool serving both trait roles (Phase 4).
+# Same binary as split-pool above. Activated at runtime when BOTH
+# env vars select postgres-combined AND both URLs are byte-identical:
+#   THE_ONE_STATE_TYPE=postgres-combined
+#   THE_ONE_VECTOR_TYPE=postgres-combined
+#   THE_ONE_STATE_URL=postgres://user:pw@db.internal/the_one
+#   THE_ONE_VECTOR_URL=postgres://user:pw@db.internal/the_one
+# One credential, one pgbouncer entry, one PITR backup window.
 ```
 
 Runtime selection happens through env vars, not config files, so
@@ -91,12 +103,13 @@ is not in the dep tree.
 - Per-backend operational details (setup, tuning, monitoring)
   live in the standalone guides
   [docs/guides/pgvector-backend.md](docs/guides/pgvector-backend.md)
-  and
-  [docs/guides/postgres-state-backend.md](docs/guides/postgres-state-backend.md).
-- Phase 4 (combined single-pool Postgres serving both axes) is
-  pending — the env var parser already validates
-  `postgres-combined` TYPE values; the factory branch currently
-  returns `NotEnabled`.
+  (split-pool vectors),
+  [docs/guides/postgres-state-backend.md](docs/guides/postgres-state-backend.md)
+  (split-pool state), and
+  [docs/guides/combined-postgres-backend.md](docs/guides/combined-postgres-backend.md)
+  (combined single-pool, Phase 4 — one pool serving both trait
+  roles, the "state config wins" pool-sizing rule, migration
+  paths from split-pool).
 
 ## What Gets Installed
 

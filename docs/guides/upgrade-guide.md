@@ -4,6 +4,111 @@
 
 ---
 
+## Upgrading to v0.16.0-phase4 (from v0.16.0-phase3)
+
+### New features (opt-in, non-breaking)
+
+- **Combined Postgres+pgvector backend** — one `sqlx::PgPool` serving
+  both the `StateStore` trait role and the `VectorBackend` trait role
+  against a single Postgres database. Activated via
+  `THE_ONE_STATE_TYPE=postgres-combined` +
+  `THE_ONE_VECTOR_TYPE=postgres-combined` with byte-identical
+  `THE_ONE_STATE_URL` and `THE_ONE_VECTOR_URL`. The env-var parser
+  already enforced these matching + equality rules in Phase 2; Phase 4
+  replaces the previously-`NotEnabled` factory branches with real
+  constructors.
+- **No new Cargo feature.** The combined dispatcher is active
+  whenever both `pg-state` and `pg-vectors` are compiled in. No
+  rebuild beyond the standard split-pool Phase 2/3 build is required
+  to get combined support — it's the same binary, selected at runtime
+  via env vars.
+- **New `PgVectorBackend::from_pool` and `PostgresStateStore::from_pool`
+  constructors** — sync wrappers that take a pre-built `sqlx::PgPool`
+  and config, skip connect + preflight + migrations, and wrap the
+  pool in a trait object. Used internally by the combined path; safe
+  to use from downstream code if you want to share a pool across
+  subsystems.
+- **New module** `the_one_mcp::postgres_combined` exposing
+  `build_shared_pool`, `mirror_state_postgres_config`, and
+  `mirror_pgvector_config`. Gated on `all(pg-state, pg-vectors)`.
+- **Phase 3 TODO resolved**: `construct_postgres_state_store` now
+  reads `AppConfig::state_postgres` via the mirror helper instead of
+  Phase 3's stub `PostgresStateConfig::default()`. Operators who were
+  tuning `state_postgres` in `config.json` will now see their values
+  take effect on the split-pool path too (previously ignored).
+
+### Required action
+
+- **None.** Existing SQLite, Postgres split-pool, and pgvector split-
+  pool deployments keep working unchanged. Combined is strictly
+  additive.
+
+### To adopt the combined Postgres+pgvector backend
+
+If you're already running Phase 2 + Phase 3 split-pool against the
+**same** database (two sqlx pools pointing at one DSN), the upgrade
+is a zero-data-copy env-var swap:
+
+1. Shut down the broker cleanly.
+2. Verify `THE_ONE_STATE_URL` and `THE_ONE_VECTOR_URL` are
+   byte-identical (same host, port, database, credentials, query
+   params, everything).
+3. Change both TYPEs to `postgres-combined`:
+   ```bash
+   export THE_ONE_STATE_TYPE=postgres-combined
+   export THE_ONE_VECTOR_TYPE=postgres-combined
+   ```
+4. Restart. The broker constructs one shared pool instead of two
+   split pools; both migration runners are idempotent and detect
+   their already-applied state. Data is untouched — both trait roles
+   continue to read and write the same schema, just through one pool.
+
+If your split-pool deployment currently points at **different**
+databases for state and vectors, combined is not a seamless upgrade
+— you have to pick one database as the winner and move the other
+side's data in via `pg_dump` / `pg_restore`. See
+[`combined-postgres-backend.md § 8`](combined-postgres-backend.md#8-migration-from-split-pool-postgres--different-databases)
+for the exact commands.
+
+### statement_timeout inheritance (combined path only)
+
+On combined deployments, the shared pool's `after_connect` hook
+wires `SET statement_timeout = '<state_postgres.statement_timeout_ms>ms'`
+on every checked-out connection — which means **vector queries
+inherit the state-side timeout** even though the split-pool pgvector
+path had no equivalent hook at all.
+
+**Practical impact**: if you're migrating from split-pool pgvector
+(no statement timeout) to combined and your corpus is large enough
+that some vector searches take more than 30 seconds (the default),
+bump `state_postgres.statement_timeout_ms` in `config.json` before
+flipping the env vars. The default (30 s) is comfortable for corpora
+under ~5M vectors on typical hardware.
+
+### Pool sizing rule (combined path only)
+
+When combined is active, `state_postgres`'s pool-sizing fields win:
+`max_connections`, `min_connections`, the acquire/idle/max_lifetime
+timeouts, and `statement_timeout_ms` all apply to the shared pool.
+`vector_pgvector`'s corresponding fields are **ignored** on this
+path. HNSW tuning still comes from `vector_pgvector` because
+`hnsw_m`, `hnsw_ef_construction` are migration-time settings and
+`hnsw_ef_search` is applied per-search — neither is a pool setting.
+
+### No breaking changes
+
+- Broker API, MCP tool shapes, JSON-RPC wire format, config-file
+  format, and CLI adapters are unchanged.
+- The `StateStore` and `VectorBackend` trait signatures are
+  unchanged — no new trait methods ship in Phase 4.
+- Split-pool Postgres and split-pool pgvector paths are untouched
+  and keep working.
+
+Full operational reference in the new standalone
+[combined Postgres backend guide](combined-postgres-backend.md).
+
+---
+
 ## Upgrading to v0.16.0-phase3 (from v0.16.0-phase2)
 
 ### New features (opt-in, non-breaking)

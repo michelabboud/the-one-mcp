@@ -1,15 +1,16 @@
 # Progress Report
 
-## Current Version: v0.16.0-phase3
+## Current Version: v0.16.0-phase4
 
 **In-flight roadmap:** v0.16.0 multi-backend support (Phases 1–7 per
 `docs/plans/2026-04-11-resume-phase1-onwards.md`). Phase 0 (trait
 extraction) shipped as v0.16.0-rc1 bundled with v0.15.0 production
 hardening and v0.15.1 Lever 1. Phases 1 (broker call-site migration),
-2 (pgvector + env var parser), and 3 (PostgresStateStore) shipped as
-tags `v0.16.0-phase1`, `v0.16.0-phase2`, and `v0.16.0-phase3`.
-Phases 4–7 (combined Postgres+pgvector, Redis state modes, combined
-Redis, Redis-Vector parity, v0.16.0 GA release) are still ahead.
+2 (pgvector + env var parser), 3 (PostgresStateStore), and 4
+(combined Postgres+pgvector) shipped as tags `v0.16.0-phase1`,
+`v0.16.0-phase2`, `v0.16.0-phase3`, and `v0.16.0-phase4`.
+Phases 5–7 (Redis state modes, combined Redis, Redis-Vector parity +
+v0.16.0 GA release) are still ahead.
 
 ## Overall Status
 
@@ -42,6 +43,7 @@ All planned stages complete. Twenty-four tracked releases shipped
 - **v0.16.0-phase1** — Broker `state_by_project` cache via `StateStore` trait. Mechanical refactor landing the broker-side piece of the multi-backend roadmap. All 16 `ProjectDatabase::open` call sites in `broker.rs` now route through a new `with_state_store(project_root, project_id, |store| ...)` chokepoint. Inner lock is `std::sync::Mutex` (deliberately not tokio) so the guard is `!Send` — the compiler refuses to hold a backend connection across `.await`, preventing Postgres/Redis connection-pool deadlocks in Phase 3+. `get_or_init_state_store` constructs new entries outside the outer write lock (double-checks under it) — load-bearing for Phase 3+ async factories. `pub async fn McpBroker::shutdown()` drains the cache. Two handlers (`memory_ingest_conversation`, `tool_run`) restructured to split async memory/session work from sync DB work. New test `broker_state_store_cache_reuses_connections` verifies `Arc::ptr_eq` identity across repeated lookups, per-project isolation, and clean shutdown drain. Zero user-visible behaviour change. Commit `7666439`, tag `v0.16.0-phase1`. Completes the call-site migration that v0.16.0-rc1 explicitly deferred. **449 → 450 tests** (+1 cache test).
 - **v0.16.0-phase2** — pgvector `VectorBackend` + env var parser + startup validator. First real alternative vector backend after the Phase A trait extraction. New `crates/the-one-memory/src/pg_vector.rs` (~860 LOC) implementing chunks + entities + relations against pgvector (hybrid search deferred to Phase 2.5 as Decision D). Batched upserts via `INSERT ... SELECT * FROM UNNEST(...)`. Defensive `preflight_vector_extension` with targeted per-provider errors (Supabase / RDS / Cloud SQL / Azure / self-hosted). **Hand-rolled migration runner** at `pg_vector::migrations` — not `sqlx::migrate!` because sqlx's `migrate` and `chrono` features transitively reference `sqlx-sqlite?/…` weak-deps that cargo's `links` check pulls into the graph, colliding with rusqlite 0.39's `libsqlite3-sys 0.37`. Five migrations ship with hardcoded `dim=1024` (Decision C — BGE-large-en-v1.5 quality tier). New `the_one_core::config::backend_selection` submodule parsing the four-variable `THE_ONE_{STATE,VECTOR}_{TYPE,URL}` env surface with fail-loud validation (12 tests: 8 negative + 4 positive). New `VectorPgvectorConfig` in the config stack. `McpBroker` gains `backend_selection` field + `try_new_with_policy` fail-loud constructor + `build_pgvector_memory_engine` fast-path. New Cargo feature `pg-vectors` (off by default); sqlx features narrowed to `[runtime-tokio, tls-rustls, postgres, macros]` after bisection. Integration tests in `crates/the-one-memory/tests/pgvector_roundtrip.rs` (8 tests, env-gated, skip via `return`). New bench `pgvector_bench.rs`. Commit `91ff224`, tag `v0.16.0-phase2`. **450 → 464 baseline** (+14 config + parser tests), **450 → 477 with `--features pg-vectors`** (+27 total including 5 pg_vector unit + 8 integration).
 - **v0.16.0-phase3** — `PostgresStateStore` impl — second-axis complement to Phase 2's pgvector. Operators can now run the-one-mcp against managed Postgres (RDS, Cloud SQL, Azure, Supabase, self-hosted) with zero SQLite on the state axis. New `crates/the-one-core/src/storage/postgres.rs` (~1,350 LOC) implementing every `StateStore` trait method (26 methods — the plan estimated 22). **Sync-over-async bridge** via `tokio::task::block_in_place` + `Handle::current().block_on` in every trait method (`StateStore` is sync by design; sqlx is async; requires multi-threaded tokio runtime). Hand-rolled migration runner at `postgres::migrations` using the Phase 2 pattern; tracking table `the_one.state_migrations` is distinct from pgvector's `pgvector_migrations` so Phase 4 combined can share one schema. **FTS5 → tsvector translation**: `diary_entries.content_tsv TSVECTOR` column + GIN index + `websearch_to_tsquery('simple', $1)` for matching (not `'english'` — no stemming, works uniformly across languages and code) + `ts_rank` for ordering + LIKE fallback for empty tsquery. `upsert_diary_entry` wraps the INSERT in a sqlx transaction for atomicity. Schema v7 parity from day one (no incremental v1..v6 walk-through — Postgres has no history). **BIGINT epoch_ms throughout** (no chrono, no TIMESTAMPTZ — workspace-wide convention). New `CoreError::Postgres(String)` variant with `"postgres"` label in `error_kind_label` (3 surgical touches: enum, label, exhaustive test). New `StatePostgresConfig` mirroring `VectorPgvectorConfig`. `state_store_factory` is now `async` (Phase 1 pre-announced this) and branches on `BackendSelection.state`. New Cargo feature `pg-state` (off by default, composable with `pg-vectors`). Integration tests in `crates/the-one-core/tests/postgres_state_roundtrip.rs` (11 tests, env-gated, skip via `return`, run with `--test-threads=1`). Cross-backend regression tests deferred — documented coverage gap; 11 PostgresStateStore-specific tests cover the trait surface instead. Commit `f010ed6`, tag `v0.16.0-phase3`. **464 → 466 baseline** (+2 config), **464 → 495 with `--features pg-state,pg-vectors`** (+31 total: 13 Phase-2 gated + 16 Phase-3 gated + 2 base).
+- **v0.16.0-phase4** — **combined Postgres+pgvector backend**. The first *combined single-pool* backend on the multi-backend roadmap: one `sqlx::PgPool` serving both the `StateStore` trait role and the `VectorBackend` trait role against a single Postgres database. Activated via `THE_ONE_STATE_TYPE=postgres-combined` + `THE_ONE_VECTOR_TYPE=postgres-combined` with byte-identical URLs — the Phase 2 env-var parser already enforced the matching + equality rules, and Phase 4 flips the previously-`NotEnabled` factory branches to real constructors. **Refined Option Y architecture (no named combined type)**: instead of a hypothetical `PostgresCombinedBackend` struct that would own both sub-backends and forward 34+ trait methods, Phase 4 adds `PgVectorBackend::from_pool` (memory crate) and `PostgresStateStore::from_pool` (core crate) — both sync wrapper constructors that skip connect + preflight + migrations and just take a pre-built pool + config. The pool is shared via `McpBroker::combined_pg_pool_by_project: RwLock<HashMap<String, sqlx::postgres::PgPool>>` using the same read-upgrade-write cold-path pattern as `get_or_init_state_store`. `sqlx::PgPool` is internally `Arc`-reference-counted so `pool.clone()` is a cheap refcount bump giving both trait-role sub-backends a handle to the same underlying pool — no explicit `Arc<PgPool>` needed. **New module** `crates/the-one-mcp/src/postgres_combined.rs` (`#[cfg(all(pg-state, pg-vectors))]`) owns `build_shared_pool` (connect + `preflight_vector_extension` + `pg_vector::migrations::apply_all` + `postgres::migrations::apply_all` + 1024-dim check, all exactly once per project on the cold path) plus two mirror helpers (`mirror_state_postgres_config`, `mirror_pgvector_config`). Lives on `the-one-mcp` because cargo features are per-crate booleans and only the broker crate has both `pg-state` and `pg-vectors` reachable. **Two new factory methods**: `construct_postgres_combined_state_store` (state axis) and `build_postgres_combined_memory_engine` (vector axis, takes priority over the Phase 2 `build_pgvector_memory_engine` branch). **`McpBroker::shutdown()`** now drains the shared-pool cache first and `pool.close().await`s each entry before clearing the state cache, so teardown order is deterministic (without the explicit close, sqlx pools stay alive until the last `clone()` drops, which can race with test cleanup). **Phase 3 TODO resolved**: `construct_postgres_state_store` now reads `AppConfig::state_postgres` via `mirror_state_postgres_config` instead of Phase 3's stub `PostgresStateConfig::default()`. **Pool-sizing rule**: state config wins — `state_postgres.{max,min}_connections`, the timeout fields, AND `statement_timeout_ms` (via the `after_connect` hook) all apply to the shared pool. Consequence: vector queries inherit the state-side `statement_timeout` on combined deployments (the split-pool pgvector path has no equivalent hook). HNSW tuning still comes from `vector_pgvector` because those are migration-time + query-time settings. **New Cargo dep**: `sqlx` as a direct optional dep on `the-one-mcp` with the same narrow `[runtime-tokio, tls-rustls, postgres, macros]` feature set Phase 2/3 bisected, activated by either `pg-state` or `pg-vectors`. **NOT shipped**: no `begin_combined_tx()` trait method (considered and deferred — no call site needed it); no named combined backend type; no automated split → combined migration tool; no trait-surface changes. Integration tests in `crates/the-one-mcp/tests/postgres_combined_roundtrip.rs` (5 tests gated on `all(pg-state, pg-vectors)` + `THE_ONE_{STATE,VECTOR}_TYPE=postgres-combined` + byte-identical URLs, skip gracefully via `return`); mirror-helper unit tests inline in `postgres_combined.rs` (4 tests, no Postgres required). **New standalone guide** `docs/guides/combined-postgres-backend.md`. Updated sections in `multi-backend-operations.md`, `pgvector-backend.md § 12`, `postgres-state-backend.md § 11`, `configuration.md`, `architecture.md`. Commit `<pending>`, tag `v0.16.0-phase4`. **466 baseline unchanged**, **495 → 504 with `--features pg-state,pg-vectors`** (+4 mirror unit + +5 integration).
 - **MemPalace phase 2** — completed production feature set:
   - AAAK compression + lesson persistence (`memory.aaak.*`)
   - explicit drawers/closets/tunnels primitives (`memory.navigation.*`)
@@ -68,26 +70,28 @@ Build/test gates: all green. **450 tests passing** (+1 ignored — the Lever 2 d
 | Platforms | 1 | 1 | 6 | 6 | 6 | 6 | 6 | 6 | 6 | 6 | 6 | **6** |
 | AI CLIs | 2 | 2 | 4 | 4 | 4 | 4 | 4 | 4 | 4 | 4 | 4 | **4** |
 
-### Recent (v0.13.0 → v0.16.0-phase1)
+### Recent (v0.13.0 → v0.16.0-phase4)
 
-| Metric | v0.13.0 | v0.13.1 | v0.14.0 | v0.14.3 | v0.15.0 | v0.15.1 | v0.16.0-rc1 | v0.16.0-phase1 |
-|--------|---------|---------|---------|---------|---------|---------|-------------|----------------|
-| MCP Tools | 17 | 17 | 17 | 17 | 17 | 17 | 17 | **17** |
-| MCP Resources | 3 types | 3 types | 3 types | 3 types | 3 types | 3 types | 3 types | **3 types** |
-| Tests (passing) | 302 | 308 | 308 | 387 | 426 | 428 | 449 | **450** |
-| Tests (ignored) | 0 | 0 | 0 | 1 | 1 | 1 | 1 | **1** |
-| Supported code languages | 13 | 13 | 13 | 13 | 13 | 13 | 13 | **13** |
-| Metrics counters | 15 | 15 | 15 | 15 | 15 | 15 | 15 | **15** |
-| maintain actions | 16 | 16 | 16 | 17 | 17 | 17 | 17 | **17** |
-| Catalog Tools | 184 | 184 | 365 | 365 | 365 | 365 | 365 | **365** |
-| SQLite schema version | v5 | v5 | v5 | v6 | **v7** | v7 | v7 | **v7** |
-| Backend traits | 0 | 0 | 0 | 0 | 0 | 0 | **2** (`VectorBackend`, `StateStore`) | 2 |
-| Broker DB pattern | per-call `open` | per-call `open` | per-call `open` | per-call `open` | per-call `open` | per-call `open` | per-call `open` (trait impl exists, unused by broker) | **cached via `with_state_store` chokepoint** |
-| Audit write latency (per row) | ~5.5 ms | ~5.5 ms | ~5.5 ms | ~5.5 ms | ~5.5 ms | **~83 µs** (67× faster, Lever 1) | ~83 µs | ~83 µs |
-| Error sanitization | raw | raw | raw | raw | **`public_error_message` envelope + `corr=<id>`** | same | same | same |
-| Cursor pagination | silent truncation | silent truncation | silent truncation | silent truncation | **`InvalidRequest` on over-limit** | same | same | same |
+| Metric | v0.15.0 | v0.15.1 | v0.16.0-rc1 | v0.16.0-phase1 | v0.16.0-phase2 | v0.16.0-phase3 | v0.16.0-phase4 |
+|--------|---------|---------|-------------|----------------|----------------|----------------|----------------|
+| MCP Tools | 17 | 17 | 17 | 17 | 17 | 17 | **17** |
+| MCP Resources | 3 types | 3 types | 3 types | 3 types | 3 types | 3 types | **3 types** |
+| Tests (passing, base) | 426 | 428 | 449 | 450 | 464 | 466 | **466** |
+| Tests (passing, `--features pg-state,pg-vectors`) | — | — | — | — | 477 | 495 | **504** |
+| Tests (ignored) | 1 | 1 | 1 | 1 | 1 | 1 | **1** |
+| Supported code languages | 13 | 13 | 13 | 13 | 13 | 13 | **13** |
+| Metrics counters | 15 | 15 | 15 | 15 | 15 | 15 | **15** |
+| Catalog Tools | 365 | 365 | 365 | 365 | 365 | 365 | **365** |
+| SQLite schema version | **v7** | v7 | v7 | v7 | v7 | v7 | **v7** |
+| Backend traits | 0 | 0 | **2** (`VectorBackend`, `StateStore`) | 2 | 2 | 2 | **2** |
+| Broker DB pattern | per-call `open` | per-call `open` | per-call `open` (trait impl exists, unused by broker) | **cached via `with_state_store` chokepoint** | same + backend_selection parser | same + `state_store_factory` async | same + `combined_pg_pool_by_project` cache |
+| Vector backends | Qdrant, Redis-Vector, in-memory | same | same (unified via trait) | same | **+ pgvector (split)** | same | **same (+ combined share)** |
+| State backends | SQLite only | same | same | same (cached) | same | **+ Postgres (split)** | **same (+ combined share)** |
+| `from_pool` constructors | — | — | — | — | — | — | **`PgVectorBackend::from_pool` + `PostgresStateStore::from_pool`** |
+| Audit write latency (per row) | ~5.5 ms | **~83 µs** (67× faster, Lever 1) | ~83 µs | ~83 µs | ~83 µs | ~83 µs | ~83 µs |
+| Error sanitization | **`public_error_message` envelope + `corr=<id>`** | same | same | same | same | + `CoreError::Postgres` variant | same |
 
-**Note on the test count jump from v0.13.1 (308) → v0.14.3 (387):** the ~80-test gap covers the v0.14.x series of additions that weren't individually tracked in this file. The v0.14.3 count (387 passing + 1 ignored) is the number PROGRESS.md was stuck at before the v0.16.0 roadmap started. The v0.15.0 count of 426 is back-computed as v0.14.3 + 23 new tests + 16 other contemporaneous additions (audit outcome tests, sanitization tests, pagination tests not listed separately in CHANGELOG). v0.15.1 adds 2. v0.16.0-rc1 adds ~21 (diary atomicity, trait sanity, capability reporting). v0.16.0-phase1 adds 1 (the cache-reuse test). Final baseline measured at commit `5ff9872` was 449 passing / 1 ignored; after Phase 1's commit `7666439` it is **450 passing / 1 ignored**.
+**Note on the test count jump from v0.13.1 (308) → v0.14.3 (387):** the ~80-test gap covers the v0.14.x series of additions that weren't individually tracked in this file. The v0.14.3 count (387 passing + 1 ignored) is the number PROGRESS.md was stuck at before the v0.16.0 roadmap started. v0.15.0 rebuilt the baseline at 426 (v0.14.3 + ~39 production-hardening tests). v0.15.1 added 2. v0.16.0-rc1 added ~21 (diary atomicity, trait sanity, capability reporting). v0.16.0-phase1 added 1 (cache-reuse test). v0.16.0-phase2 added +14 base (config + env parser) and +13 feature-gated (pgvector unit + integration). v0.16.0-phase3 added +2 base (config) and +18 feature-gated (postgres-state integration + extended gated unit). v0.16.0-phase4 left the base count unchanged at 466 and added +9 feature-gated (4 mirror unit + 5 combined integration), reaching **504 with `--features pg-state,pg-vectors`**.
 
 ## Stage Progress (v0.1.0)
 
@@ -350,27 +354,28 @@ THE_ONE_VECTOR_URL=<connection string, may carry credentials>
 
 Full rationale and the per-rule test matrix in `docs/plans/2026-04-11-resume-phase1-onwards.md § Backend selection scheme`.
 
-### Phase 4 resume prompt
+### Phase 4 resume prompt (historical)
 
-A self-contained resume prompt for a fresh session to pick up **Phase 4**
-(combined Postgres+pgvector backend) lives at
-`docs/plans/2026-04-11-resume-phase4-prompt.md` — zero-bootstrap entry
-point that reuses the Phase 2 and Phase 3 construction paths (~300 LOC
-of dispatcher wiring). Phase 2's original resume prompt was deleted in
-the post-phase3 docs sweep as a one-session artifact; the canonical
-historical records for Phases 0–3 live as DONE blocks inside
+The self-contained resume prompt for Phase 4 — which drove the
+session that shipped the combined Postgres+pgvector backend — lives
+at `docs/plans/2026-04-11-resume-phase4-prompt.md`. It's kept in
+tree as a reference for the decision trail behind the refined
+Option Y architecture (no named combined backend type; shared pool
+via `from_pool` constructors + a per-project broker cache). Phase 2's
+original resume prompt was deleted in the post-phase3 docs sweep as
+a one-session artifact; the canonical historical records for
+Phases 0–4 live as DONE blocks inside
 `docs/plans/2026-04-11-resume-phase1-onwards.md`.
 
 ## What's Next
 
 ### Immediate (next session)
 
-- **Phase 4 of v0.16.0** — Combined Postgres+pgvector backend. One `sqlx::PgPool` serving both `StateStore` AND `VectorBackend` trait roles for transactional consistency between state writes and vector writes. Activated via `THE_ONE_STATE_TYPE=postgres-combined` + `THE_ONE_VECTOR_TYPE=postgres-combined` with byte-identical URLs (the backend-selection parser already validates this; the `state_store_factory` branch currently returns `NotEnabled` and Phase 4 swaps it for a real `PostgresCombinedBackend::new` call). Estimated ~300 LOC — mostly dispatcher wiring, reusing Phase 2's `PgVectorBackend::new` and Phase 3's `PostgresStateStore::new` construction paths. The resume prompt lives in `docs/plans/2026-04-11-resume-phase4-prompt.md` (fresh session zero-bootstrap entry point) with the full deliverable list also mirrored in `docs/plans/2026-04-11-resume-phase1-onwards.md` § Phase 4.
+- **Phase 5 of v0.16.0** — Redis `StateStore` with three durability modes (cache-only / persistent+AOF-required / combined-with-RediSearch). `require_aof` enforcement refuses to boot on a Redis without AOF when `mode = "persistent"`. Composes with either Qdrant (split) or Redis-Vector (combined) on the vector axis. The resume-plan doc at `docs/plans/2026-04-11-resume-phase1-onwards.md § Phase 5` has the full deliverable list.
 
-### Near-Term (Phases 5–6)
+### Near-Term (Phase 6)
 
-- Phase 5: Redis `StateStore` with three modes (cache-only, persistent+AOF-required, combined-with-RediSearch). `require_aof` enforcement refuses to boot on Redis without AOF when `mode = "persistent"`.
-- Phase 6: Combined Redis+RediSearch (~300 LOC) — ONE `fred::Client` serving both roles, with MULTI/EXEC transaction semantics (limits documented in the combined adapter).
+- Phase 6: Combined Redis+RediSearch (~300 LOC) — ONE `fred::Client` serving both roles, with MULTI/EXEC transaction semantics (limits documented in the combined adapter). Parallel shape to Phase 4's refined-Y refactor but Redis-specific; Phase 6 will revisit whether to introduce a named combined backend type given Redis's three-mode surface.
 
 ### Medium-Term (Phase 7 / v0.16.0 GA)
 

@@ -272,9 +272,11 @@ for the full rationale. Short version:
 - Phase 3's runner uses `include_str!` to embed `.sql` files,
   SHA-256 checksums to detect drift, a `the_one.state_migrations`
   tracking table, and idempotent re-apply.
-- Phase 4's combined backend can share a single schema with
+- Phase 4's combined backend (shipped) shares a single schema with
   pgvector because the two tracking tables are **distinct**
-  (`pgvector_migrations` vs `state_migrations`).
+  (`pgvector_migrations` vs `state_migrations`). Both runners are
+  idempotent, so the shared-pool builder applies them in sequence
+  against the same pool without ever colliding.
 
 ### Files shipped
 
@@ -424,22 +426,52 @@ vars aren't set, the tests skip gracefully via `return` in
 
 ---
 
-## 11. Phase 4 combined preview
+## 11. Combined Postgres+pgvector (shipped in v0.16.0 Phase 4)
 
-Phase 4 will add `THE_ONE_STATE_TYPE=postgres-combined` +
-`THE_ONE_VECTOR_TYPE=postgres-combined` with byte-identical URLs.
-When both are set, the broker will construct **one** `sqlx::PgPool`
-that serves both `StateStore` AND `VectorBackend` trait roles.
-Transactional writes spanning state + vectors become possible (e.g.
-"ingest conversation AND record the audit row atomically in one
-transaction").
+Phase 4 is live. Setting `THE_ONE_STATE_TYPE=postgres-combined` +
+`THE_ONE_VECTOR_TYPE=postgres-combined` with byte-identical URLs
+makes the broker construct **one** `sqlx::PgPool` that serves both
+the `StateStore` trait role (everything this guide covers) and the
+`VectorBackend` trait role against a single Postgres database. The
+operational benefit is one credential to rotate, one pgbouncer
+entry, one backup window, and one IAM grant — not a new named
+backend type or a new trait method.
 
-The Phase 3 `state_postgres` config block and the Phase 2
-`vector_pgvector` block stay as-is — Phase 4 just adds a dispatcher
-that reads both and spins up one pool. The distinct tracking tables
-(`pgvector_migrations` vs `state_migrations`) are precisely what lets
-Phase 4 share one schema without the two hand-rolled runners
-colliding on version numbers.
+This state guide stays focused on the **split-pool** shape because
+every `StateStore` trait method (schema, FTS translation, bridging,
+migrations, behavioural tests) is identical on both paths. The
+only difference is who constructs the pool:
+
+- **Split pool:** `PostgresStateStore::new(&config, url, project_id)`
+  opens its own `sqlx::PgPool` and runs migrations against it.
+- **Combined pool:** the broker's Phase 4 `build_shared_pool`
+  helper opens **one** `sqlx::PgPool` (using this config's pool
+  sizing — the state config's sizing wins on the combined path),
+  runs BOTH this module's migrations AND the pgvector migrations,
+  then calls `PostgresStateStore::from_pool` to wrap the shared
+  pool in a `StateStore` trait object. The vector side reaches
+  into the same shared pool via `PgVectorBackend::from_pool`.
+
+On the combined path, `state_postgres.statement_timeout_ms` is
+applied to the shared pool via the same `after_connect` hook this
+module wires on split-pool — which means **vector queries inherit
+the state-side timeout** on combined deployments. If you're
+migrating from split-pool pgvector (no statement timeout) to
+combined, bump this value up to accommodate your slowest vector
+search under load.
+
+The distinct tracking tables (`the_one.state_migrations` for this
+module, `the_one.pgvector_migrations` for the vector side) are
+what let both hand-rolled runners share the same schema without
+colliding on version numbers. Both runners are idempotent, so
+restarting a broker after a split-pool → combined env-var swap
+is a zero-data-copy transition against the same database.
+
+Full operational reference — topology, the "state config wins"
+rule, verification queries, what Phase 4 deliberately does NOT
+ship (no `begin_combined_tx()` trait method yet, no named
+combined backend type) — lives in the Phase 4 standalone guide:
+**[combined-postgres-backend.md](combined-postgres-backend.md)**.
 
 ---
 

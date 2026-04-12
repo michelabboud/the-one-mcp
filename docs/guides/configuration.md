@@ -1,6 +1,6 @@
 # Configuration Reference
 
-> v0.16.0-phase3 — authoritative source: `crates/the-one-core/src/config.rs` and `crates/the-one-core/src/limits.rs`. See § Multi-Backend Selection (v0.16.0+) below for the Phase 2/3 pgvector + Postgres state config additions.
+> v0.16.0-phase4 — authoritative source: `crates/the-one-core/src/config.rs` and `crates/the-one-core/src/limits.rs`. See § Multi-Backend Selection (v0.16.0+) below for the Phase 2/3/4 pgvector + Postgres state + combined config additions.
 
 ## Overview
 
@@ -199,9 +199,21 @@ Valid combinations shipping today:
 | unset | `pgvector` | `pg-vectors` | v0.16.0 Phase 2 |
 | `postgres` | unset | `pg-state` | v0.16.0 Phase 3 |
 | `postgres` | `pgvector` | `pg-state,pg-vectors` | v0.16.0 Phase 3 (split pools) |
-| `postgres-combined` | `postgres-combined` | (planned) | v0.16.0 Phase 4 (combined pool) |
+| `postgres-combined` | `postgres-combined` | `pg-state,pg-vectors` | v0.16.0 Phase 4 (combined pool) |
 | `redis` | any | (planned) | v0.16.0 Phase 5 |
 | `redis-combined` | `redis-combined` | (planned) | v0.16.0 Phase 6 |
+
+> **Combined deployments reuse both config sections.** When
+> `postgres-combined` is set on both axes, the broker reads
+> `[state_postgres]` AND `[vector_pgvector]` from the same
+> `config.json` — there is no `[combined_postgres]` section.
+> Pool-sizing fields (`max_connections`, `min_connections`, the
+> timeout fields, `statement_timeout_ms`) come from
+> `state_postgres` only — `vector_pgvector`'s corresponding pool
+> fields are ignored on the combined path. HNSW tuning still
+> comes from `vector_pgvector` because those are migration-time
+> and query-time settings. Full rationale in the
+> [combined Postgres backend guide](combined-postgres-backend.md).
 
 **Fail-loud startup validation** — the broker parses these env vars once at
 `McpBroker::try_new_with_policy` and enforces every rule below. Any
@@ -294,14 +306,16 @@ omit the block for production-sane defaults.
 
 | Field | Default | Notes |
 |---|---|---|
-| `schema` | `"the_one"` | Same schema as pgvector by default, so Phase 4's combined deployment shares one namespace. |
-| `statement_timeout_ms` | `30000` (30s) | Applied per-connection via `SET statement_timeout` in sqlx's `after_connect` hook. `0` disables entirely (Postgres default). |
-| `max_connections` ... `max_lifetime_ms` | (same defaults as `vector_pgvector`) | Field shapes deliberately parallel so Phase 4 combined can share one tuning surface. |
+| `schema` | `"the_one"` | Same schema as pgvector by default, so combined Phase 4 deployments share one namespace. |
+| `statement_timeout_ms` | `30000` (30s) | Applied per-connection via `SET statement_timeout` in sqlx's `after_connect` hook. `0` disables entirely (Postgres default). On the **combined** path (Phase 4), this value also applies to vector queries — the shared pool's `after_connect` hook uses the state-side value for every checked-out connection. |
+| `max_connections` ... `max_lifetime_ms` | (same defaults as `vector_pgvector`) | Field shapes are deliberately parallel. On the **combined** path (Phase 4), these state-side fields win — `vector_pgvector`'s corresponding fields are ignored and this one block controls the shared pool. |
 
 See the full [Postgres state backend guide](postgres-state-backend.md) for
 the sync-over-async bridge rationale, FTS5 → tsvector translation details,
-`'simple'` vs `'english'` tokenizer choice, schema v7 parity, migration
-path from SQLite, and the Phase 4 combined preview.
+`'simple'` vs `'english'` tokenizer choice, schema v7 parity, and the
+migration path from SQLite. For the combined-pool variant shipped in
+Phase 4 (one `sqlx::PgPool` serving both trait roles), see the
+[combined Postgres backend guide](combined-postgres-backend.md).
 
 ---
 

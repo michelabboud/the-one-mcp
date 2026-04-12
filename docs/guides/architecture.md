@@ -460,11 +460,12 @@ every `StateStore` trait method on Postgres. Key elements:
   short `"postgres"` label to clients and keeps full error text in
   `tracing::error!` logs.
 
-### Factory dispatcher (Phase 2 + Phase 3)
+### Factory dispatcher (Phase 2 + Phase 3 + Phase 4)
 
 `McpBroker::state_store_factory` is `async` as of Phase 3 (Phase 1's
-doc comment pre-announced this). It branches on the parsed
-`BackendSelection.state`:
+doc comment pre-announced this). As of Phase 4 it dispatches every
+in-scope branch — only Phase 5/6 variants still return
+`NotEnabled`. It branches on the parsed `BackendSelection.state`:
 
 ```rust
 async fn state_store_factory(
@@ -474,18 +475,28 @@ async fn state_store_factory(
 ) -> Result<Box<dyn StateStore + Send>, CoreError> {
     match self.backend_selection.state {
         StateTypeChoice::Sqlite => Ok(Box::new(ProjectDatabase::open(...)?)),
-        StateTypeChoice::Postgres => self.construct_postgres_state_store(project_id).await,
+        StateTypeChoice::Postgres => {
+            self.construct_postgres_state_store(project_root, project_id).await
+        }
+        StateTypeChoice::PostgresCombined => {
+            // Phase 4 — shared pool cached in combined_pg_pool_by_project,
+            // wrapped via PostgresStateStore::from_pool.
+            self.construct_postgres_combined_state_store(project_root, project_id).await
+        }
         StateTypeChoice::Redis => Err(CoreError::NotEnabled("Phase 5".into())),
-        StateTypeChoice::PostgresCombined => Err(CoreError::NotEnabled("Phase 4".into())),
         StateTypeChoice::RedisCombined => Err(CoreError::NotEnabled("Phase 6".into())),
     }
 }
 ```
 
-The vector axis has a parallel branch in `build_memory_engine` that
-short-circuits to `build_pgvector_memory_engine` when
-`BackendSelection.vector == Pgvector`, falling through to the legacy
-`config.vector_backend` string-based path otherwise.
+The vector axis has a parallel branch in `build_memory_engine`:
+`VectorTypeChoice::PostgresCombined` short-circuits to
+`build_postgres_combined_memory_engine` (Phase 4) which reaches
+into the SAME shared-pool cache and constructs `PgVectorBackend`
+via `from_pool`, so both trait roles share one pool per project.
+`VectorTypeChoice::Pgvector` routes to `build_pgvector_memory_engine`
+(Phase 2 split-pool path). Anything else falls through to the
+legacy `config.vector_backend` string-based path.
 
 ### Cross-phase relationship
 
@@ -495,7 +506,7 @@ short-circuits to `build_pgvector_memory_engine` when
 | 1 | `state_by_project` cache + sync-closure chokepoint | Phase 3+ async factories without pool deadlocks |
 | 2 | pgvector backend + env var parser + startup validator | Alternative vector backend; env-driven selection |
 | 3 | PostgresStateStore + `state_store_factory` async | Alternative state backend; cross-axis deployment |
-| 4 (pending) | Combined Postgres+pgvector (one pool, two trait roles) | Transactional writes spanning state + vectors |
+| 4 (shipped) | Combined Postgres+pgvector (one `sqlx::PgPool`, two trait roles) via `from_pool` constructors + `combined_pg_pool_by_project` cache | Operational unity (one credential, one pgbouncer entry, one PITR window); foundation for future cross-trait transactions |
 | 5 (pending) | Redis state in three durability modes | Cache + persistent + AOF deployments |
 | 6 (pending) | Combined Redis+RediSearch | One fred client, two trait roles |
 | 7 (pending) | Redis-Vector entity/relation parity + v0.16.0 GA | Close the capability gap across backends |
@@ -503,7 +514,8 @@ short-circuits to `build_pgvector_memory_engine` when
 See [multi-backend-operations.md](multi-backend-operations.md) for
 the operator-facing deployment matrix and
 [pgvector-backend.md](pgvector-backend.md) /
-[postgres-state-backend.md](postgres-state-backend.md) for the
+[postgres-state-backend.md](postgres-state-backend.md) /
+[combined-postgres-backend.md](combined-postgres-backend.md) for the
 per-backend setup guides.
 
 ## Tool Dispatch Architecture

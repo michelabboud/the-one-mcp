@@ -232,6 +232,34 @@ impl PostgresStateStore {
         })
     }
 
+    /// v0.16.0 Phase 4 — build a state store from an already-constructed,
+    /// already-migrated `PgPool`. Used by the combined
+    /// Postgres+pgvector path where ONE pool is shared between the
+    /// `StateStore` trait role and the `VectorBackend` trait role.
+    ///
+    /// Unlike [`PostgresStateStore::new`], this constructor is **sync**
+    /// (no pool construction, no migrations, no `after_connect` hook)
+    /// because all of that work has already been done by the combined
+    /// caller before it hands us the pool.
+    ///
+    /// ## statement_timeout asymmetry
+    ///
+    /// `statement_timeout` is applied via `PgPoolOptions::after_connect`
+    /// at pool construction time — NOT at this constructor's call time.
+    /// The combined caller reads `PostgresStateConfig::statement_timeout_ms`
+    /// and wires the hook BEFORE calling `from_pool`, so every freshly
+    /// checked-out connection from the shared pool gets the same
+    /// `SET statement_timeout = ...` that the split-pool path would
+    /// apply. Documented in `docs/guides/combined-postgres-backend.md`
+    /// alongside the "state config's pool-sizing wins" rule.
+    pub fn from_pool(pool: PgPool, config: &PostgresStateConfig, project_id: &str) -> Self {
+        Self {
+            pool,
+            project_id: project_id.to_string(),
+            schema: config.schema.clone(),
+        }
+    }
+
     /// Close the pool. Called from `McpBroker::shutdown()` in
     /// Phase 4+ when the state trait gains a shutdown method; until
     /// then the pool drops implicitly when the broker's cache

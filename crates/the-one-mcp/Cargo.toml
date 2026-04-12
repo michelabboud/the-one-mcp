@@ -21,16 +21,27 @@ redis-vectors = ["the-one-memory/redis-vectors", "local-embeddings"]
 # compile gate on `PgVectorBackend` uses `#[cfg(feature = "pg-vectors")]`
 # in `the-one-memory` so the broker's factory branch degrades to a
 # clean `InvalidProjectConfig` error when the feature is off.
-pg-vectors = ["the-one-memory/pg-vectors"]
+#
+# Also activates `dep:sqlx` on this crate so Phase 4's combined-pool
+# module (`src/postgres_combined.rs`, gated on `all(pg-state, pg-vectors)`)
+# can construct `sqlx::postgres::PgPoolOptions` directly and cache
+# `sqlx::postgres::PgPool` handles in the broker. Same narrow sqlx
+# feature set as `the-one-memory` and `the-one-core` use — the
+# `links` conflict check Phase 2/3 bisected stays satisfied.
+pg-vectors = ["the-one-memory/pg-vectors", "dep:sqlx"]
 
 # v0.16.0 Phase 3 — PostgresStateStore backend. Passthrough to
 # the-one-core's `pg-state` feature. Off by default; operators opt in
 # via `cargo build --features pg-state` when building the binary.
 # Composable with `pg-vectors`: `--features pg-state,pg-vectors`
 # gives you both split-pool Postgres state AND split-pool pgvector
-# (still separate pools — the combined-pool variant lands in Phase 4
-# as `postgres-combined`).
-pg-state = ["the-one-core/pg-state"]
+# (Phase 3 behavior), and additionally activates Phase 4's combined
+# shared-pool path: setting both THE_ONE_STATE_TYPE and
+# THE_ONE_VECTOR_TYPE to `postgres-combined` (with byte-identical
+# URLs) at runtime routes through `postgres_combined::build_shared_pool`
+# instead of the two split-pool factories. No separate feature flag
+# required; the dispatcher is enabled whenever both features are on.
+pg-state = ["the-one-core/pg-state", "dep:sqlx"]
 
 [[bin]]
 name = "the-one-mcp"
@@ -57,5 +68,19 @@ tracing.workspace = true
 # v0.12.0: backup / restore support via `maintain: backup` and `maintain: restore`
 tar = "0.4"
 flate2 = "1"
+# v0.16.0 Phase 4 — sqlx as a DIRECT (optional) dep so the broker's
+# combined Postgres+pgvector module can construct PgPool handles
+# without routing through a downstream crate re-export. Activated by
+# either `pg-state` or `pg-vectors` features; narrow feature list
+# mirrors `the-one-core` and `the-one-memory` exactly so the
+# `links`-conflict bisection Phase 2 performed stays valid. See the
+# `pg-vectors` feature comment in `crates/the-one-memory/Cargo.toml`
+# for the full `migrate+chrono` elimination rationale.
+sqlx = { version = "0.8.6", default-features = false, features = [
+    "runtime-tokio",
+    "tls-rustls",
+    "postgres",
+    "macros",
+], optional = true }
 
 [dev-dependencies]

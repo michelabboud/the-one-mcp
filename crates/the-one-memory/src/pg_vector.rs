@@ -195,6 +195,65 @@ impl PgVectorBackend {
         })
     }
 
+    /// v0.16.0 Phase 4 — build a backend from an already-constructed,
+    /// preflighted, migrated `PgPool`. Used by the combined
+    /// Postgres+pgvector path where ONE pool is shared between the
+    /// `StateStore` trait role and the `VectorBackend` trait role.
+    ///
+    /// Unlike [`PgVectorBackend::new`], this constructor **does not**:
+    ///
+    /// - call `PgPoolOptions::connect` (the pool is already built)
+    /// - run `preflight_vector_extension` (the combined caller runs
+    ///   it once on the shared pool)
+    /// - run `migrations::apply_all` (same — runs once on the shared
+    ///   pool alongside the state-store migrations)
+    ///
+    /// It **does** still run the embedding-provider dimension check,
+    /// because that check is per-backend-instance: the pool is shared
+    /// but each trait-role instance has its own embedding provider
+    /// reference, and the `MIGRATED_DIM` invariant is a property of
+    /// the schema this instance is going to read and write, not of
+    /// the pool.
+    ///
+    /// The combined caller's pool-sharing contract guarantees that:
+    ///
+    /// 1. The shared pool was built with pool-sizing from the STATE
+    ///    axis's `PostgresStateConfig` (not this config's).
+    ///    `PgVectorConfig`'s pool-sizing fields are therefore IGNORED
+    ///    on this constructor path — they're honored only on the
+    ///    split-pool [`PgVectorBackend::new`] path. The guide documents
+    ///    this asymmetry explicitly.
+    /// 2. The HNSW build-time parameters (`hnsw_m`,
+    ///    `hnsw_ef_construction`) took effect during migration
+    ///    time — before this constructor runs — so they're also
+    ///    ignored here. Only `hnsw_ef_search` (the runtime query
+    ///    knob) is stored on the returned instance, because the
+    ///    trait methods apply it per-search.
+    pub fn from_pool(
+        pool: PgPool,
+        config: &PgVectorConfig,
+        project_id: &str,
+        embedding_provider: &dyn EmbeddingProvider,
+    ) -> Result<Self, String> {
+        let provider_dim = embedding_provider.dimensions();
+        if provider_dim != MIGRATED_DIM {
+            return Err(format!(
+                "pgvector schema was migrated with dim={MIGRATED_DIM} (BGE-large-en-v1.5, \
+                 quality tier); active embedding provider reports dim={provider_dim}; recreate \
+                 the pgvector schema against a matching provider or switch embedding providers \
+                 to match. Changing the dim is a new migration (0006_reshape_*.sql), not a \
+                 runtime setting."
+            ));
+        }
+
+        Ok(Self {
+            pool,
+            project_id: project_id.to_string(),
+            schema: config.schema.clone(),
+            hnsw_ef_search: config.hnsw_ef_search,
+        })
+    }
+
     /// Close the underlying pool. Called from
     /// `McpBroker::shutdown()` in Phase 3+ to guarantee clean teardown
     /// ordering.
@@ -222,7 +281,12 @@ impl PgVectorBackend {
 /// 3. **Not available** — the `vector` extension files aren't even
 ///    on disk. Return a per-provider actionable error pointing the
 ///    operator at the installation step.
-async fn preflight_vector_extension(pool: &PgPool) -> Result<(), String> {
+///
+/// Exposed `pub` since Phase 4 so the combined Postgres+pgvector
+/// pool builder in `the-one-mcp::postgres_combined` can call it once
+/// against the shared pool without duplicating the three-state
+/// detection logic and the managed-provider error catalog.
+pub async fn preflight_vector_extension(pool: &PgPool) -> Result<(), String> {
     let installed: bool = sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector')",
     )

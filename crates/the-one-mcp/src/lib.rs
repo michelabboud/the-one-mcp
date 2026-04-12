@@ -2,6 +2,13 @@ pub mod adapter_core;
 pub mod api;
 pub mod backup;
 pub mod broker;
+// v0.16.0 Phase 4 — combined Postgres+pgvector shared-pool builder.
+// Entirely gated on `all(pg-state, pg-vectors)`; when either feature
+// is off the module is not compiled and the broker's
+// `state_store_factory` Phase-4 branch returns `NotEnabled`. See
+// `docs/guides/combined-postgres-backend.md` for the full rationale.
+#[cfg(all(feature = "pg-state", feature = "pg-vectors"))]
+pub mod postgres_combined;
 pub mod resources;
 pub mod swagger;
 pub mod transport;

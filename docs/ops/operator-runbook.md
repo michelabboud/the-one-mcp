@@ -1,7 +1,7 @@
 # The-One MCP Operator Runbook
 
-Last updated: 2026-04-11
-Applies to: v0.16.0-phase3 (`v1beta` schema, multi-backend v0.16.0)
+Last updated: 2026-04-12
+Applies to: v0.16.0-phase4 (`v1beta` schema, multi-backend v0.16.0)
 
 ## 1. Service Health Checklist
 
@@ -10,12 +10,15 @@ Applies to: v0.16.0-phase3 (`v1beta` schema, multi-backend v0.16.0)
 cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-# Expected: 466 passing, 0 failing, 1 ignored (v0.16.0-phase3 baseline)
+# Expected: 466 passing, 0 failing, 1 ignored (v0.16.0-phase4 baseline)
 
-# With Phase 2 + Phase 3 feature-gated backends (pgvector + Postgres state)
+# With Phase 2 + Phase 3 + Phase 4 feature-gated backends
+# (pgvector split + combined, Postgres state split + combined)
 cargo clippy --workspace --all-targets --features pg-state,pg-vectors -- -D warnings
 cargo test --workspace --features pg-state,pg-vectors
-# Expected: 495 passing, 0 failing, 1 ignored
+# Expected: 504 passing, 0 failing, 1 ignored
+# (466 base + 4 Phase 4 mirror unit + 5 Phase 4 integration
+#  + 13 Phase 2 pgvector gated + 16 Phase 3 postgres-state gated)
 
 # Verify binary builds — default and feature-gated
 cargo build --release -p the-one-mcp --bin the-one-mcp
@@ -204,7 +207,7 @@ THE_ONE_VECTOR_TYPE=<qdrant|pgvector|redis-vectors|postgres-combined|redis-combi
 THE_ONE_VECTOR_URL=<connection string>
 ```
 
-Shipping today (v0.16.0-phase3):
+Shipping today (v0.16.0-phase4):
 
 | State | Vector | Features | Notes |
 |---|---|---|---|
@@ -212,23 +215,37 @@ Shipping today (v0.16.0-phase3):
 | `sqlite` | `pgvector` | `pg-vectors` | Phase 2 — single-axis Postgres |
 | `postgres` | `qdrant` | `pg-state` | Phase 3 — single-axis Postgres |
 | `postgres` | `pgvector` | `pg-state,pg-vectors` | Phase 3 — split-pool on both axes |
+| `postgres-combined` | `postgres-combined` | `pg-state,pg-vectors` | Phase 4 — ONE shared sqlx pool, byte-identical URLs |
 
-Pending: `postgres-combined` (Phase 4), `redis` + `redis-combined`
-(Phases 5–6), `redis-vectors` at full parity (Phase 7).
+Pending: `redis` + `redis-combined` (Phases 5–6), `redis-vectors`
+at full parity (Phase 7).
 
 **Tuning knobs** live in `config.json` under `vector_pgvector` (HNSW
 parameters + pool sizing) and `state_postgres` (statement timeout +
-pool sizing). Secrets stay in env vars. See
+pool sizing). On the **combined** path (Phase 4), `state_postgres`
+pool-sizing fields + `statement_timeout_ms` win — `vector_pgvector`'s
+pool fields are ignored; HNSW still comes from `vector_pgvector`
+because those are migration/query-time settings, not pool settings.
+Secrets stay in env vars. See
 [docs/guides/configuration.md § Multi-Backend Selection](../guides/configuration.md#multi-backend-selection-v0160)
 for the full field tables.
 
 Per-backend operational playbooks:
 - [pgvector-backend.md](../guides/pgvector-backend.md) — per-provider
-  extension install, HNSW retune recipes, monitoring queries.
+  extension install, HNSW retune recipes, monitoring queries
+  (split-pool focus, but shared with combined path).
 - [postgres-state-backend.md](../guides/postgres-state-backend.md) —
-  sync-over-async bridge, FTS5 → tsvector translation, pool sizing.
+  sync-over-async bridge, FTS5 → tsvector translation, pool sizing
+  (split-pool focus, but shared with combined path).
+- [combined-postgres-backend.md](../guides/combined-postgres-backend.md)
+  — Phase 4 standalone guide: topology, the "state config wins"
+  pool-sizing rule, `statement_timeout` inheritance on vector
+  queries, migration paths from split-pool (zero-data-copy for
+  same-DB, manual `pg_dump`/`pg_restore` for different-DB), what
+  Phase 4 deliberately does NOT ship.
 - [multi-backend-operations.md](../guides/multi-backend-operations.md)
-  — deployment matrix across state + vector axes.
+  — deployment matrix across state + vector axes + decision
+  flowchart.
 
 ## 7. Nano Provider Pool Management
 

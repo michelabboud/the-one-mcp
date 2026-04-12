@@ -100,6 +100,33 @@ pub struct McpBroker {
     /// a fresh `ProjectDatabase` connection on every broker method call.
     /// See [`StateStoreCacheEntry`] for the concurrency rationale.
     state_by_project: RwLock<HashMap<String, StateStoreCacheEntry>>,
+    /// v0.16.0 Phase 4 — per-project shared `sqlx::PgPool` cache for
+    /// the combined Postgres+pgvector backend. Entries are inserted
+    /// by `get_or_init_combined_pg_pool` on first access (cold path
+    /// runs both migration runners + the pgvector extension preflight
+    /// against the shared pool); hot-path lookups clone the
+    /// already-built `PgPool` (cheap refcount bump) and hand the
+    /// clone to `PgVectorBackend::from_pool` and
+    /// `PostgresStateStore::from_pool` at the two trait-role call
+    /// sites. Shutdown drains this cache and calls `pool.close()`
+    /// on every entry for deterministic teardown.
+    ///
+    /// Keyed by `{canonical_root}::{project_id}` — same key space as
+    /// [`state_by_project`](Self::state_by_project) and
+    /// [`memory_by_project`](Self::memory_by_project), so a single
+    /// project can look up the shared pool once and both trait-role
+    /// caches see the same backing connections.
+    ///
+    /// The field is only populated when the broker was built with
+    /// `--features pg-state,pg-vectors` AND the operator set both
+    /// `THE_ONE_STATE_TYPE=postgres-combined` and
+    /// `THE_ONE_VECTOR_TYPE=postgres-combined`. On builds without
+    /// the features, the field exists but is permanently empty; the
+    /// type is unconditional so the broker struct layout doesn't
+    /// shift with feature flags (matters for tests that rely on
+    /// stable struct shape via `..Default::default()` patterns).
+    #[cfg(all(feature = "pg-state", feature = "pg-vectors"))]
+    combined_pg_pool_by_project: RwLock<HashMap<String, sqlx::postgres::PgPool>>,
     /// v0.16.0 Phase 2 — parsed once at broker construction from the
     /// four `THE_ONE_{STATE,VECTOR}_{TYPE,URL}` env vars. Every
     /// factory call site reads this instead of re-parsing the env
@@ -211,6 +238,8 @@ impl McpBroker {
             memory_by_project: Arc::new(RwLock::new(HashMap::new())),
             docs_by_project: RwLock::new(HashMap::new()),
             state_by_project: RwLock::new(HashMap::new()),
+            #[cfg(all(feature = "pg-state", feature = "pg-vectors"))]
+            combined_pg_pool_by_project: RwLock::new(HashMap::new()),
             backend_selection,
             global_registry_path,
             policy,
@@ -301,17 +330,19 @@ impl McpBroker {
                 let db = ProjectDatabase::open(project_root, project_id)?;
                 Ok(Box::new(db))
             }
-            StateTypeChoice::Postgres => self.construct_postgres_state_store(project_id).await,
+            StateTypeChoice::Postgres => {
+                self.construct_postgres_state_store(project_root, project_id)
+                    .await
+            }
             StateTypeChoice::Redis => Err(CoreError::NotEnabled(
                 "THE_ONE_STATE_TYPE=redis is planned for Phase 5; use sqlite or postgres \
                  until then"
                     .to_string(),
             )),
-            StateTypeChoice::PostgresCombined => Err(CoreError::NotEnabled(
-                "THE_ONE_STATE_TYPE=postgres-combined is planned for Phase 4; use postgres \
-                 (split pool) until then"
-                    .to_string(),
-            )),
+            StateTypeChoice::PostgresCombined => {
+                self.construct_postgres_combined_state_store(project_root, project_id)
+                    .await
+            }
             StateTypeChoice::RedisCombined => Err(CoreError::NotEnabled(
                 "THE_ONE_STATE_TYPE=redis-combined is planned for Phase 6".to_string(),
             )),
@@ -325,16 +356,24 @@ impl McpBroker {
     /// without a broker restart (same pattern as the pgvector factory
     /// in `build_pgvector_memory_engine`).
     ///
+    /// v0.16.0 Phase 4 — the signature now takes `project_root`, and
+    /// the `PostgresStateConfig` is mirrored from
+    /// `AppConfig::state_postgres` via
+    /// [`postgres_combined::mirror_state_postgres_config`] instead of
+    /// the Phase 3 stub `::default()`. This finishes the Phase 3 TODO
+    /// block that said "Until Phase 4 formalizes this."
+    ///
     /// When `pg-state` is NOT compiled in, returns
     /// `InvalidProjectConfig` immediately — the operator asked for a
     /// backend this binary doesn't ship.
     async fn construct_postgres_state_store(
         &self,
+        project_root: &Path,
         project_id: &str,
     ) -> Result<Box<dyn StateStore + Send>, CoreError> {
         #[cfg(not(feature = "pg-state"))]
         {
-            let _ = project_id;
+            let _ = (project_root, project_id);
             Err(CoreError::InvalidProjectConfig(
                 "THE_ONE_STATE_TYPE=postgres requires the `pg-state` Cargo feature; this \
                  binary was built without it. Rebuild with `--features pg-state` or unset \
@@ -345,7 +384,7 @@ impl McpBroker {
 
         #[cfg(feature = "pg-state")]
         {
-            use the_one_core::storage::postgres::{PostgresStateConfig, PostgresStateStore};
+            use the_one_core::storage::postgres::PostgresStateStore;
 
             let url = self.backend_selection.state_url.as_deref().ok_or_else(|| {
                 CoreError::InvalidProjectConfig(
@@ -353,24 +392,99 @@ impl McpBroker {
                 )
             })?;
 
-            // Load the project's AppConfig for the tuning block. If
-            // there's no project root on disk yet (shouldn't happen
-            // on the StateStore hot path — project.init creates the
-            // state dir — but defensive), fall back to the workspace
-            // defaults.
+            // v0.16.0 Phase 4 — load the project's AppConfig for the
+            // state-postgres tuning block and mirror it into the
+            // storage crate's `PostgresStateConfig`. Phase 3 used
+            // `::default()` as a placeholder and flagged this as the
+            // deferred work that Phase 4 would formalize — the mirror
+            // helper lives on the same module as its combined-path
+            // sibling so both the split-pool and combined paths use
+            // the SAME source of truth for statement_timeout, pool
+            // sizing, schema name, etc.
             //
-            // NB: we can't use `project_root` here because the factory
-            // signature predates BackendSelection. The broker's usual
-            // flow routes project_root through the cache key; for the
-            // Postgres path we fetch a fresh AppConfig by deriving
-            // project_root from the cache key. Until Phase 4 formalizes
-            // this, we use `PostgresStateConfig::default()` as the
-            // baseline and let integration tests cover the production
-            // override path by setting env-driven overrides. (See the
-            // resume plan Phase 3 DONE block.)
-            let pg_config = PostgresStateConfig::default();
+            // The pg-vectors gate on the combined-path module forces
+            // us to cfg-split the import; when only `pg-state` is
+            // active we still need the mirror, so the helper is
+            // defined inline below as a fallback copy of the combined
+            // module's version. Keeping two identical copies is
+            // ugly but the alternative (unconditional module with
+            // only-this-helper public) was worse because it forced
+            // `the_one_core::config::StatePostgresConfig` into the
+            // `pg-state`-only code path via a more tangled cfg graph.
+            #[cfg(all(feature = "pg-state", feature = "pg-vectors"))]
+            let pg_config = {
+                let app_config = AppConfig::load(project_root, RuntimeOverrides::default())?;
+                crate::postgres_combined::mirror_state_postgres_config(&app_config.state_postgres)
+            };
+            #[cfg(all(feature = "pg-state", not(feature = "pg-vectors")))]
+            let pg_config = {
+                use the_one_core::storage::postgres::PostgresStateConfig;
+                let app_config = AppConfig::load(project_root, RuntimeOverrides::default())?;
+                let src = &app_config.state_postgres;
+                PostgresStateConfig {
+                    schema: src.schema.clone(),
+                    statement_timeout_ms: src.statement_timeout_ms,
+                    max_connections: src.max_connections,
+                    min_connections: src.min_connections,
+                    acquire_timeout_ms: src.acquire_timeout_ms,
+                    idle_timeout_ms: src.idle_timeout_ms,
+                    max_lifetime_ms: src.max_lifetime_ms,
+                }
+            };
 
             let store = PostgresStateStore::new(&pg_config, url, project_id).await?;
+            Ok(Box::new(store))
+        }
+    }
+
+    /// v0.16.0 Phase 4 — combined-pool Postgres state store. The
+    /// difference from [`Self::construct_postgres_state_store`] is
+    /// that this path does NOT open its own pool — instead it
+    /// reaches into [`Self::get_or_init_combined_pg_pool`] for the
+    /// per-project shared pool (cold path: connect + both migration
+    /// runners + pgvector extension preflight + dim check; hot path:
+    /// clone handle) and then calls [`PostgresStateStore::from_pool`]
+    /// to wrap it in a trait object.
+    ///
+    /// The caller ([`Self::state_store_factory`]) only reaches this
+    /// arm when `backend_selection.state == PostgresCombined`, which
+    /// the env-var parser guarantees is paired with
+    /// `backend_selection.vector == PostgresCombined` via rule 6 of
+    /// `BackendSelection::from_env`. No need to re-check here.
+    ///
+    /// When either `pg-state` or `pg-vectors` is NOT compiled in,
+    /// returns `InvalidProjectConfig` — the combined path requires
+    /// both features simultaneously.
+    async fn construct_postgres_combined_state_store(
+        &self,
+        project_root: &Path,
+        project_id: &str,
+    ) -> Result<Box<dyn StateStore + Send>, CoreError> {
+        #[cfg(not(all(feature = "pg-state", feature = "pg-vectors")))]
+        {
+            let _ = (project_root, project_id);
+            Err(CoreError::InvalidProjectConfig(
+                "THE_ONE_STATE_TYPE=postgres-combined requires BOTH the `pg-state` and \
+                 `pg-vectors` Cargo features; this binary was built without at least one of \
+                 them. Rebuild with `--features pg-state,pg-vectors` or switch to \
+                 THE_ONE_STATE_TYPE=postgres (split pool) + THE_ONE_VECTOR_TYPE=pgvector."
+                    .to_string(),
+            ))
+        }
+
+        #[cfg(all(feature = "pg-state", feature = "pg-vectors"))]
+        {
+            use the_one_core::storage::postgres::PostgresStateStore;
+
+            let pool = self
+                .get_or_init_combined_pg_pool(project_root, project_id)
+                .await?;
+
+            let app_config = AppConfig::load(project_root, RuntimeOverrides::default())?;
+            let pg_config =
+                crate::postgres_combined::mirror_state_postgres_config(&app_config.state_postgres);
+
+            let store = PostgresStateStore::from_pool(pool, &pg_config, project_id);
             Ok(Box::new(store))
         }
     }
@@ -464,14 +578,178 @@ impl McpBroker {
     /// be called — reason the method is `async` today even though the
     /// SQLite-only body is sync.
     ///
-    /// Tests and binary shutdown should call this before dropping the
-    /// broker to guarantee pool cleanup ordering.
+    /// v0.16.0 Phase 4 — additionally drains the combined shared-pool
+    /// cache. For combined deployments, the sub-backends cached in
+    /// `state_by_project` and in `memory_by_project`'s `MemoryEngine`
+    /// each hold a `.clone()` of the pool handle. Clearing the state
+    /// cache drops its clones (refcount−1); the memory cache's clone
+    /// drops when `build_memory_engine` rebuilds OR when the broker
+    /// itself drops. Calling `pool.close().await` on the cached pool
+    /// BEFORE dropping the state cache clones is the explicit
+    /// "refuse new connections, drain in-flight queries" signal —
+    /// without it, the pool stays alive (with its clones) until the
+    /// last refcount drops, which can race with test cleanup.
+    ///
+    /// Order: close pools first, then clear caches. Closing a pool
+    /// does NOT invalidate the cached sub-backends' clones at the
+    /// Rust-type level; they just start returning errors on the next
+    /// query. Since shutdown happens at process/test teardown, that's
+    /// fine.
     pub async fn shutdown(&self) {
+        #[cfg(all(feature = "pg-state", feature = "pg-vectors"))]
+        {
+            let mut pools = self.combined_pg_pool_by_project.write().await;
+            for (_, pool) in pools.drain() {
+                pool.close().await;
+            }
+        }
+
         let mut map = self.state_by_project.write().await;
         map.clear();
         // Phase 3+: iterate `drain()` and call `store.shutdown().await` on
         // each — requires adding a shutdown method to the `StateStore`
         // trait. Deferred until Postgres/Redis backends exist.
+    }
+
+    /// v0.16.0 Phase 4 — look up or construct the per-project shared
+    /// `sqlx::PgPool` used by a `postgres-combined` deployment.
+    ///
+    /// Uses the same read/write-upgrade pattern as
+    /// [`Self::get_or_init_state_store`]:
+    ///
+    /// 1. **Fast path** (cache hit) — take a read lock on
+    ///    [`combined_pg_pool_by_project`](Self::combined_pg_pool_by_project),
+    ///    clone the `PgPool` (cheap refcount bump), release.
+    /// 2. **Cold path** (cache miss) — read
+    ///    `backend_selection.state_url` (Phase 2 rule 7 guarantees
+    ///    this equals `vector_url` byte-for-byte when both axes are
+    ///    `*-combined`, so either can be used), load the project's
+    ///    `AppConfig` to get the `state_postgres` tuning block and
+    ///    the `embedding_provider` + `embedding_model` for the dim
+    ///    check, build the shared pool via
+    ///    [`postgres_combined::build_shared_pool`] OUTSIDE the
+    ///    broker's write lock, then double-check under the write
+    ///    lock and insert. Races (two concurrent misses on the same
+    ///    project) see the loser close its unused pool and return
+    ///    the winner's entry.
+    ///
+    /// The embedding provider is constructed twice per cold path
+    /// (once here for the build-time dim check, once later in
+    /// `build_postgres_combined_memory_engine` for the actual
+    /// `MemoryEngine`). For API providers this is a cheap
+    /// constructor call; for FastEmbed local providers it's a
+    /// model-cache lookup — the first call downloads the ONNX
+    /// weights, every subsequent call (same process) is ~instant.
+    /// So the double-construction cost is amortised and keeps the
+    /// shared-pool builder self-contained (it doesn't need to hand
+    /// the provider back to the caller).
+    ///
+    /// Returns `InvalidProjectConfig` when the combined feature set
+    /// isn't compiled in — matching the error shape of other
+    /// Phase 2/3/4 fallbacks.
+    #[cfg(all(feature = "pg-state", feature = "pg-vectors"))]
+    async fn get_or_init_combined_pg_pool(
+        &self,
+        project_root: &Path,
+        project_id: &str,
+    ) -> Result<sqlx::postgres::PgPool, CoreError> {
+        let key = Self::project_memory_key(project_root, project_id);
+
+        // Fast path: read lock, clone handle, release.
+        if let Some(existing) = self.combined_pg_pool_by_project.read().await.get(&key) {
+            return Ok(existing.clone());
+        }
+
+        // Cold path: construct outside the write lock so concurrent
+        // cache-miss traffic for *different* projects is not
+        // serialized through this factory call. Same pattern as
+        // `get_or_init_state_store`.
+        let url = self.backend_selection.state_url.as_deref().ok_or_else(|| {
+            CoreError::InvalidProjectConfig(
+                "THE_ONE_STATE_TYPE=postgres-combined requires THE_ONE_STATE_URL to be set"
+                    .to_string(),
+            )
+        })?;
+
+        let app_config = AppConfig::load(project_root, RuntimeOverrides::default())?;
+        let state_pg_config =
+            crate::postgres_combined::mirror_state_postgres_config(&app_config.state_postgres);
+
+        // Construct the embedding provider just for the dim check
+        // inside `build_shared_pool`. See the doc comment above on
+        // the double-construction cost rationale.
+        let preflight_engine = self
+            .build_postgres_combined_provider_for_preflight(&app_config)
+            .await?;
+
+        let new_pool = crate::postgres_combined::build_shared_pool(
+            &state_pg_config,
+            url,
+            preflight_engine.as_ref(),
+        )
+        .await?;
+
+        // Double-check under the write lock.
+        let mut map = self.combined_pg_pool_by_project.write().await;
+        if let Some(existing) = map.get(&key) {
+            // Someone raced us. Close our losing pool explicitly
+            // (refuse any future queries on it — even though no
+            // trait-role adapter holds a clone yet — and return the
+            // winner).
+            new_pool.close().await;
+            return Ok(existing.clone());
+        }
+        map.insert(key, new_pool.clone());
+        Ok(new_pool)
+    }
+
+    /// v0.16.0 Phase 4 — construct an embedding provider matching
+    /// the project's `AppConfig::embedding_provider` setting, for
+    /// the sole purpose of `build_shared_pool`'s dim check. The
+    /// returned `Box<dyn EmbeddingProvider>` is dropped as soon as
+    /// `build_shared_pool` returns — the "real" provider lives
+    /// inside the `MemoryEngine` built downstream.
+    ///
+    /// This helper exists so the combined path's dim check
+    /// ceremony stays local to the pool-construction site and
+    /// doesn't pollute `build_postgres_combined_memory_engine` with
+    /// "build the provider twice" logic. The split-pool path
+    /// doesn't need this helper because split-pool constructs a
+    /// single `MemoryEngine` that owns its own provider and runs
+    /// the dim check inline.
+    #[cfg(all(feature = "pg-state", feature = "pg-vectors"))]
+    async fn build_postgres_combined_provider_for_preflight(
+        &self,
+        config: &AppConfig,
+    ) -> Result<Box<dyn the_one_memory::embeddings::EmbeddingProvider>, CoreError> {
+        if config.embedding_provider == "api" {
+            Ok(Box::new(
+                the_one_memory::embeddings::ApiEmbeddingProvider::new(
+                    config.embedding_api_base_url.as_deref().unwrap_or(""),
+                    config.embedding_api_key.as_deref(),
+                    &config.embedding_model,
+                    config.embedding_dimensions,
+                ),
+            ))
+        } else {
+            #[cfg(feature = "local-embeddings")]
+            {
+                let provider =
+                    the_one_memory::embeddings::FastEmbedProvider::new(&config.embedding_model)
+                        .map_err(CoreError::Embedding)?;
+                Ok(Box::new(provider))
+            }
+            #[cfg(not(feature = "local-embeddings"))]
+            {
+                Err(CoreError::Embedding(
+                    "postgres-combined with embedding_provider=local requires the \
+                     `local-embeddings` Cargo feature; rebuild with \
+                     `--features pg-state,pg-vectors,local-embeddings` or set \
+                     embedding_provider=\"api\" in config.json"
+                        .to_string(),
+                ))
+            }
+        }
     }
 
     async fn build_memory_engine(
@@ -483,6 +761,25 @@ impl McpBroker {
 
         let max_chunk_tokens = config.limits.max_chunk_tokens;
         let vector_backend = config.vector_backend.to_ascii_lowercase();
+
+        // v0.16.0 Phase 4 — combined Postgres+pgvector fast path.
+        // When the parsed `BackendSelection` says postgres-combined
+        // (env var parser rule 6 guarantees this means state axis
+        // is also postgres-combined), route through the shared-pool
+        // path BEFORE the pgvector split-pool check so the combined
+        // builder owns both trait roles. The state-store factory
+        // runs its own shared-pool lookup via the same cache, so
+        // the pool is only built once across the two trait roles.
+        if self.backend_selection.vector == VectorTypeChoice::PostgresCombined {
+            return self
+                .build_postgres_combined_memory_engine(
+                    &config,
+                    project_root,
+                    project_id,
+                    max_chunk_tokens,
+                )
+                .await;
+        }
 
         // v0.16.0 Phase 2 — pgvector fast path. When the parsed
         // `BackendSelection` (from `THE_ONE_VECTOR_TYPE=pgvector` at
@@ -843,6 +1140,170 @@ impl McpBroker {
                     target: "the_one_mcp::broker",
                     "hybrid_search_enabled=true but pgvector hybrid semantics are deferred to \
                      Phase 2.5 (Decision D); search_chunks will use dense-only path"
+                );
+            }
+
+            let graph_path = config.project_state_dir.join("knowledge_graph.json");
+            match the_one_memory::graph::KnowledgeGraph::load_from_file(&graph_path) {
+                Ok(graph) => {
+                    let entity_count = graph.entity_count();
+                    let relation_count = graph.relation_count();
+                    if entity_count > 0 {
+                        tracing::info!(
+                            "loaded knowledge graph: {} entities, {} relations",
+                            entity_count,
+                            relation_count
+                        );
+                    }
+                    *engine.graph_mut() = graph;
+                }
+                Err(e) => {
+                    tracing::warn!("failed to load knowledge graph: {e}");
+                }
+            }
+
+            Ok(engine)
+        }
+    }
+
+    /// v0.16.0 Phase 4 — build a `MemoryEngine` backed by the
+    /// combined Postgres+pgvector shared pool.
+    ///
+    /// Only reachable when the broker was started with both
+    /// `THE_ONE_STATE_TYPE=postgres-combined` AND
+    /// `THE_ONE_VECTOR_TYPE=postgres-combined` (rule 6 of the env
+    /// parser forces these to match) + matching URLs (rule 7 forces
+    /// byte-identical). Under those conditions, this method:
+    ///
+    /// 1. Reaches into [`Self::get_or_init_combined_pg_pool`] for
+    ///    the per-project shared pool — cold path runs both
+    ///    migration runners + the pgvector extension preflight +
+    ///    dim check exactly once; hot path just clones the handle.
+    /// 2. Constructs the embedding provider matching the project's
+    ///    `AppConfig::embedding_provider` setting (same logic as
+    ///    `build_pgvector_memory_engine` — factored into the
+    ///    `build_postgres_combined_provider_for_preflight` helper,
+    ///    which Phase 4's cold path already called once; we call it
+    ///    again here because the provider is cheap to reconstruct
+    ///    and the ownership semantics of "provider also goes into
+    ///    the engine" are easier to handle with a fresh build).
+    /// 3. Calls [`PgVectorBackend::from_pool`] with the shared pool
+    ///    and a provider reference — the backend's dim check is a
+    ///    defense-in-depth safety net alongside the one
+    ///    `build_shared_pool` already ran during cold construction.
+    /// 4. Hands the provider + backend to
+    ///    [`MemoryEngine::new_with_backend`] and runs the same
+    ///    post-setup (reranker, hybrid warning, knowledge graph)
+    ///    as [`Self::build_pgvector_memory_engine`].
+    ///
+    /// When either `pg-state` or `pg-vectors` is NOT compiled in,
+    /// returns `InvalidProjectConfig` — the combined path requires
+    /// both features.
+    async fn build_postgres_combined_memory_engine(
+        &self,
+        config: &AppConfig,
+        project_root: &Path,
+        project_id: &str,
+        max_chunk_tokens: usize,
+    ) -> Result<MemoryEngine, CoreError> {
+        #[cfg(not(all(feature = "pg-state", feature = "pg-vectors")))]
+        {
+            let _ = (config, project_root, project_id, max_chunk_tokens);
+            Err(CoreError::InvalidProjectConfig(
+                "THE_ONE_VECTOR_TYPE=postgres-combined requires BOTH the `pg-state` and \
+                 `pg-vectors` Cargo features; this binary was built without at least one \
+                 of them. Rebuild with `--features pg-state,pg-vectors` or switch to \
+                 THE_ONE_VECTOR_TYPE=pgvector (split pool)."
+                    .to_string(),
+            ))
+        }
+
+        #[cfg(all(feature = "pg-state", feature = "pg-vectors"))]
+        {
+            use the_one_memory::pg_vector::PgVectorBackend;
+
+            // Step 1 — shared pool (cold-path creates; hot-path clones).
+            let pool = self
+                .get_or_init_combined_pg_pool(project_root, project_id)
+                .await?;
+
+            // Step 2 — embedding provider. Same construction as the
+            // split-pool pgvector path; duplicated inline because
+            // ownership flows differently (here the provider is
+            // boxed and transferred into the engine after being
+            // borrowed for the dim check).
+            let provider: Box<dyn the_one_memory::embeddings::EmbeddingProvider> = if config
+                .embedding_provider
+                == "api"
+            {
+                Box::new(the_one_memory::embeddings::ApiEmbeddingProvider::new(
+                    config.embedding_api_base_url.as_deref().unwrap_or(""),
+                    config.embedding_api_key.as_deref(),
+                    &config.embedding_model,
+                    config.embedding_dimensions,
+                ))
+            } else {
+                #[cfg(feature = "local-embeddings")]
+                {
+                    Box::new(
+                        the_one_memory::embeddings::FastEmbedProvider::new(&config.embedding_model)
+                            .map_err(CoreError::Embedding)?,
+                    )
+                }
+                #[cfg(not(feature = "local-embeddings"))]
+                {
+                    return Err(CoreError::Embedding(
+                        "postgres-combined with embedding_provider=local requires the \
+                             `local-embeddings` Cargo feature; rebuild with \
+                             `--features pg-state,pg-vectors,local-embeddings` or set \
+                             embedding_provider=\"api\" in config.json"
+                            .to_string(),
+                    ));
+                }
+            };
+
+            // Step 3 — vector backend from the shared pool. Mirror
+            // the pgvector config using the same helper the
+            // split-pool path uses, then borrow the provider for
+            // the per-instance dim check inside from_pool.
+            let pg_config =
+                crate::postgres_combined::mirror_pgvector_config(&config.vector_pgvector);
+            let backend =
+                PgVectorBackend::from_pool(pool, &pg_config, project_id, provider.as_ref())
+                    .map_err(CoreError::Embedding)?;
+
+            // Step 4 — engine construction + post-setup. Identical
+            // to the split-pool pgvector path below `from here` —
+            // reranker, hybrid warning, knowledge graph.
+            let mut engine =
+                MemoryEngine::new_with_backend(provider, Some(Box::new(backend)), max_chunk_tokens);
+            engine.set_project_id(project_id.to_string());
+
+            #[cfg(feature = "local-embeddings")]
+            if config.reranker_enabled {
+                match the_one_memory::reranker::FastEmbedReranker::new(&config.reranker_model) {
+                    Ok(reranker) => {
+                        tracing::info!(
+                            "reranker enabled: {} (model: {})",
+                            reranker.name(),
+                            config.reranker_model
+                        );
+                        engine.set_reranker(Box::new(reranker));
+                    }
+                    Err(e) => {
+                        tracing::warn!("failed to init reranker, continuing without: {e}");
+                    }
+                }
+            }
+
+            if config.hybrid_search_enabled {
+                // Hybrid on the combined backend inherits the same
+                // Decision D deferral as the split pgvector path.
+                tracing::warn!(
+                    target: "the_one_mcp::broker",
+                    "hybrid_search_enabled=true but postgres-combined uses the same pgvector \
+                     dense-only path as split pgvector; hybrid semantics are deferred to \
+                     Phase 2.5 (Decision D)"
                 );
             }
 

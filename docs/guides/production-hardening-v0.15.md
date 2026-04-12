@@ -593,13 +593,61 @@ It covers:
 - BIGINT epoch_ms convention (no chrono, permanent)
 - Migration path from SQLite (re-ingest, not dump+load)
 - The 11 integration tests in `tests/postgres_state_roundtrip.rs`
-- Phase 4 combined-pool preview
+- Combined Phase 4 cross-reference to the standalone guide
 
 **Configuration reference for the `state_postgres` config block
 lives in [configuration.md](configuration.md#state-store--postgres-v0160-phase-3).**
 
 Commit `f010ed6`, tag `v0.16.0-phase3`. Cargo feature `pg-state`
 (off by default, composable with `pg-vectors`).
+
+---
+
+## 16b. v0.16.0 Phase 4 — combined Postgres+pgvector backend (moved to standalone guide)
+
+Phase 4 is the first *combined single-pool* backend on the
+multi-backend roadmap. One `sqlx::PgPool` serves BOTH the
+`StateStore` trait role (everything Phase 3 shipped) AND the
+`VectorBackend` trait role (everything Phase 2 shipped) against a
+single Postgres database. The operational benefit is one credential
+to rotate, one pgbouncer entry, one PITR backup window, and one set
+of IAM grants — without introducing a new named backend type or new
+trait methods.
+
+**The full operational content has moved to its own guide:**
+**[docs/guides/combined-postgres-backend.md](combined-postgres-backend.md)**.
+It covers:
+
+- When to pick combined over split (decision matrix by priority)
+- What "combined" actually means (dispatcher + shared pool, no new
+  type, no new trait methods)
+- Activation via `THE_ONE_{STATE,VECTOR}_TYPE=postgres-combined` with
+  byte-identical URLs
+- The "refined Option Y" architecture: `PgVectorBackend::from_pool`
+  and `PostgresStateStore::from_pool` sync wrapper constructors +
+  `McpBroker::combined_pg_pool_by_project` shared-pool cache +
+  `postgres_combined::build_shared_pool` (the sole cold-path entry)
+- The "state config wins" pool-sizing rule and its rationale
+- `statement_timeout` inheritance on vector queries (split-pool
+  pgvector had no equivalent hook)
+- Topology diagrams, verification queries, migration paths from
+  split-pool (same-DB = zero-data-copy, different-DB = manual
+  `pg_dump`/`pg_restore`)
+- What Phase 4 deliberately does NOT ship: no `begin_combined_tx()`
+  trait method (no call site needed it), no named
+  `PostgresCombinedBackend` type, no automated split → combined
+  migration tool
+
+**Configuration**: combined deployments reuse the existing
+`state_postgres` and `vector_pgvector` config sections — there is
+NO `[combined_postgres]` section. See
+[configuration.md § Multi-Backend Selection](configuration.md#multi-backend-selection-v0160)
+for the inline note.
+
+Commit `<pending>`, tag `v0.16.0-phase4`. Cargo features
+`pg-state,pg-vectors` (the combined dispatcher activates whenever
+both features are on and both env vars select `postgres-combined`
+— no new feature flag).
 
 ---
 

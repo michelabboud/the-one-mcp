@@ -1,6 +1,6 @@
 # The-One MCP Complete Guide
 
-> **Current version**: v0.16.0-phase3. The v0.16.0 line introduced
+> **Current version**: v0.16.0-phase4. The v0.16.0 line introduced
 > multi-backend support — see § 1.1 "Multi-backend architecture
 > (v0.16.0+)" below. The default deployment (SQLite + Qdrant) is
 > unchanged; everything here still works for that path.
@@ -12,8 +12,8 @@
 It provides:
 
 - **Project lifecycle** — detect languages, frameworks, and risk profile; cache results via fingerprinting
-- **Semantic memory** — production-grade RAG with fastembed 5.13 (1024-dim ONNX) or API embeddings. Vector storage is pluggable: Qdrant (default), pgvector (v0.16.0 Phase 2), or Redis/RediSearch.
-- **State store** — SQLite (default) or Postgres (v0.16.0 Phase 3) for project profiles, approvals, audit events, conversation sources, AAAK lessons, diary entries, and navigation nodes.
+- **Semantic memory** — production-grade RAG with fastembed 5.13 (1024-dim ONNX) or API embeddings. Vector storage is pluggable: Qdrant (default), pgvector split-pool (v0.16.0 Phase 2), pgvector combined-with-state (v0.16.0 Phase 4), or Redis/RediSearch.
+- **State store** — SQLite (default), Postgres split-pool (v0.16.0 Phase 3), or Postgres combined-with-pgvector (v0.16.0 Phase 4) for project profiles, approvals, audit events, conversation sources, AAAK lessons, diary entries, and navigation nodes.
 - **Image search** — multimodal image indexing and search with optional OCR
 - **Reranking** — optional cross-encoder reranking for higher-precision search results
 - **Code-aware chunking** — AST chunkers for 13 languages with symbol metadata and fallback behavior
@@ -43,13 +43,15 @@ Shipping today:
 | `sqlite` (default) | `qdrant` (default) | (none) | v0.15.x baseline |
 | `sqlite` | `pgvector` | `pg-vectors` | v0.16.0 Phase 2 |
 | `postgres` | `qdrant` | `pg-state` | v0.16.0 Phase 3 |
-| `postgres` | `pgvector` | `pg-state,pg-vectors` | v0.16.0 Phase 3 (split pools) |
+| `postgres` | `pgvector` | `pg-state,pg-vectors` | v0.16.0 Phase 3 (split pools, two independent sqlx pools) |
+| `postgres-combined` | `postgres-combined` | `pg-state,pg-vectors` | v0.16.0 Phase 4 (ONE shared sqlx pool, byte-identical URLs) |
 
-Pending in the v0.16.0 roadmap: `postgres-combined` (single pool, Phase 4), Redis state modes (Phase 5), combined Redis (Phase 6), Redis-Vector full parity (Phase 7).
+Pending in the v0.16.0 roadmap: Redis state modes (Phase 5), combined Redis+RediSearch (Phase 6), Redis-Vector full parity + v0.16.0 GA (Phase 7).
 
 Deep-dive guides:
-- [pgvector-backend.md](pgvector-backend.md) — Phase 2 standalone guide
-- [postgres-state-backend.md](postgres-state-backend.md) — Phase 3 standalone guide
+- [pgvector-backend.md](pgvector-backend.md) — Phase 2 standalone guide (split-pool vectors)
+- [postgres-state-backend.md](postgres-state-backend.md) — Phase 3 standalone guide (split-pool state)
+- [combined-postgres-backend.md](combined-postgres-backend.md) — Phase 4 standalone guide (shared-pool, one credential, one backup target)
 - [multi-backend-operations.md](multi-backend-operations.md) — deployment matrix
 - [configuration.md § Multi-Backend Selection (v0.16.0+)](configuration.md#multi-backend-selection-v0160) — env var rules + field tables
 - [architecture.md § Multi-Backend Architecture (v0.16.0+)](architecture.md#multi-backend-architecture-v0160) — trait surface + broker factory
@@ -105,7 +107,7 @@ The installer:
 5. Auto-detects Claude Code, Gemini CLI, OpenCode, Codex and registers the MCP
 6. Validates with a smoke test
 
-Options: `--version v0.16.0-phase3`, `--lean` (no swagger), `--local ./target/release`, `--uninstall`. Add `--features pg-vectors,pg-state` when building from source to enable the v0.16.0 multi-backend paths (see [INSTALL.md § Optional multi-backend features](../../INSTALL.md#optional-multi-backend-features-v0160)).
+Options: `--version v0.16.0-phase4`, `--lean` (no swagger), `--local ./target/release`, `--uninstall`. Add `--features pg-vectors,pg-state` when building from source to enable the v0.16.0 multi-backend paths — this single feature combo gives you split-pool Phase 2/3 AND combined-pool Phase 4 in one binary (see [INSTALL.md § Optional multi-backend features](../../INSTALL.md#optional-multi-backend-features-v0160)).
 
 ### Build from Source
 

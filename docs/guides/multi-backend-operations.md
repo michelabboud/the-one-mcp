@@ -1,6 +1,6 @@
 # Multi-Backend Operations Guide
 
-**Target version:** v0.16.0-rc1+
+**Target version:** v0.16.0-phase4+
 **Audience:** operators deploying the-one-mcp in production.
 
 As of v0.16.0-rc1, the-one-mcp's persistence layer is split into two
@@ -21,19 +21,21 @@ combination.
 
 ### Vector backends
 
-| Backend        | Status (v0.16.0-phase2) | Capabilities                                             | Feature flag       |
+| Backend        | Status (v0.16.0-phase4) | Capabilities                                             | Feature flag       |
 |----------------|-------------------------|----------------------------------------------------------|--------------------|
 | **Qdrant**     | First-class             | chunks, hybrid, entities, relations, images              | default            |
-| **pgvector**   | **First-class (v0.16.0 Phase 2)** | chunks, entities, relations (hybrid = Decision D, deferred) | `pg-vectors`       |
+| **pgvector (split)**   | **First-class (v0.16.0 Phase 2)** | chunks, entities, relations (hybrid = Decision D, deferred) | `pg-vectors`       |
+| **pgvector (combined)** | **First-class (v0.16.0 Phase 4)** | same as split; shares one `sqlx::PgPool` with `PostgresStateStore` | `pg-state,pg-vectors` |
 | **Redis-Vector** | Second-class          | chunks only (+ persistence check)                        | `redis-vectors`    |
 | **In-memory**  | Fallback                | keyword search only                                      | always available   |
 
 ### State store backends
 
-| Backend        | Status (v0.16.0-phase3)   | Capabilities                        | Feature flag       |
+| Backend        | Status (v0.16.0-phase4)   | Capabilities                        | Feature flag       |
 |----------------|---------------------------|-------------------------------------|--------------------|
 | **SQLite**     | First-class               | FTS5, transactions, WAL             | default            |
-| **Postgres**   | **First-class (v0.16.0 Phase 3)** | tsvector FTS, full ACID, BIGINT epoch_ms | `pg-state` |
+| **Postgres (split)**   | **First-class (v0.16.0 Phase 3)** | tsvector FTS, full ACID, BIGINT epoch_ms | `pg-state` |
+| **Postgres (combined)** | **First-class (v0.16.0 Phase 4)** | same as split; shares one `sqlx::PgPool` with `PgVectorBackend` | `pg-state,pg-vectors` |
 | **Redis-AOF**  | Planned (Phase 5)         | RedisJSON + persistence             | `redis-state` (future) |
 | **Redis cache**| Planned (Phase 5)         | volatile, fast                      | `redis-state` (future) |
 
@@ -43,8 +45,8 @@ combination.
 |----------------------------|---------------------|---------------------------------------|
 | SQLite + Qdrant sidecar    | First-class today   | Default deployment                    |
 | SQLite + Redis-Vector      | Supported today     | Low-latency small deployments         |
-| **Postgres + pgvector**    | Planned (Phase C)   | One DB, transactional state+vector    |
-| **Redis + RediSearch + AOF** | Planned (Phase C) | One Redis, everything in one process  |
+| **Postgres + pgvector**    | **First-class (v0.16.0 Phase 4)** | One DB, one `sqlx::PgPool`, one credential, one backup target |
+| **Redis + RediSearch + AOF** | Planned (Phase 6) | One Redis, everything in one process  |
 
 ---
 
@@ -215,8 +217,11 @@ Rebuild: `cargo build --release -p the-one-mcp --bin the-one-mcp
 
 Split-pool Postgres on **both** axes — separate pools for state and
 vectors, potentially different DSNs, different credentials, different
-statement timeouts. The combined single-pool variant lands in
-Phase 4.
+statement timeouts. Use this shape when you need independent pool
+budgets, independent credential rotation, or separate databases for
+state and vectors. If you're on one database and want operational
+unity (one credential, one pgbouncer entry, one backup target), the
+combined variant ships in Phase 4 — see the next subsection.
 
 ```bash
 export THE_ONE_STATE_TYPE=postgres
@@ -234,10 +239,9 @@ credential rotation and pool budgets** for each axis.
 Rebuild: `cargo build --release -p the-one-mcp --bin the-one-mcp
 --features pg-state,pg-vectors`.
 
-### Planned: Postgres + pgvector (combined, Phase 4)
+### Postgres + pgvector (combined, v0.16.0 Phase 4, one pool)
 
 ```bash
-# Planned Phase 4:
 export THE_ONE_STATE_TYPE=postgres-combined
 export THE_ONE_STATE_URL=postgres://user:password@db.internal/the_one
 export THE_ONE_VECTOR_TYPE=postgres-combined
@@ -246,8 +250,34 @@ export THE_ONE_VECTOR_URL=postgres://user:password@db.internal/the_one  # byte-i
 
 When both TYPEs are `postgres-combined` and the URLs match
 byte-for-byte, the broker constructs a single `sqlx::PgPool` that
-serves both `StateStore` and `VectorBackend` — writes to state
-and vectors can commit in one transaction. Available in Phase 4.
+serves both the `StateStore` trait role and the `VectorBackend`
+trait role — state writes and vector writes flow through the same
+connection pool, with one credential to rotate, one set of IAM
+grants, one pgbouncer entry, and one PITR backup window covering
+everything.
+
+Configuration reuses both existing blocks — there is no
+`[combined.postgres]` section. When combined, the **state
+config's pool sizing wins**: `state_postgres.max_connections`,
+`min_connections`, the timeout fields, and `statement_timeout_ms`
+all apply to the shared pool. `vector_pgvector`'s corresponding
+pool fields are ignored on this path; its HNSW tuning
+(`hnsw_m`, `hnsw_ef_construction`, `hnsw_ef_search`) still
+applies because those are migration-time + query-time settings,
+not pool settings.
+
+Rebuild: `cargo build --release -p the-one-mcp --bin the-one-mcp
+--features pg-state,pg-vectors`. The combined dispatcher is
+automatically active whenever both features are on and the env
+vars select `postgres-combined` for both axes.
+
+Full operational reference — topology diagrams, migration paths
+from split-pool, verification queries, the "state config wins"
+rationale, and the scope of what Phase 4 does NOT ship (no
+cross-trait transaction primitive yet, no automated split →
+combined migration tool) — is in the standalone
+[`combined-postgres-backend.md`](combined-postgres-backend.md)
+guide.
 
 ### Planned: Redis + RediSearch + AOF (combined)
 
@@ -315,11 +345,12 @@ Operator decision guide — pick based on your priorities:
 | Single-machine, minimal ops | SQLite + Qdrant sidecar      | Default; works offline; one state file        |
 | Lowest latency reads  | SQLite + Redis-Vector              | Redis in-memory search is sub-millisecond       |
 | Maximum durability    | SQLite + Qdrant (with Qdrant backups) | WAL + Qdrant snapshots, no single point of failure |
-| Existing Postgres stack | Postgres + pgvector (future)     | Colocate with your other data, transactional   |
+| Existing Postgres stack, operational unity | Postgres + pgvector (combined, Phase 4) | One credential, one pool, one backup target |
+| Existing Postgres stack, independent budgets | Postgres + pgvector (split, Phase 2+3) | Tune state and vectors separately |
 | Existing Redis stack  | Redis + RediSearch (future)        | One service to run, microsecond latencies      |
 | Large corpus (100M+)  | Qdrant                             | Dedicated vector DB scales better than pgvector past ~10M |
 | Small corpus (<1M)    | pgvector or Redis-Vector (future)  | Cheaper to operate, no sidecar                 |
-| Regulated / ACID critical | Postgres + pgvector (future)  | Single ACID commit across state AND vectors    |
+| Regulated / ACID critical | Postgres + pgvector (combined, Phase 4) | Shared pool is the foundation for cross-trait transactions (Phase 4.5+) |
 
 ---
 
@@ -411,23 +442,31 @@ batch-copy shortcut.
 Full guide + HNSW tuning + per-provider install:
 **[pgvector-backend.md](pgvector-backend.md)**.
 
-### Combined Postgres (Phase 4, pending)
+### Split-pool Postgres → Combined Postgres (shipped in v0.16.0 Phase 4)
 
-Phase 4 will ship `postgres-combined` — one `sqlx::PgPool` serving
-both `StateStore` and `VectorBackend` trait roles. The migration
-path from split-pool Postgres to combined Postgres will be:
+`postgres-combined` ships in Phase 4 as a dispatcher change — one
+`sqlx::PgPool` serving both the `StateStore` and `VectorBackend`
+trait roles instead of two separate pools. If your current
+split-pool Postgres deployment already points both sides at the
+**same** database, the migration is zero data copy:
 
-1. Verify both `state_postgres` and `vector_pgvector` point at the
-   **same** database (they can already share a schema because the
-   tracking tables `state_migrations` and `pgvector_migrations`
-   are distinct).
-2. Change both env var TYPEs to `postgres-combined` with
-   byte-identical URLs.
-3. Restart. The broker constructs one pool instead of two; no
-   data copy needed — both migration runners have already been
-   applied to the same schema in Phase 2/3.
+1. Verify `THE_ONE_STATE_URL` and `THE_ONE_VECTOR_URL` are
+   byte-identical. They can already share a schema because the
+   tracking tables (`the_one.state_migrations` and
+   `the_one.pgvector_migrations`) are distinct by design.
+2. Shut down the broker cleanly.
+3. Change both env var TYPEs to `postgres-combined`.
+4. Restart. The broker constructs one shared pool instead of two.
+   Both migration runners are idempotent and exit cleanly against
+   the already-migrated schema. No schema changes, no data copy.
 
-No-op data migration; just a dispatcher change. Ships in Phase 4.
+If your split-pool deployment uses **different** databases for
+state and vectors, the combined path won't start — it refuses to
+proceed when the URLs don't match byte-identically. You have to
+pick one database as the winner and manually migrate the other
+side's data in via `pg_dump` / `pg_restore`; the standalone
+combined guide has the exact commands. See
+[`combined-postgres-backend.md § 8`](combined-postgres-backend.md#8-migration-from-split-pool-postgres--different-databases).
 
 ### Redis migrations (Phases 5 + 6, pending)
 
@@ -468,8 +507,13 @@ until the Redis instance restarts. Useful for ephemeral
 experimentation but not production.
 
 **Q: Does changing backends require re-indexing?**
-Yes for vectors (the embeddings are in the old backend). No for state
-(the migration tool copies tables verbatim).
+Yes for vectors when the target is a different physical backend
+(e.g. Qdrant → pgvector: the embeddings live in the old backend
+and must be regenerated against the new one). No for state changes
+that target the same physical backend (e.g. split-pool Postgres →
+combined Postgres: the broker just switches from two pools to one,
+no schema change). No for state when moving SQLite → Postgres on
+the same project: the migration tool copies tables verbatim.
 
 **Q: Can I point two brokers at the same Postgres instance for HA?**
 Not yet. The current broker design assumes exclusive access to the
@@ -491,11 +535,14 @@ migrate to Qdrant or shard across Postgres instances.
 Start here
     │
     ├─ Do you already run Postgres?
-    │    └─ Yes → Postgres + pgvector (once shipped, Phase B2+B1)
-    │              otherwise SQLite + Qdrant
+    │    ├─ Yes, one DB, want operational unity
+    │    │    → Postgres + pgvector (combined, Phase 4)
+    │    ├─ Yes, multiple DBs or independent pool budgets
+    │    │    → Postgres + pgvector (split, Phase 2+3)
+    │    └─ No → SQLite + Qdrant (default)
     │
     ├─ Do you already run Redis?
-    │    └─ Yes → Redis + RediSearch (once combined mode ships, Phase C)
+    │    └─ Yes → Redis + RediSearch (once combined mode ships, Phase 6)
     │              otherwise SQLite + Redis-Vector
     │
     ├─ Corpus > 10M vectors?
@@ -521,8 +568,15 @@ Start here
 - **[postgres-state-backend.md](postgres-state-backend.md)** — Phase 3
   standalone guide. Sync-over-async bridge rationale, FTS5 →
   tsvector translation, `'simple'` vs `'english'` tokenizer
-  choice, schema v7 parity, 11 integration tests, Phase 4 combined
-  preview.
+  choice, schema v7 parity, 11 integration tests.
+- **[combined-postgres-backend.md](combined-postgres-backend.md)** — Phase 4
+  standalone guide. One `sqlx::PgPool` serving both trait roles,
+  the "state config wins" pool-sizing rule, migration paths from
+  split-pool Postgres, verification queries, integration test
+  suite at `crates/the-one-mcp/tests/postgres_combined_roundtrip.rs`,
+  and the list of things Phase 4 deliberately does NOT ship
+  (no cross-trait transaction primitive yet, no named combined
+  backend type).
 - `docs/guides/redis-vector-backend.md` — Redis/RediSearch backend
   and persistence expectations.
 
@@ -542,9 +596,11 @@ Start here
 ### Plans + trait source
 
 - `docs/plans/2026-04-11-resume-phase1-onwards.md` — canonical Phase
-  1–7 execution plan with DONE blocks for Phases 0–3.
+  1–7 execution plan with DONE blocks for Phases 0–4.
 - `docs/plans/2026-04-11-resume-phase4-prompt.md` — standalone resume
-  prompt for the next session (Phase 4 combined Postgres+pgvector).
+  prompt that drove the Phase 4 session (kept in tree as a
+  reference for the decision trail behind the refined Option Y
+  architecture).
 - `docs/guides/mempalace-operations.md` — memory palace configuration
   (orthogonal to backend choice).
 - `docs/reviews/2026-04-10-mempalace-comparative-audit.md` — why the

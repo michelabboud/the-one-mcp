@@ -394,20 +394,144 @@ Landing in the commit tagged `v0.16.0-phase3`. Summary of what shipped vs what t
 
 ---
 
-### Phase 4 — Combined Postgres+pgvector backend
+### Phase 4 — Combined Postgres+pgvector backend — **DONE** (tag `v0.16.0-phase4`)
 
-**Scope:** ~300 LOC.
+**Scope:** ~300 LOC (actual: ~140 LOC of new broker code + ~280 LOC new module + ~400 LOC integration/unit tests + ~290 LOC standalone guide + docs sweep across 5 existing guides + CHANGELOG + CLAUDE.md + PROGRESS.md).
 
-**Deliverables:**
+**Original plan vs shipped:**
 
-- New submodule `crates/the-one-core/src/backend/` (create if needed) with file `postgres_combined.rs`
-- `PostgresCombinedBackend` struct holding ONE `sqlx::PgPool` that serves BOTH `impl StateStore` AND `impl VectorBackend`
-- Transactional consistency: broker methods that write to both state AND vectors (e.g. `memory_ingest_conversation` writes `conversation_sources` + chunk vectors) can optionally run them in one `tx.commit()`. Expose this via a new trait method `StateStore::begin_combined_tx()` that returns a transaction handle implementing `impl StateStore + VectorBackend` scoped to the transaction — OR via a simpler "combined adapter wraps both traits in one struct" approach. **Decision point**: pick the simpler of the two after reading the actual broker call site that would benefit. Ask me if ambiguous.
-- Broker dispatch: when `BackendSelection.state == StateTypeChoice::PostgresCombined` (which means `vector == VectorTypeChoice::PostgresCombined` per § 2 rules and URLs are validated identical), the broker constructs ONE `PostgresCombinedBackend` instance and uses it for both trait roles.
-- Integration test: upsert in a single transaction, verify rollback discards both state AND vector writes atomically.
-- Docs update in `docs/guides/multi-backend-operations.md`: new subsection on combined Postgres, when to pick it vs split, credential-rotation considerations.
+- ❌ **New submodule `crates/the-one-core/src/backend/postgres_combined.rs`** — shipped as
+  **`crates/the-one-mcp/src/postgres_combined.rs`** instead. Rationale: cargo features
+  are per-crate booleans with no "and-of-two-crates" composition, and the combined
+  builder must call BOTH `the_one_memory::pg_vector::migrations::apply_all`
+  (gated on `pg-vectors`) AND `the_one_core::storage::postgres::migrations::apply_all`
+  (gated on `pg-state`). The only crate in the workspace where both features are
+  reachable simultaneously is `the-one-mcp` — its feature passthroughs
+  (`pg-state` → `the-one-core/pg-state`, `pg-vectors` → `the-one-memory/pg-vectors`)
+  bring both into scope. Putting the module on `the-one-core` would have required
+  either a new `core → memory` dep edge (reversing the current direction) or a
+  `pg-combined` feature on memory that transitively activates core's `pg-state`
+  via weak-dep syntax — both uglier than just placing the ~280 LOC on
+  `the-one-mcp`, which already has the clean `#[cfg(all(pg-state, pg-vectors))]`
+  gate.
+- ❌ **`PostgresCombinedBackend` struct implementing both traits** — **not shipped**.
+  The "refined Option Y" architecture skips the named combined type entirely.
+  Instead, Phase 4 adds `PgVectorBackend::from_pool` (memory) and
+  `PostgresStateStore::from_pool` (core) as sync wrapper constructors that take a
+  pre-built `sqlx::PgPool` + config and skip connect + preflight + migrations,
+  then the broker shares the pool via a per-project
+  `combined_pg_pool_by_project: RwLock<HashMap<String, sqlx::postgres::PgPool>>`
+  cache. `sqlx::PgPool` is internally `Arc`-reference-counted, so `pool.clone()`
+  is a cheap refcount bump that gives both trait-role sub-backends a handle to
+  the same underlying pool. No trait delegation boilerplate, no new named type,
+  no `RedisCombinedBackend` precedent baked into Phase 4. Got Michel's explicit
+  approval for this refinement before writing any code (see the
+  "recommend one thing" architectural answer at session start).
+- ❌ **`StateStore::begin_combined_tx()` trait method** — **not shipped**. The
+  plan explicitly said "do NOT implement this in Phase 4 unless you find a
+  concrete broker call site that needs it." Phase 4 searched the
+  `memory_ingest_conversation` path and the other handlers that write state
+  + vectors in one request and found no load-bearing cross-trait atomicity
+  requirement at the API level. The shared pool is the *infrastructure*
+  needed if a future handler does demand it (any handler can open a sqlx
+  transaction against its shared `PgPool` handle), but no trait-level
+  abstraction ships in Phase 4. Documented as "known gap" in the standalone
+  guide's § 10 "What Phase 4 does NOT ship."
+- ✅ **Broker dispatch on `StateTypeChoice::PostgresCombined`** — shipped as
+  `construct_postgres_combined_state_store` (state axis) + a parallel
+  `build_postgres_combined_memory_engine` early-return in
+  `build_memory_engine` (vector axis, before the Phase 2 pgvector fast-path).
+  Both reach into `get_or_init_combined_pg_pool` for the per-project shared
+  pool. The state cache (`state_by_project`) and memory cache
+  (`memory_by_project`) are unchanged — they each hold a distinct sub-backend
+  instance that happens to clone the same pool. `McpBroker::shutdown()` now
+  drains `combined_pg_pool_by_project` FIRST (calling `pool.close().await` on
+  each entry) and THEN clears the state cache, so teardown order is
+  deterministic. Without the explicit `close()`, sqlx pools stay alive until
+  the last `clone()` drops, which can race with test cleanup.
+- ✅ **Phase 3 TODO resolved.** `construct_postgres_state_store` now reads
+  `AppConfig::state_postgres` via the new `postgres_combined::mirror_state_postgres_config`
+  helper instead of Phase 3's stub `PostgresStateConfig::default()` — Phase 3's
+  doc comment explicitly flagged this as "Until Phase 4 formalizes this."
+  The mirror helper lives on the combined module so both the split-pool and
+  combined paths share one source of truth for the StatePostgresConfig →
+  PostgresStateConfig translation.
+- ✅ **Integration test** — shipped as
+  `crates/the-one-mcp/tests/postgres_combined_roundtrip.rs` (5 tests, gated
+  on `all(pg-state, pg-vectors)` + `THE_ONE_{STATE,VECTOR}_TYPE=postgres-combined`
+  + byte-identical URLs; skip gracefully via `return` when env isn't set).
+  The "rollback atomicity" assertion the plan asked for is NOT in the suite
+  because Phase 4 doesn't ship a `begin_combined_tx()` primitive (see above) —
+  instead the suite verifies functional equivalence: state writes and vector
+  writes through two distinct trait-role adapters both observe the shared
+  pool's data, and `build_shared_pool` runs both migration runners exactly
+  once against the shared pool. Additional unit tests for the two mirror
+  helpers (`mirror_state_postgres_config`, `mirror_pgvector_config`) run
+  inline in `postgres_combined.rs` under `#[cfg(test)]` without needing a
+  live Postgres.
+- ✅ **Docs sweep** — new standalone guide
+  `docs/guides/combined-postgres-backend.md` (~290 LOC) covering when to pick
+  combined vs split, what "combined" actually means (dispatcher + shared
+  pool, no new type), activation, config blocks + the "state config wins"
+  rule, topology diagrams, verification queries, migration paths (same-DB =
+  zero-data-copy, different-DB = manual `pg_dump`/`pg_restore`),
+  integration test surface, and the list of things Phase 4 deliberately
+  does NOT ship. Plus updates to
+  `multi-backend-operations.md` (Phase 4 flipped from "Planned" to shipped;
+  backend matrix updated; decision flowchart now distinguishes combined vs
+  split by credential/pool-budget independence),
+  `pgvector-backend.md § 12` and `postgres-state-backend.md § 11` (both
+  flipped from "Phase 4 preview" to "shipped in Phase 4"),
+  `configuration.md` (note on reusing both existing config sections, pool-
+  sizing rule, statement_timeout asymmetry), `architecture.md` (factory
+  dispatcher example updated, cross-phase relationship row marked shipped),
+  `CHANGELOG.md`, `CLAUDE.md`, `PROGRESS.md`.
 
-**Commit message:** `feat: v0.16.0 — combined Postgres+pgvector backend`
+**Additional work that was not in the plan:**
+
+- ✅ **New Cargo dep `sqlx` on `the-one-mcp`** — optional, narrow feature set
+  `[runtime-tokio, tls-rustls, postgres, macros]` (same `links`-safe list
+  Phase 2/3 bisected), activated by either `pg-state` or `pg-vectors`
+  features. Required because the combined module in
+  `crates/the-one-mcp/src/postgres_combined.rs` uses
+  `sqlx::postgres::{PgPool, PgPoolOptions}` and `sqlx::query` directly at
+  the broker level (not via a downstream crate re-export). Alternative
+  designs would have added `pub use sqlx::postgres::PgPool` re-exports on
+  core or memory, but sqlx's `query` macro doesn't re-export cleanly, so
+  adding it as a direct dep was the simpler move. Same `chrono` + `migrate`
+  feature exclusions stand.
+- ✅ **`preflight_vector_extension` public visibility** — was `pub(crate)`
+  in Phase 2; Phase 4 makes it `pub` so the combined module can call it
+  without duplicating the three-state detection logic and the five-
+  per-provider error catalog. Doc comment updated to explain the new
+  visibility rationale.
+
+**Pool sizing asymmetry documented explicitly:**
+
+- State config wins. `state_postgres.{max,min}_connections`, the timeout
+  fields, and `statement_timeout_ms` (via the `after_connect` hook) all
+  apply to the shared pool. `vector_pgvector`'s corresponding pool fields
+  are ignored. HNSW tuning still comes from `vector_pgvector` (migration-
+  time + query-time, not pool-time).
+- **statement_timeout asymmetry**: on combined deployments, vector queries
+  inherit the state-side `statement_timeout` — the split-pool pgvector
+  path has no equivalent hook. Operators migrating from split-pool
+  pgvector must bump `state_postgres.statement_timeout_ms` high enough to
+  accommodate their slowest vector search. Documented in the standalone
+  guide with a migration note.
+
+**Test count delta:**
+
+- Base path unchanged at **466 passing, 1 ignored** (combined module is
+  feature-gated; base path sees no new tests).
+- **495 → 504 with `--features pg-state,pg-vectors`** (+9 total: 4 mirror-
+  helper unit tests in `postgres_combined.rs` that don't need a live
+  database, 5 integration tests in `postgres_combined_roundtrip.rs` that
+  skip gracefully via early `return` when env vars aren't set — each
+  graceful skip still counts as a passing test because the test function
+  returns normally).
+
+**Commit message:** `feat: v0.16.0 — combined Postgres+pgvector backend` (pending, tag `v0.16.0-phase4`).
 
 **STOP and report to me before starting Phase 5.**
 
