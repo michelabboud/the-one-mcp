@@ -38,8 +38,8 @@ All notable changes to this project are documented in this file.
   for Phase 6. 7 integration tests gated on
   `THE_ONE_STATE_TYPE=redis`. Test count: 466 base, 511 features.
 
-- **v0.16.0 Phase 4 — combined Postgres+pgvector backend** (pending
-  commit, tag `v0.16.0-phase4`). Ships the first *combined
+- **v0.16.0 Phase 4 — combined Postgres+pgvector backend** (commit
+  `8f83f05`, tag `v0.16.0-phase4`). Ships the first *combined
   single-pool* backend: one `sqlx::PgPool` serving both the
   `StateStore` trait role (audit / diary / navigation / approvals /
   project profiles) AND the `VectorBackend` trait role (chunks /
@@ -187,7 +187,7 @@ All notable changes to this project are documented in this file.
     them normally); Phase 2/3 split-pool paths are unchanged;
     baseline-path behavior is unchanged.
 
-- **v0.16.0 Phase 3 — `PostgresStateStore` impl** (pending commit,
+- **v0.16.0 Phase 3 — `PostgresStateStore` impl** (commit `f010ed6`,
   tag `v0.16.0-phase3`). Ports every `StateStore` trait method to
   Postgres so operators can run the-one-mcp with **zero SQLite on
   the state axis**. Composes with Phase 2's pgvector: operators can
@@ -297,7 +297,7 @@ All notable changes to this project are documented in this file.
     `docs/plans/2026-04-11-resume-phase1-onwards.md`.
 
 - **v0.16.0 Phase 2 — pgvector `VectorBackend` + env var parser +
-  startup validator** (pending commit, tag `v0.16.0-phase2`). First
+  startup validator** (commit `91ff224`, tag `v0.16.0-phase2`). First
   real alternative vector backend after the Phase A trait extraction:
   operators running managed Postgres can now co-locate their vectors
   with their relational data instead of standing up a separate

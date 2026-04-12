@@ -644,7 +644,7 @@ NO `[combined_postgres]` section. See
 [configuration.md § Multi-Backend Selection](configuration.md#multi-backend-selection-v0160)
 for the inline note.
 
-Commit `<pending>`, tag `v0.16.0-phase4`. Cargo features
+Commit `8f83f05`, tag `v0.16.0-phase4`. Cargo features
 `pg-state,pg-vectors` (the combined dispatcher activates whenever
 both features are on and both env vars select `postgres-combined`
 — no new feature flag).

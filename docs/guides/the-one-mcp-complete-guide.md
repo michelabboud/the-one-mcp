@@ -110,7 +110,7 @@ The installer:
 5. Auto-detects Claude Code, Gemini CLI, OpenCode, Codex and registers the MCP
 6. Validates with a smoke test
 
-Options: `--version v0.16.0-phase4`, `--lean` (no swagger), `--local ./target/release`, `--uninstall`. Add `--features pg-vectors,pg-state` when building from source to enable the v0.16.0 multi-backend paths — this single feature combo gives you split-pool Phase 2/3 AND combined-pool Phase 4 in one binary (see [INSTALL.md § Optional multi-backend features](../../INSTALL.md#optional-multi-backend-features-v0160)).
+Options: `--version v0.16.0`, `--lean` (no swagger), `--local ./target/release`, `--uninstall`. Add `--features pg-vectors,pg-state,redis-state,redis-vectors` when building from source to enable all v0.16.0 multi-backend paths (see [INSTALL.md § Optional multi-backend features](../../INSTALL.md#optional-multi-backend-features-v0160)).
 
 ### Build from Source
 
