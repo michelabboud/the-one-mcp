@@ -67,8 +67,12 @@ where
         // parse_line boxed the error variant; the happy path continues with
         // the unboxed request as before.
 
-        let response = dispatch(&broker, request).await;
-        write_response(&mut writer, &response).await;
+        // Notifications return None — per JSON-RPC 2.0 §4.1 we must NOT
+        // write any frame back, otherwise strict clients (e.g. Claude Code's
+        // Zod-validated stdio transport) close the connection.
+        if let Some(response) = dispatch(&broker, request).await {
+            write_response(&mut writer, &response).await;
+        }
     }
 
     Ok(())

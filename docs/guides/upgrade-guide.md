@@ -4,6 +4,76 @@
 
 ---
 
+## Upgrading to v0.16.1 (from v0.16.0)
+
+v0.16.1 is a **strongly recommended** patch release for anyone running
+the-one-mcp under a strict MCP client (Claude Code, Claude Desktop,
+Gemini CLI, or any client that validates incoming JSON-RPC frames
+against the MCP schema).
+
+### What's fixed
+
+1. **JSON-RPC notifications no longer produce a response frame.**
+   v0.16.0's stdio dispatcher replied to every notification — including
+   the client's `notifications/initialized` that immediately follows
+   the `initialize` handshake — with an out-of-spec frame
+   `{"jsonrpc":"2.0","result":null}` (no `id`, no `method`, bare
+   `result`). Strict clients rejected it and dropped the session, so
+   under Claude Code v0.16.0 sessions connected, handshook, and died
+   in ≈ 30 ms. v0.16.1's dispatcher returns `Option<JsonRpcResponse>`,
+   and all three transports (stdio/sse/stream) suppress output for
+   the `None` case. Stdio writes nothing; HTTP transports return
+   `202 Accepted`.
+
+2. **`--version` and `serverInfo.version` now report the real release.**
+   Prior to v0.16.1 the workspace `Cargo.toml` still carried the
+   scaffold version `0.1.0`, so `the-one-mcp --version` printed
+   `the-one-mcp 0.1.0` on every release from v0.1.0 through v0.16.0.
+   The MCP `initialize` handshake separately advertised
+   `serverInfo.version: "v1beta"` (the schema tag, not the software
+   version). v0.16.1 aligns both: `Cargo.toml` → `0.16.1` and
+   `serverInfo.version` → `env!("CARGO_PKG_VERSION")`.
+
+### Required action
+
+- **Upgrade the binary.** Run the one-line installer or rebuild from
+  source. For local/WSL setups:
+  ```bash
+  cargo build --release -p the-one-mcp --bin the-one-mcp
+  install -m 755 target/release/the-one-mcp ~/.the-one/bin/the-one-mcp
+  the-one-mcp --version   # expect: the-one-mcp 0.16.1
+  ```
+- **Restart MCP client sessions** (Claude Code, Gemini CLI, etc.) so
+  they spawn the new binary.
+
+### Spotting the v0.16.0 symptom
+
+If you were running v0.16.0 under Claude Code, `claude mcp list` showed
+the server as ✓ Connected (that probe only tests the handshake), but
+real sessions logged this sequence under
+`~/.cache/claude-cli-nodejs/<project>/mcp-logs-the-one-mcp/*.jsonl`:
+
+```
+Successfully connected (transport: stdio)
+Connection established with capabilities: { ... "serverVersion": {"name":"the-one-mcp","version":"v1beta"} }
+STDIO connection dropped after 0s uptime
+Connection error: [ZodError ... "Unrecognized key: \"result\"" ...]
+Closing transport (stdio transport error: ZodError)
+```
+
+After upgrading to v0.16.1, the same log shows a clean handshake,
+`serverVersion: "0.16.1"`, and a clean shutdown.
+
+### No breaking changes
+
+- Tool and resource shapes are identical to v0.16.0.
+- Config-file format, CLI adapters, and HTTP endpoints are unchanged.
+- `MCP_SCHEMA_VERSION` (`"v1beta"`) is unchanged — the OpenAPI
+  swagger path and `report.config.schema_version` field still carry
+  the schema tag, which is the correct semantic for those surfaces.
+
+---
+
 ## Upgrading to v0.16.0 GA (from v0.16.0-phase4)
 
 ### New features (opt-in, non-breaking)
@@ -23,7 +93,7 @@
 - **Phase 7 — Redis-Vector entity/relation parity.** `RedisVectorStore`
   now supports entities and relations (was chunks-only). Each type gets
   its own RediSearch index. Images remain unsupported on Redis (tracked
-  for v0.16.1).
+  for v0.16.2).
 
 ### Required action
 

@@ -749,7 +749,7 @@ activation via `redis-combined`.
 Phase 7 closes the capability gap on `RedisVectorStore`: entities
 and relations are now supported (was chunks-only). Each type gets
 its own RediSearch index. Images remain unsupported on Redis
-(tracked for v0.16.1). Decision D (pgvector hybrid search) is
+(tracked for v0.16.2). Decision D (pgvector hybrid search) is
 deferred to post-GA.
 
 ---

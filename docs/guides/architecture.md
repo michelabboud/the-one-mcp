@@ -123,8 +123,12 @@ Key modules:
   is applied here, after retrieval and before the final MCP response is shaped.
 - `api.rs` — all request and response types. Every MCP tool has a corresponding
   `*Request` / `*Response` struct here.
-- `transport/jsonrpc.rs` — JSON-RPC 2.0 dispatcher. Deserializes incoming requests,
-  calls the appropriate `McpBroker` method, serializes the response.
+- `transport/jsonrpc.rs` — JSON-RPC 2.0 dispatcher. Deserializes incoming
+  requests, calls the appropriate `McpBroker` method, and returns
+  `Option<JsonRpcResponse>` — `Some(response)` for requests (id present)
+  and `None` for notifications (id absent). Transports suppress output
+  in the `None` case so notifications never produce a frame on the wire
+  (JSON-RPC 2.0 §4.1). This became the structural invariant in v0.16.1.
 - `transport/tools.rs` — the `tool_definitions()` function that returns the 19 MCP tool
   descriptors sent during `initialize`.
 - `transport/stdio.rs`, `sse.rs`, `stream.rs` — transport implementations. The broker

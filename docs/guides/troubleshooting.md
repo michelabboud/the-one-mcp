@@ -129,6 +129,56 @@ Then restart the Claude Code session. MCP servers are discovered at session star
 
 ---
 
+### MCP session disconnects immediately with ZodError (v0.16.0 only)
+
+**Symptom:** `claude mcp list` reports `✓ Connected`, but every real
+Claude Code session drops the-one-mcp almost immediately. Tools never
+become callable, and the log at
+`~/.cache/claude-cli-nodejs/<project>/mcp-logs-the-one-mcp/*.jsonl`
+shows:
+
+```
+Successfully connected (transport: stdio)
+Connection established with capabilities: { ... "serverVersion":{"name":"the-one-mcp","version":"v1beta"} }
+STDIO connection dropped after 0s uptime
+Connection error: [ZodError ... "Unrecognized key: \"result\"" ...]
+Closing transport (stdio transport error: ZodError)
+```
+
+**Cause:** Affects **only v0.16.0**. The stdio dispatcher replied to
+the client's `notifications/initialized` with
+`{"jsonrpc":"2.0","result":null}` — a frame that satisfies no legal
+JSON-RPC 2.0 message variant (notifications must not receive a
+response per §4.1). Claude Code's Zod-validated stdio transport
+rejects it and closes the pipe.
+
+The reason `claude mcp list` returns `✓ Connected` despite the
+failure is that the probe exits right after the capabilities exchange;
+the malformed frame arrives after that, during real session traffic.
+
+**Fix:** Upgrade to **v0.16.1 or later**. The dispatcher now returns
+`Option<JsonRpcResponse>` and all transports suppress output for
+notifications.
+
+```bash
+# Confirm you're on v0.16.1+
+~/.the-one/bin/the-one-mcp --version
+# expect: the-one-mcp 0.16.1 (or later)
+
+# If still on v0.16.0, rebuild and reinstall:
+cd path/to/the-one-mcp
+cargo build --release -p the-one-mcp --bin the-one-mcp
+install -m 755 target/release/the-one-mcp ~/.the-one/bin/the-one-mcp
+```
+
+Restart your Claude Code session after the upgrade so it re-spawns
+the server binary.
+
+See [the v0.16.1 upgrade notes](upgrade-guide.md#upgrading-to-v0161-from-v0160)
+for the full story.
+
+---
+
 ### MCP server shows up but `tools/list` returns nothing
 
 This usually means the server started but the `initialize` handshake failed or returned an error.

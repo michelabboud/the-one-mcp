@@ -15,7 +15,10 @@ resolver = "2"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://example.invalid/the-one-mcp"
-version = "0.1.0"
+# Real release version — surfaced by `the-one-mcp --version` (clap reads
+# CARGO_PKG_VERSION) and by the MCP `serverInfo.version` field. Align
+# with the top of CHANGELOG.md and the VERSION file on every release.
+version = "0.16.1"
 
 [workspace.dependencies]
 anyhow = "1.0"

@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use axum::{
     extract::State,
+    http::StatusCode,
     response::{
         sse::{Event, Sse},
         IntoResponse, Json,
@@ -58,8 +59,12 @@ async fn handle_message(
     State(state): State<SseState>,
     Json(request): Json<JsonRpcRequest>,
 ) -> impl IntoResponse {
-    let response = dispatch(&state.broker, request).await;
-    Json(response)
+    // JSON-RPC 2.0 §4.1: notifications get no response. MCP's HTTP mapping
+    // uses 202 Accepted with an empty body for this case.
+    match dispatch(&state.broker, request).await {
+        Some(response) => Json(response).into_response(),
+        None => StatusCode::ACCEPTED.into_response(),
+    }
 }
 
 async fn handle_sse(

@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use axum::{
     extract::State,
-    http::HeaderMap,
+    http::{HeaderMap, StatusCode},
     response::{
         sse::{Event, Sse},
         IntoResponse, Json,
@@ -47,7 +47,12 @@ async fn handle_mcp(
     headers: HeaderMap,
     Json(request): Json<JsonRpcRequest>,
 ) -> impl IntoResponse {
-    let response = dispatch(&broker, request).await;
+    // JSON-RPC 2.0 §4.1: notifications produce no response. MCP's HTTP
+    // streamable mapping returns 202 Accepted with an empty body in that
+    // case.
+    let Some(response) = dispatch(&broker, request).await else {
+        return StatusCode::ACCEPTED.into_response();
+    };
 
     // Check if client requested SSE streaming
     let accepts_sse = headers

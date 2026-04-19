@@ -1,8 +1,10 @@
 # The-One MCP API Reference
 
 > Complete reference for all 30 MCP tools + 3 MCP resource types exposed by
-> the-one-mcp. Current version: v0.16.0 GA. Tool and resource shapes are
+> the-one-mcp. Current version: v0.16.1. Tool and resource shapes are
 > unchanged since v0.12.0 — v0.15/v0.16 work is additive and backend-internal.
+> v0.16.1 patches the JSON-RPC notification handling in the transport layer
+> (tool shapes and response envelopes are byte-identical to v0.16.0).
 >
 > Tools are invoked via JSON-RPC 2.0 over stdio/SSE/stream. Every tool call uses
 > `method: "tools/call"` with `params.name` and `params.arguments`. Results are
@@ -104,6 +106,27 @@ Errors return a JSON-RPC error object with one of these codes:
 | `-32601` | Method not found |
 | `-32602` | Invalid params (missing required field) |
 | `-32603` | Internal error (broker-level failure) |
+
+### Notifications
+
+Per JSON-RPC 2.0 §4.1, a *notification* is a request without an `id`
+field. The server MUST NOT emit a response frame for a notification.
+As of v0.16.1 the-one-mcp enforces this at the dispatcher: `dispatch`
+returns `Option<JsonRpcResponse>` and any id-less inbound message
+short-circuits to `None`. The three transports handle the `None`
+case as follows:
+
+| Transport | Behaviour for notifications |
+|-----------|-----------------------------|
+| `stdio`   | Write nothing to stdout. |
+| `sse` (POST `/message`) | Return `HTTP 202 Accepted` with empty body. |
+| `stream` (POST `/mcp`)  | Return `HTTP 202 Accepted` with empty body. |
+
+The MCP client's `notifications/initialized` (sent right after the
+`initialize` response) is the canonical notification in a session
+handshake. v0.16.0 and earlier erroneously emitted
+`{"jsonrpc":"2.0","result":null}` in response, which strict clients
+reject — see [troubleshooting: session disconnects with ZodError](troubleshooting.md#mcp-session-disconnects-immediately-with-zoderror-v0160-only).
 
 ---
 

@@ -2,6 +2,83 @@
 
 All notable changes to this project are documented in this file.
 
+## [v0.16.1] - 2026-04-19
+
+### Fixed
+
+- **JSON-RPC notification handling — the stdio transport no longer
+  ships a response frame for notifications.** Every session with a
+  v0.16.0 binary completed the `initialize` handshake and then
+  emitted `{"jsonrpc":"2.0","result":null}` in reply to
+  `notifications/initialized`. That frame has no `id`, no `method`,
+  and a bare `result`, so it matches none of the legal JSON-RPC 2.0
+  message variants. Strict clients (notably Claude Code's Zod-
+  validated stdio transport) rejected it with a ZodError and dropped
+  the session immediately after handshake. Root cause:
+  `transport/jsonrpc.rs` routed `notifications/initialized` through
+  `JsonRpcResponse::success(None, Value::Null)`, and `serve_pipe`
+  wrote every dispatch result unconditionally.
+
+  The fix makes notification handling structural, not string-match.
+  `dispatch` now returns `Option<JsonRpcResponse>`; any inbound
+  message with no `id` short-circuits to `None`, and all three
+  transports (`stdio`, `sse`, `stream`) suppress output in that case.
+  The HTTP transports return `202 Accepted` with an empty body per
+  MCP's HTTP mapping; stdio simply writes nothing. The compile-time
+  `Option` forces every future transport to honour the notification
+  invariant — a future refactor cannot reintroduce the bug.
+
+  Two regression tests guard the behaviour:
+  `test_dispatch_notifications_initialized_emits_no_response` (rewrite
+  of the old `test_dispatch_notifications_initialized`, which had
+  asserted the *buggy* behaviour) locks the specific case Claude
+  Code tripped on, and the new
+  `test_dispatch_any_notification_emits_no_response` generalises to
+  any id-less method. `the-one-mcp --lib` test count: **114 passing**
+  (was 113; net +1 after the rewrite + add). Stdio integration
+  tests still 9/9 green; full workspace `lib` count still matches the
+  v0.16.0 baseline everywhere else.
+
+- **`--version` and `serverInfo.version` now report the real release
+  version.** The clap `#[command(version)]` derive pulls
+  `CARGO_PKG_VERSION`, which inherited the workspace default
+  `0.1.0` — so `the-one-mcp --version` printed `the-one-mcp 0.1.0`
+  across every release from v0.1.0 through v0.16.0. At the same time
+  the MCP `initialize` handshake advertised `serverInfo.version:
+  "v1beta"` (the schema/protocol tag), not the software version,
+  which confused clients that surface the release string in UI.
+
+  Two changes: (1) workspace `Cargo.toml` `version = "0.1.0"` →
+  `"0.16.1"`, so the clap-generated `--version` now prints the real
+  release. (2) `handle_initialize` now emits
+  `env!("CARGO_PKG_VERSION")` for `serverInfo.version` instead of
+  the schema tag. `MCP_SCHEMA_VERSION` is unchanged — it continues
+  to back the `schema_version` field on `report.config` and the
+  OpenAPI swagger path, where the `v1beta` semantic is correct.
+  `VERSION` file bumped from `v0.14.3` (stale since v0.15.x) to
+  `v0.16.1`.
+
+### Docs
+
+- New **upgrade notes** for v0.16.1 in `docs/guides/upgrade-guide.md`.
+- New **troubleshooting** entry in `docs/guides/troubleshooting.md`:
+  *"MCP session disconnects immediately with ZodError"* — documents
+  the v0.16.0 symptom, how to confirm via the
+  `~/.cache/claude-cli-nodejs/**/mcp-logs-the-one-mcp/*.jsonl` logs,
+  and how to upgrade.
+- `docs/guides/api-reference.md` transport section now explicitly
+  covers notification semantics (id-less messages get no response
+  per JSON-RPC 2.0 §4.1; HTTP transports return 202).
+- `docs/guides/architecture.md` dispatcher description updated to
+  reflect `Option<JsonRpcResponse>` return type.
+
+### Compatibility
+
+- No breaking changes. Tool and resource shapes are identical to
+  v0.16.0. Existing configurations keep working unchanged. Every
+  client that spoke v0.16.0 correctly keeps working; clients that
+  were dropping the session now stay connected.
+
 ## [v0.16.0] - 2026-04-12
 
 ### Added
@@ -11,7 +88,7 @@ All notable changes to this project are documented in this file.
   now supports entities and relations (was chunks-only). Each type
   gets its own RediSearch index. `capabilities()` updated to
   `entities=true`, `relations=true`. Images remain unsupported on
-  Redis (tracked for v0.16.1). Decision D (pgvector hybrid) deferred
+  Redis (tracked for v0.16.2). Decision D (pgvector hybrid) deferred
   to post-GA. Test count: 466 base, 521 all features.
 
 - **v0.16.0 Phase 6 — combined Redis+RediSearch backend** (commit
