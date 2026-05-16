@@ -22,9 +22,10 @@ secrets/
 .DS_Store
 Thumbs.db
 
-# IDE
+# IDE / AI tool workspaces
 .idea/
 .vscode/
+.gemini/
 *.swp
 *.swo
 *~
