@@ -1,18 +1,14 @@
-use std::convert::TryInto;
 use std::sync::Arc;
 
-use fred::clients::Client;
-use fred::interfaces::{
-    ClientLike, HashesInterface, KeysInterface, RediSearchInterface, SetsInterface,
+use the_one_redis::search::{
+    CreateOptions, DistanceMetric, Query, SchemaField, SearchReply, VectorAlgorithm,
 };
-use fred::types::config::Config;
-use fred::types::redisearch::{FtCreateOptions, IndexKind, SearchSchema, SearchSchemaKind};
-use fred::types::{ClusterHash, CustomCommand, InfoKind, Map, Value};
+use the_one_redis::{PoolConfig, RedisPool};
 use tokio::sync::OnceCell;
 
 #[derive(Debug)]
 pub struct RedisVectorStore {
-    client: Client,
+    pool: RedisPool,
     index_name: String,
     embedding_dim: usize,
     started: Arc<OnceCell<()>>,
@@ -21,14 +17,14 @@ pub struct RedisVectorStore {
 impl Clone for RedisVectorStore {
     fn clone(&self) -> Self {
         Self {
-            client: self.client.clone(),
+            pool: self.pool.clone(),
             index_name: self.index_name.clone(),
             embedding_dim: self.embedding_dim,
             // SHARE the OnceCell across clones rather than allocating a
             // fresh empty one. Arc::clone is a refcount bump; Arc::new
             // would defeat the whole point of the guard and force every
             // clone to re-run startup() (FT.CREATE, schema migration).
-            // Reached via the combined-Redis shared-client cache in the
+            // Reached via the combined-Redis shared-pool cache in the
             // broker, which clones the store per call site.
             started: Arc::clone(&self.started),
         }
@@ -69,7 +65,7 @@ impl RedisPersistenceInfo {
 
 impl RedisVectorStore {
     pub fn new(
-        client: Client,
+        pool: RedisPool,
         index_name: impl Into<String>,
         embedding_dim: usize,
     ) -> Result<Self, String> {
@@ -77,14 +73,14 @@ impl RedisVectorStore {
         validate_embedding_dim(embedding_dim)?;
 
         Ok(Self {
-            client,
+            pool,
             index_name,
             embedding_dim,
             started: Arc::new(OnceCell::new()),
         })
     }
 
-    pub fn from_url(
+    pub async fn from_url(
         redis_url: &str,
         index_name: impl Into<String>,
         embedding_dim: usize,
@@ -93,22 +89,23 @@ impl RedisVectorStore {
             return Err("redis_url must not be empty".to_string());
         }
 
-        let config = Config::from_url(redis_url).map_err(|e| format!("invalid redis_url: {e}"))?;
-        let client = Client::new(config, None, None, None);
+        let pool = RedisPool::new(PoolConfig::from_url(redis_url))
+            .await
+            .map_err(|e| format!("invalid redis_url: {e}"))?;
 
-        Self::new(client, index_name, embedding_dim)
+        Self::new(pool, index_name, embedding_dim)
     }
 
-    pub fn new_for_test(
+    pub async fn new_for_test(
         redis_url: &str,
         index_name: &str,
         embedding_dim: usize,
     ) -> Result<Self, String> {
-        Self::from_url(redis_url, index_name, embedding_dim)
+        Self::from_url(redis_url, index_name, embedding_dim).await
     }
 
-    pub fn client(&self) -> &Client {
-        &self.client
+    pub fn pool(&self) -> &RedisPool {
+        &self.pool
     }
 
     pub fn index_name(&self) -> &str {
@@ -184,8 +181,8 @@ impl RedisVectorStore {
         self.ensure_started().await?;
 
         let info: String = self
-            .client
-            .info::<String>(Some(InfoKind::Persistence))
+            .pool
+            .raw_cmd(&["INFO", "persistence"])
             .await
             .map_err(|e| format!("failed to read Redis persistence info: {e}"))?;
 
@@ -201,102 +198,44 @@ impl RedisVectorStore {
         self.ensure_started().await?;
 
         let schema = vec![
-            SearchSchema {
-                field_name: "chunk_id".into(),
-                alias: None,
-                kind: SearchSchemaKind::Text {
-                    sortable: false,
-                    unf: false,
-                    nostem: true,
-                    phonetic: None,
-                    weight: None,
-                    withsuffixtrie: false,
-                    noindex: false,
-                },
+            SchemaField::Text {
+                name: "chunk_id".into(),
             },
-            SearchSchema {
-                field_name: "source_path".into(),
-                alias: None,
-                kind: SearchSchemaKind::Tag {
-                    sortable: false,
-                    unf: false,
-                    separator: None,
-                    casesensitive: true,
-                    withsuffixtrie: false,
-                    noindex: false,
-                },
+            SchemaField::Tag {
+                name: "source_path".into(),
+                separator: None,
             },
-            SearchSchema {
-                field_name: "heading".into(),
-                alias: None,
-                kind: SearchSchemaKind::Text {
-                    sortable: false,
-                    unf: false,
-                    nostem: true,
-                    phonetic: None,
-                    weight: None,
-                    withsuffixtrie: false,
-                    noindex: false,
-                },
+            SchemaField::Text {
+                name: "heading".into(),
             },
-            SearchSchema {
-                field_name: "chunk_index".into(),
-                alias: None,
-                kind: SearchSchemaKind::Numeric {
-                    sortable: false,
-                    unf: false,
-                    noindex: false,
-                },
+            SchemaField::Numeric {
+                name: "chunk_index".into(),
+                sortable: false,
             },
-            SearchSchema {
-                field_name: "content".into(),
-                alias: None,
-                kind: SearchSchemaKind::Text {
-                    sortable: false,
-                    unf: false,
-                    nostem: false,
-                    phonetic: None,
-                    weight: None,
-                    withsuffixtrie: false,
-                    noindex: false,
-                },
+            SchemaField::Text {
+                name: "content".into(),
             },
-            SearchSchema {
-                field_name: "embedding".into(),
-                alias: None,
-                kind: SearchSchemaKind::Custom {
-                    name: "VECTOR".into(),
-                    arguments: vec![
-                        "HNSW".into(),
-                        6usize
-                            .try_into()
-                            .map_err(|e| format!("vector schema error: {e}"))?,
-                        "TYPE".into(),
-                        "FLOAT32".into(),
-                        "DIM".into(),
-                        self.embedding_dim
-                            .try_into()
-                            .map_err(|e| format!("vector schema error: {e}"))?,
-                        "DISTANCE_METRIC".into(),
-                        "COSINE".into(),
-                    ],
-                },
+            SchemaField::Vector {
+                name: "embedding".into(),
+                algorithm: VectorAlgorithm::Hnsw,
+                dim: self.embedding_dim,
+                distance_metric: DistanceMetric::Cosine,
+                initial_cap: None,
             },
         ];
 
-        let options = FtCreateOptions {
-            on: Some(IndexKind::Hash),
-            prefixes: vec![self.chunk_key_prefix().into()],
-            skipinitialscan: true,
-            ..Default::default()
+        let options = CreateOptions {
+            on_json: false,
+            prefixes: vec![self.chunk_key_prefix()],
         };
 
         match self
-            .client
-            .ft_create::<Value, _>(&self.index_name, options, schema)
+            .pool
+            .search()
+            .ft_create(&self.index_name, &options, &schema)
             .await
         {
-            Ok(_) => Ok(()),
+            Ok(()) => Ok(()),
             Err(err) => {
                 let message = err.to_string();
                 if message.contains("Index already exists") || message.contains("already exists") {
@@ -327,25 +266,27 @@ impl RedisVectorStore {
             }
 
             let key = self.chunk_key(&record.chunk_id);
-            let mut fields = Map::new();
-            fields.insert("chunk_id".into(), record.chunk_id.clone().into());
-            fields.insert("source_path".into(), record.source_path.clone().into());
-            fields.insert("heading".into(), record.heading.clone().into());
-            fields.insert("chunk_index".into(), (record.chunk_index as i64).into());
-            fields.insert("content".into(), record.content.clone().into());
             let embedding_bytes = vector_to_bytes(&record.vector);
-            fields.insert("embedding".into(), embedding_bytes.as_slice().into());
+            let chunk_index_str = record.chunk_index.to_string();
+            let fields: [(&str, &[u8]); 6] = [
+                ("chunk_id", record.chunk_id.as_bytes()),
+                ("source_path", record.source_path.as_bytes()),
+                ("heading", record.heading.as_bytes()),
+                ("chunk_index", chunk_index_str.as_bytes()),
+                ("content", record.content.as_bytes()),
+                ("embedding", embedding_bytes.as_slice()),
+            ];
 
-            let _: Value = self
-                .client
-                .hset(&key, fields)
+            self.pool
+                .hashes()
+                .hset_multi(&key, &fields)
                 .await
                 .map_err(|e| format!("redis hset failed for {key}: {e}"))?;
 
             let source_key = self.source_index_key(&record.source_path);
-            let _: Value = self
-                .client
-                .sadd(&source_key, vec![key.clone()])
+            self.pool
+                .sets()
+                .sadd(&source_key, key.as_str())
                 .await
                 .map_err(|e| format!("redis sadd failed for {source_key}: {e}"))?;
             written += 1;
@@ -359,7 +300,8 @@ impl RedisVectorStore {
 
         let source_key = self.source_index_key(source_path);
         let members: Vec<String> = self
-            .client
+            .pool
+            .sets()
             .smembers(&source_key)
             .await
             .map_err(|e| format!("redis smembers failed for {source_key}: {e}"))?;
@@ -368,19 +310,25 @@ impl RedisVectorStore {
             return Ok(0);
         }
 
-        let deleted: i64 = self
-            .client
-            .del(members.clone())
-            .await
-            .map_err(|e| format!("redis del failed: {e}"))?;
+        let mut deleted_total: u64 = 0;
+        for member in &members {
+            let del = self
+                .pool
+                .keys()
+                .del(member)
+                .await
+                .map_err(|e| format!("redis del failed: {e}"))?;
+            deleted_total += del;
+        }
 
-        let _: i64 = self
-            .client
-            .del(vec![source_key])
+        let _ = self
+            .pool
+            .keys()
+            .del(&source_key)
             .await
             .map_err(|e| format!("redis del failed for source index: {e}"))?;
 
-        Ok(deleted.max(0) as usize)
+        Ok(deleted_total as usize)
     }
 
     pub async fn search_chunks(
@@ -405,32 +353,20 @@ impl RedisVectorStore {
 
         let raw_query = format!("*=>[KNN {} @embedding $BLOB AS score]", top_k);
         let query_blob = vector_to_bytes(query_vector);
-        let command = CustomCommand::new("FT.SEARCH", ClusterHash::FirstKey, false);
-        let args: Vec<Value> = vec![
-            self.index_name.clone().into(),
-            raw_query.into(),
-            "PARAMS".into(),
-            2i64.into(),
-            "BLOB".into(),
-            query_blob.as_slice().into(),
-            "NOCONTENT".into(),
-            "WITHSCORES".into(),
-            "LIMIT".into(),
-            0i64.into(),
-            top_k
-                .try_into()
-                .map_err(|e| format!("invalid top_k: {e}"))?,
-            "DIALECT".into(),
-            2i64.into(),
-        ];
+        let query = Query::new(raw_query)
+            .return_fields(["score"])
+            .param("BLOB", query_blob)
+            .limit(0, top_k)
+            .dialect(2);
 
-        let value: Value = self
-            .client
-            .custom::<Value, _>(command, args)
+        let reply = self
+            .pool
+            .search()
+            .ft_search(&self.index_name, &query)
             .await
             .map_err(|e| format!("redis vector search failed: {e}"))?;
 
-        parse_search_results(value, &self.chunk_key_prefix(), score_threshold)
+        parse_chunk_reply(&reply, &self.chunk_key_prefix(), score_threshold)
     }
 
     // ── Entity / relation support (Phase 7) ─────────────────────────
@@ -466,76 +402,37 @@ impl RedisVectorStore {
         let prefix = self.entity_key_prefix();
 
         let schema = vec![
-            SearchSchema {
-                field_name: "name".into(),
-                alias: None,
-                kind: SearchSchemaKind::Text {
-                    sortable: false,
-                    unf: false,
-                    nostem: true,
-                    phonetic: None,
-                    weight: None,
-                    withsuffixtrie: false,
-                    noindex: false,
-                },
+            SchemaField::Text {
+                name: "name".into(),
             },
-            SearchSchema {
-                field_name: "entity_type".into(),
-                alias: None,
-                kind: SearchSchemaKind::Tag {
-                    sortable: false,
-                    unf: false,
-                    separator: None,
-                    casesensitive: false,
-                    withsuffixtrie: false,
-                    noindex: false,
-                },
+            SchemaField::Tag {
+                name: "entity_type".into(),
+                separator: None,
             },
-            SearchSchema {
-                field_name: "description".into(),
-                alias: None,
-                kind: SearchSchemaKind::Text {
-                    sortable: false,
-                    unf: false,
-                    nostem: false,
-                    phonetic: None,
-                    weight: None,
-                    withsuffixtrie: false,
-                    noindex: false,
-                },
+            SchemaField::Text {
+                name: "description".into(),
             },
-            SearchSchema {
-                field_name: "embedding".into(),
-                alias: None,
-                kind: SearchSchemaKind::Custom {
-                    name: "VECTOR".into(),
-                    arguments: vec![
-                        "HNSW".into(),
-                        6usize.try_into().map_err(|e| format!("{e}"))?,
-                        "TYPE".into(),
-                        "FLOAT32".into(),
-                        "DIM".into(),
-                        self.embedding_dim.try_into().map_err(|e| format!("{e}"))?,
-                        "DISTANCE_METRIC".into(),
-                        "COSINE".into(),
-                    ],
-                },
+            SchemaField::Vector {
+                name: "embedding".into(),
+                algorithm: VectorAlgorithm::Hnsw,
+                dim: self.embedding_dim,
+                distance_metric: DistanceMetric::Cosine,
+                initial_cap: None,
             },
         ];
 
-        let options = FtCreateOptions {
-            on: Some(IndexKind::Hash),
-            prefixes: vec![prefix.into()],
-            skipinitialscan: true,
-            ..Default::default()
+        let options = CreateOptions {
+            on_json: false,
+            prefixes: vec![prefix],
         };
 
         match self
-            .client
-            .ft_create::<Value, _>(&idx_name, options, schema)
+            .pool
+            .search()
+            .ft_create(&idx_name, &options, &schema)
             .await
         {
-            Ok(_) => Ok(()),
+            Ok(()) => Ok(()),
             Err(err) => {
                 let msg = err.to_string();
                 if msg.contains("already exists") {
@@ -554,87 +451,42 @@ impl RedisVectorStore {
         let prefix = self.relation_key_prefix();
 
         let schema = vec![
-            SearchSchema {
-                field_name: "source".into(),
-                alias: None,
-                kind: SearchSchemaKind::Tag {
-                    sortable: false,
-                    unf: false,
-                    separator: None,
-                    casesensitive: false,
-                    withsuffixtrie: false,
-                    noindex: false,
-                },
+            SchemaField::Tag {
+                name: "source".into(),
+                separator: None,
             },
-            SearchSchema {
-                field_name: "target".into(),
-                alias: None,
-                kind: SearchSchemaKind::Tag {
-                    sortable: false,
-                    unf: false,
-                    separator: None,
-                    casesensitive: false,
-                    withsuffixtrie: false,
-                    noindex: false,
-                },
+            SchemaField::Tag {
+                name: "target".into(),
+                separator: None,
             },
-            SearchSchema {
-                field_name: "relation_type".into(),
-                alias: None,
-                kind: SearchSchemaKind::Tag {
-                    sortable: false,
-                    unf: false,
-                    separator: None,
-                    casesensitive: false,
-                    withsuffixtrie: false,
-                    noindex: false,
-                },
+            SchemaField::Tag {
+                name: "relation_type".into(),
+                separator: None,
             },
-            SearchSchema {
-                field_name: "description".into(),
-                alias: None,
-                kind: SearchSchemaKind::Text {
-                    sortable: false,
-                    unf: false,
-                    nostem: false,
-                    phonetic: None,
-                    weight: None,
-                    withsuffixtrie: false,
-                    noindex: false,
-                },
+            SchemaField::Text {
+                name: "description".into(),
             },
-            SearchSchema {
-                field_name: "embedding".into(),
-                alias: None,
-                kind: SearchSchemaKind::Custom {
-                    name: "VECTOR".into(),
-                    arguments: vec![
-                        "HNSW".into(),
-                        6usize.try_into().map_err(|e| format!("{e}"))?,
-                        "TYPE".into(),
-                        "FLOAT32".into(),
-                        "DIM".into(),
-                        self.embedding_dim.try_into().map_err(|e| format!("{e}"))?,
-                        "DISTANCE_METRIC".into(),
-                        "COSINE".into(),
-                    ],
-                },
+            SchemaField::Vector {
+                name: "embedding".into(),
+                algorithm: VectorAlgorithm::Hnsw,
+                dim: self.embedding_dim,
+                distance_metric: DistanceMetric::Cosine,
+                initial_cap: None,
             },
         ];
 
-        let options = FtCreateOptions {
-            on: Some(IndexKind::Hash),
-            prefixes: vec![prefix.into()],
-            skipinitialscan: true,
-            ..Default::default()
+        let options = CreateOptions {
+            on_json: false,
+            prefixes: vec![prefix],
         };
 
         match self
-            .client
-            .ft_create::<Value, _>(&idx_name, options, schema)
+            .pool
+            .search()
+            .ft_create(&idx_name, &options, &schema)
             .await
         {
-            Ok(_) => Ok(()),
+            Ok(()) => Ok(()),
             Err(err) => {
                 let msg = err.to_string();
                 if msg.contains("already exists") {
@@ -647,16 +499,14 @@ impl RedisVectorStore {
     }
 
     async fn ensure_started(&self) -> Result<(), String> {
-        self.started
-            .get_or_try_init(|| async {
-                self.client
-                    .init()
-                    .await
-                    .map_err(|e| format!("failed to initialize Redis client: {e}"))?;
-                Ok(())
-            })
-            .await
-            .map(|_| ())
+        // redis-rs's MultiplexedConnection is initialized eagerly when
+        // RedisPool::new completes (Pool pre-warms one connection at
+        // construction time), so there's no init() step to gate on.
+        // The OnceCell is retained for API compatibility — anything
+        // we'd want to do once-per-store can hook in here later
+        // (e.g. RediSearch capability probe).
+        self.started.get_or_init(|| async {}).await;
+        Ok(())
     }
 }
 
@@ -707,52 +557,32 @@ fn vector_to_bytes(vector: &[f32]) -> Vec<u8> {
     bytes
 }
 
-fn parse_search_results(
-    value: Value,
+/// Parse a chunks-search reply where the KNN expression aliases its
+/// distance to the `score` field (`AS score`). The reply shape is the
+/// standard FT.SEARCH `[total, key, [score, X], key, [score, X], ...]`.
+fn parse_chunk_reply(
+    reply: &SearchReply,
     chunk_prefix: &str,
     score_threshold: f32,
 ) -> Result<Vec<RedisSearchResult>, String> {
-    let Value::Array(mut values) = value else {
-        return Err("unexpected Redis search response shape".to_string());
-    };
-
-    if values.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    values.remove(0);
-
     let mut results = Vec::new();
-    let mut i = 0usize;
-    while i < values.len() {
-        let (key_value, score_value, consumed) = if let Some(Value::Array(row)) = values.get(i) {
-            if row.len() >= 2 {
-                (row[0].clone(), row[1].clone(), 1usize)
-            } else {
-                return Err("unexpected nested Redis search row".to_string());
-            }
-        } else if i + 1 < values.len() {
-            (values[i].clone(), values[i + 1].clone(), 2usize)
-        } else {
-            return Err("unexpected trailing Redis search row".to_string());
-        };
-
-        let key = key_value
-            .convert::<String>()
-            .map_err(|e| format!("failed to decode Redis key: {e}"))?;
-        let raw_score = parse_score(score_value)?;
+    for hit in &reply.hits {
+        let raw_score: f32 = hit
+            .fields
+            .iter()
+            .find(|(name, _)| name == "score")
+            .map(|(_, v)| v.parse().unwrap_or(0.0))
+            .unwrap_or(0.0);
         let score = 1.0 - raw_score;
         if score >= score_threshold {
-            let chunk_id = key
+            let chunk_id = hit
+                .key
                 .strip_prefix(chunk_prefix)
                 .map(str::to_string)
-                .unwrap_or(key.clone());
+                .unwrap_or_else(|| hit.key.clone());
             results.push(RedisSearchResult { chunk_id, score });
         }
-
-        i += consumed;
     }
-
     results.sort_by(|a, b| {
         b.score
             .partial_cmp(&a.score)
@@ -762,48 +592,25 @@ fn parse_search_results(
     Ok(results)
 }
 
-fn parse_entity_results(
-    value: Value,
-    prefix: &str,
-    threshold: f32,
-) -> Result<Vec<EntityHit>, String> {
-    let Value::Array(mut vals) = value else {
-        return Ok(Vec::new());
-    };
-    if vals.is_empty() {
-        return Ok(Vec::new());
-    }
-    vals.remove(0); // count
-
+fn parse_entity_reply(reply: &SearchReply, threshold: f32) -> Result<Vec<EntityHit>, String> {
     let mut results = Vec::new();
-    let mut i = 0;
-    while i + 2 < vals.len() {
-        let key_str = vals[i].clone().convert::<String>().unwrap_or_default();
-        let score = 1.0 - parse_score(vals[i + 1].clone())?;
-        let fields = &vals[i + 2];
-
+    for hit in &reply.hits {
+        let get = |name: &str| -> String {
+            hit.fields
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, v)| v.clone())
+                .unwrap_or_default()
+        };
+        let raw_score: f32 = get("score").parse().unwrap_or(0.0);
+        let score = 1.0 - raw_score;
         if score >= threshold {
-            let get = |name: &str| -> String {
-                if let Value::Array(arr) = fields {
-                    let mut j = 0;
-                    while j + 1 < arr.len() {
-                        if let Some(k) = arr[j].as_str() {
-                            if k == name {
-                                return arr[j + 1].clone().convert::<String>().unwrap_or_default();
-                            }
-                        }
-                        j += 2;
-                    }
-                }
-                String::new()
-            };
-            let _ = key_str.strip_prefix(prefix);
             let raw_chunks = get("source_chunks");
             let source_chunks: Vec<String> = match serde_json::from_str(&raw_chunks) {
                 Ok(v) => v,
                 Err(e) => {
                     tracing::warn!(
-                        entity_key = %key_str,
+                        entity_key = %hit.key,
                         error = %e,
                         "corrupt source_chunks JSON on entity hit — falling back to empty list",
                     );
@@ -818,7 +625,6 @@ fn parse_entity_results(
                 score,
             });
         }
-        i += 3;
     }
     results.sort_by(|a, b| {
         b.score
@@ -828,48 +634,25 @@ fn parse_entity_results(
     Ok(results)
 }
 
-fn parse_relation_results(
-    value: Value,
-    prefix: &str,
-    threshold: f32,
-) -> Result<Vec<RelationHit>, String> {
-    let Value::Array(mut vals) = value else {
-        return Ok(Vec::new());
-    };
-    if vals.is_empty() {
-        return Ok(Vec::new());
-    }
-    vals.remove(0);
-
+fn parse_relation_reply(reply: &SearchReply, threshold: f32) -> Result<Vec<RelationHit>, String> {
     let mut results = Vec::new();
-    let mut i = 0;
-    while i + 2 < vals.len() {
-        let key_str = vals[i].clone().convert::<String>().unwrap_or_default();
-        let score = 1.0 - parse_score(vals[i + 1].clone())?;
-        let fields = &vals[i + 2];
-
+    for hit in &reply.hits {
+        let get = |name: &str| -> String {
+            hit.fields
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, v)| v.clone())
+                .unwrap_or_default()
+        };
+        let raw_score: f32 = get("score").parse().unwrap_or(0.0);
+        let score = 1.0 - raw_score;
         if score >= threshold {
-            let get = |name: &str| -> String {
-                if let Value::Array(arr) = fields {
-                    let mut j = 0;
-                    while j + 1 < arr.len() {
-                        if let Some(k) = arr[j].as_str() {
-                            if k == name {
-                                return arr[j + 1].clone().convert::<String>().unwrap_or_default();
-                            }
-                        }
-                        j += 2;
-                    }
-                }
-                String::new()
-            };
-            let _ = key_str.strip_prefix(prefix);
             let raw_chunks = get("source_chunks");
             let source_chunks: Vec<String> = match serde_json::from_str(&raw_chunks) {
                 Ok(v) => v,
                 Err(e) => {
                     tracing::warn!(
-                        relation_key = %key_str,
+                        relation_key = %hit.key,
                         error = %e,
                         "corrupt source_chunks JSON on relation hit — falling back to empty list",
                     );
@@ -885,7 +668,6 @@ fn parse_relation_results(
                 score,
             });
         }
-        i += 3;
     }
     results.sort_by(|a, b| {
         b.score
@@ -893,18 +675,6 @@ fn parse_relation_results(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     Ok(results)
-}
-
-fn parse_score(value: Value) -> Result<f32, String> {
-    if let Some(score) = value.as_f64() {
-        return Ok(score as f32);
-    }
-
-    let text = value
-        .convert::<String>()
-        .map_err(|e| format!("failed to decode Redis score: {e}"))?;
-    text.parse::<f32>()
-        .map_err(|e| format!("failed to parse Redis score '{text}': {e}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -1036,22 +806,19 @@ impl VectorBackend for RedisVectorStore {
                 ));
             }
             let key = self.entity_key(&p.id);
-            let mut fields = Map::new();
-            fields.insert("name".into(), p.name.clone().into());
-            fields.insert("entity_type".into(), p.entity_type.clone().into());
-            fields.insert("description".into(), p.description.clone().into());
-            fields.insert(
-                "source_chunks".into(),
-                serde_json::to_string(&p.source_chunks)
-                    .unwrap_or_else(|_| "[]".to_string())
-                    .into(),
-            );
             let emb = vector_to_bytes(&p.vector);
-            fields.insert("embedding".into(), emb.as_slice().into());
-
-            let _: Value = self
-                .client
-                .hset(&key, fields)
+            let source_chunks_json =
+                serde_json::to_string(&p.source_chunks).unwrap_or_else(|_| "[]".to_string());
+            let fields: [(&str, &[u8]); 5] = [
+                ("name", p.name.as_bytes()),
+                ("entity_type", p.entity_type.as_bytes()),
+                ("description", p.description.as_bytes()),
+                ("source_chunks", source_chunks_json.as_bytes()),
+                ("embedding", emb.as_slice()),
+            ];
+            self.pool
+                .hashes()
+                .hset_multi(&key, &fields)
                 .await
                 .map_err(|e| format!("redis hset entity {}: {e}", p.id))?;
         }
@@ -1070,38 +837,28 @@ impl VectorBackend for RedisVectorStore {
         self.ensure_entity_index().await?;
 
         let idx = self.entity_index_name();
-        let prefix = self.entity_key_prefix();
         let raw_query = format!("*=>[KNN {} @embedding $BLOB AS score]", top_k);
         let query_blob = vector_to_bytes(&query_vector);
-        let command = CustomCommand::new("FT.SEARCH", ClusterHash::FirstKey, false);
-        let args: Vec<Value> = vec![
-            idx.into(),
-            raw_query.into(),
-            "PARAMS".into(),
-            2i64.into(),
-            "BLOB".into(),
-            query_blob.as_slice().into(),
-            "RETURN".into(),
-            4i64.into(),
-            "name".into(),
-            "entity_type".into(),
-            "description".into(),
-            "source_chunks".into(),
-            "WITHSCORES".into(),
-            "LIMIT".into(),
-            0i64.into(),
-            (top_k as i64).into(),
-            "DIALECT".into(),
-            2i64.into(),
-        ];
+        let query = Query::new(raw_query)
+            .return_fields([
+                "name",
+                "entity_type",
+                "description",
+                "source_chunks",
+                "score",
+            ])
+            .param("BLOB", query_blob)
+            .limit(0, top_k)
+            .dialect(2);
 
-        let value: Value = self
-            .client
-            .custom::<Value, _>(command, args)
+        let reply = self
+            .pool
+            .search()
+            .ft_search(&idx, &query)
             .await
             .map_err(|e| format!("redis entity search: {e}"))?;
 
-        parse_entity_results(value, &prefix, score_threshold)
+        parse_entity_reply(&reply, score_threshold)
     }
 
     // ── Relation operations (Phase 7) ─────────────────────────────
@@ -1126,23 +883,20 @@ impl VectorBackend for RedisVectorStore {
                 ));
             }
             let key = self.relation_key(&p.id);
-            let mut fields = Map::new();
-            fields.insert("source".into(), p.source.clone().into());
-            fields.insert("target".into(), p.target.clone().into());
-            fields.insert("relation_type".into(), p.relation_type.clone().into());
-            fields.insert("description".into(), p.description.clone().into());
-            fields.insert(
-                "source_chunks".into(),
-                serde_json::to_string(&p.source_chunks)
-                    .unwrap_or_else(|_| "[]".to_string())
-                    .into(),
-            );
             let emb = vector_to_bytes(&p.vector);
-            fields.insert("embedding".into(), emb.as_slice().into());
-
-            let _: Value = self
-                .client
-                .hset(&key, fields)
+            let source_chunks_json =
+                serde_json::to_string(&p.source_chunks).unwrap_or_else(|_| "[]".to_string());
+            let fields: [(&str, &[u8]); 6] = [
+                ("source", p.source.as_bytes()),
+                ("target", p.target.as_bytes()),
+                ("relation_type", p.relation_type.as_bytes()),
+                ("description", p.description.as_bytes()),
+                ("source_chunks", source_chunks_json.as_bytes()),
+                ("embedding", emb.as_slice()),
+            ];
+            self.pool
+                .hashes()
+                .hset_multi(&key, &fields)
                 .await
                 .map_err(|e| format!("redis hset relation {}: {e}", p.id))?;
         }
@@ -1161,39 +915,29 @@ impl VectorBackend for RedisVectorStore {
         self.ensure_relation_index().await?;
 
         let idx = self.relation_index_name();
-        let prefix = self.relation_key_prefix();
         let raw_query = format!("*=>[KNN {} @embedding $BLOB AS score]", top_k);
         let query_blob = vector_to_bytes(&query_vector);
-        let command = CustomCommand::new("FT.SEARCH", ClusterHash::FirstKey, false);
-        let args: Vec<Value> = vec![
-            idx.into(),
-            raw_query.into(),
-            "PARAMS".into(),
-            2i64.into(),
-            "BLOB".into(),
-            query_blob.as_slice().into(),
-            "RETURN".into(),
-            5i64.into(),
-            "source".into(),
-            "target".into(),
-            "relation_type".into(),
-            "description".into(),
-            "source_chunks".into(),
-            "WITHSCORES".into(),
-            "LIMIT".into(),
-            0i64.into(),
-            (top_k as i64).into(),
-            "DIALECT".into(),
-            2i64.into(),
-        ];
+        let query = Query::new(raw_query)
+            .return_fields([
+                "source",
+                "target",
+                "relation_type",
+                "description",
+                "source_chunks",
+                "score",
+            ])
+            .param("BLOB", query_blob)
+            .limit(0, top_k)
+            .dialect(2);
 
-        let value: Value = self
-            .client
-            .custom::<Value, _>(command, args)
+        let reply = self
+            .pool
+            .search()
+            .ft_search(&idx, &query)
             .await
             .map_err(|e| format!("redis relation search: {e}"))?;
 
-        parse_relation_results(value, &prefix, score_threshold)
+        parse_relation_reply(&reply, score_threshold)
     }
 }
 
@@ -1201,11 +945,25 @@ impl VectorBackend for RedisVectorStore {
 mod tests {
     use super::RedisVectorStore;
 
+    fn test_store(index: &str, dim: usize) -> RedisVectorStore {
+        // Tests don't connect to Redis — they only exercise pure
+        // constructor + schema logic. The pool is built but never
+        // dispatched to; if any test starts hitting the network this
+        // assertion will surface immediately.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            RedisVectorStore::new_for_test("redis://127.0.0.1:6379", index, dim)
+                .await
+                .expect("store")
+        })
+    }
+
     #[test]
     fn redis_vector_store_builds_index_schema_with_hnsw() {
-        let store =
-            RedisVectorStore::new_for_test("redis://127.0.0.1:6379", "the_one_memories", 1024)
-                .expect("store");
+        let store = test_store("the_one_memories", 1024);
 
         let schema = store.index_schema();
         assert!(schema.contains("VECTOR"));
@@ -1218,9 +976,7 @@ mod tests {
     #[test]
     fn redis_vector_store_capabilities_include_entities_and_relations() {
         use crate::vector_backend::VectorBackend;
-        let store =
-            RedisVectorStore::new_for_test("redis://127.0.0.1:6379", "the_one_memories", 1024)
-                .expect("store");
+        let store = test_store("the_one_memories", 1024);
         let caps = store.capabilities();
         assert!(caps.chunks);
         assert!(caps.entities);
@@ -1229,17 +985,20 @@ mod tests {
         assert!(!caps.images);
     }
 
-    #[test]
-    fn redis_vector_store_rejects_invalid_index_name() {
-        match RedisVectorStore::new_for_test("redis://127.0.0.1:6379", "the one memories", 1024) {
+    #[tokio::test]
+    async fn redis_vector_store_rejects_invalid_index_name() {
+        match RedisVectorStore::new_for_test("redis://127.0.0.1:6379", "the one memories", 1024)
+            .await
+        {
             Ok(_) => panic!("invalid index name should be rejected"),
             Err(err) => assert!(err.contains("index_name")),
         }
     }
 
-    #[test]
-    fn redis_vector_store_rejects_zero_embedding_dim() {
-        match RedisVectorStore::new_for_test("redis://127.0.0.1:6379", "the_one_memories", 0) {
+    #[tokio::test]
+    async fn redis_vector_store_rejects_zero_embedding_dim() {
+        match RedisVectorStore::new_for_test("redis://127.0.0.1:6379", "the_one_memories", 0).await
+        {
             Ok(_) => panic!("zero embedding dimensions should be rejected"),
             Err(err) => assert!(err.contains("embedding_dim")),
         }

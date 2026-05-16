@@ -251,6 +251,35 @@ impl<'a> StreamsOps<'a> {
         conn.xdel(key, &[id]).await.map_err(RedisError::Command)
     }
 
+    /// `XREVRANGE key end start [COUNT n]` — read entries in reverse
+    /// chronological order. `end = "+"` and `start = "-"` reads from
+    /// newest to oldest across the full stream. Used by audit-log
+    /// pagination paths that need newest-first ordering without setting
+    /// up a consumer group.
+    ///
+    /// Fields are decoded as UTF-8 strings and flattened into
+    /// [`StreamEntry::fields`].
+    #[instrument(skip(self), level = "debug", fields(stream = %key, count = ?count))]
+    pub async fn xrevrange(
+        &self,
+        key: &str,
+        end: &str,
+        start: &str,
+        count: Option<usize>,
+    ) -> RedisResult<Vec<StreamEntry>> {
+        let mut conn = self.pool.conn();
+        let mut cmd = redis::cmd("XREVRANGE");
+        cmd.arg(key).arg(end).arg(start);
+        if let Some(n) = count {
+            cmd.arg("COUNT").arg(n);
+        }
+        let raw: redis::Value = cmd
+            .query_async(&mut conn)
+            .await
+            .map_err(RedisError::Command)?;
+        Ok(parse_xrange_reply(key, raw))
+    }
+
     /// `XREAD [COUNT count] [BLOCK block_ms] STREAMS key id` — non-group
     /// consumer read. Returns up to `count` entries newer than `since_id`
     /// on the stream. Blocks for up to `block` before returning an empty
@@ -319,4 +348,53 @@ fn value_to_string(v: redis::Value) -> Option<String> {
         redis::Value::Double(f) => Some(f.to_string()),
         _ => None,
     }
+}
+
+/// Parse an `XRANGE` / `XREVRANGE` reply into [`StreamEntry`] values.
+///
+/// Reply shape per Redis spec:
+/// ```text
+/// 1) 1) "<id>"                  ← entry ID (BulkString)
+///    2) 1) "<field1>"           ← flat alternating field/value array
+///       2) "<value1>"
+///       3) "<field2>"
+///       4) "<value2>"
+/// 2) 1) "<id>"
+///    2) 1) ...
+/// ```
+fn parse_xrange_reply(stream_key: &str, reply: redis::Value) -> Vec<StreamEntry> {
+    let redis::Value::Array(entries) = reply else {
+        return Vec::new();
+    };
+    let mut out = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let redis::Value::Array(parts) = entry else {
+            continue;
+        };
+        let mut iter = parts.into_iter();
+        let Some(id) = iter.next().and_then(value_to_string) else {
+            continue;
+        };
+        let Some(redis::Value::Array(field_pairs)) = iter.next() else {
+            out.push(StreamEntry {
+                stream: stream_key.to_string(),
+                id,
+                fields: HashMap::new(),
+            });
+            continue;
+        };
+        let mut fields = HashMap::with_capacity(field_pairs.len() / 2);
+        let mut pair_iter = field_pairs.into_iter();
+        while let (Some(k), Some(v)) = (pair_iter.next(), pair_iter.next()) {
+            if let (Some(k), Some(v)) = (value_to_string(k), value_to_string(v)) {
+                fields.insert(k, v);
+            }
+        }
+        out.push(StreamEntry {
+            stream: stream_key.to_string(),
+            id,
+            fields,
+        });
+    }
+    out
 }

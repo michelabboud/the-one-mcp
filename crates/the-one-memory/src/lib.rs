@@ -331,7 +331,8 @@ impl MemoryEngine {
         let provider = crate::embeddings::FastEmbedProvider::new(model_name)?;
         let persistence_required = redis.persistence_required;
         let redis_store =
-            RedisVectorStore::from_url(&redis.redis_url, redis.index_name, provider.dimensions())?;
+            RedisVectorStore::from_url(&redis.redis_url, redis.index_name, provider.dimensions())
+                .await?;
 
         let mut engine = Self::new_with_backend(
             Box::new(provider),

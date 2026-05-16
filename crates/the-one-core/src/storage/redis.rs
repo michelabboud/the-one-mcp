@@ -1,4 +1,5 @@
-//! Redis StateStore backend (v0.16.0 Phase 5).
+//! Redis StateStore backend (v0.16.0 Phase 5, migrated to the-one-redis
+//! facade in v0.17.0).
 //!
 //! Two durability modes:
 //!
@@ -19,20 +20,21 @@
 //!
 //! Same `tokio::task::block_in_place` + `Handle::current().block_on`
 //! pattern as the Postgres backend.
+//!
+//! ## Substrate
+//!
+//! Built on [`the_one_redis::RedisPool`] (redis-rs 1.2), not `fred`.
+//! See `docs/plans/2026-05-16-fred-removal-and-bug-fixes.md` for the
+//! migration history; the load-bearing fix is in
+//! `the_one_redis::pool::connection_config` which sets
+//! `response_timeout = None` so blocking commands aren't capped at
+//! 500ms.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use fred::clients::Client;
-use fred::interfaces::{
-    ClientLike, HashesInterface, KeysInterface, RediSearchInterface, SetsInterface,
-    SortedSetsInterface, StreamsInterface,
-};
-use fred::types::config::Config;
-use fred::types::redisearch::{
-    FtCreateOptions, FtSearchOptions, IndexKind, SearchSchema, SearchSchemaKind,
-};
-use fred::types::{InfoKind, Value};
+use the_one_redis::search::{CreateOptions, Query, SchemaField};
+use the_one_redis::{PoolConfig, RedisPool};
 
 use crate::audit::AuditRecord;
 use crate::contracts::{
@@ -86,15 +88,6 @@ fn redis_err(ctx: &str, e: impl std::fmt::Display) -> CoreError {
     CoreError::Redis(format!("{ctx}: {e}"))
 }
 
-fn val_to_string(v: &Value) -> String {
-    match v {
-        Value::String(s) => s.to_string(),
-        Value::Bytes(b) => String::from_utf8_lossy(b).to_string(),
-        Value::Integer(n) => n.to_string(),
-        _ => String::new(),
-    }
-}
-
 /// Escape a user-supplied query string for RediSearch FT.SEARCH.
 ///
 /// Covers the full RediSearch special-character set including `*`
@@ -131,51 +124,26 @@ fn md5_lite(input: &str) -> u64 {
     hash
 }
 
-fn map_get(m: &fred::types::Map, k: &str) -> String {
-    // fred::types::Map::inner() consumes self, so clone. Maps are
-    // small (single-digit field counts per hash) so this is cheap.
-    m.clone()
-        .inner()
-        .into_iter()
-        .find(|(mk, _)| {
-            let b = mk.as_bytes();
-            std::str::from_utf8(b).unwrap_or("") == k
-        })
-        .map(|(_, v)| val_to_string(&v))
-        .unwrap_or_default()
-}
-
-fn parse_conv_hash(vals: &Value) -> Option<ConversationSourceRecord> {
-    let m = match vals {
-        Value::Map(m) if !m.is_empty() => m,
-        _ => return None,
-    };
-
-    let wing_raw = map_get(m, "wing");
-    let hall_raw = map_get(m, "hall");
-    let room_raw = map_get(m, "room");
+fn parse_conv_hash(m: &HashMap<String, String>) -> Option<ConversationSourceRecord> {
+    if m.is_empty() {
+        return None;
+    }
+    let wing = m.get("wing").cloned().filter(|s| !s.is_empty());
+    let hall = m.get("hall").cloned().filter(|s| !s.is_empty());
+    let room = m.get("room").cloned().filter(|s| !s.is_empty());
 
     Some(ConversationSourceRecord {
-        project_id: map_get(m, "project_id"),
-        transcript_path: map_get(m, "transcript_path"),
-        memory_path: map_get(m, "memory_path"),
-        format: map_get(m, "format"),
-        wing: if wing_raw.is_empty() {
-            None
-        } else {
-            Some(wing_raw)
-        },
-        hall: if hall_raw.is_empty() {
-            None
-        } else {
-            Some(hall_raw)
-        },
-        room: if room_raw.is_empty() {
-            None
-        } else {
-            Some(room_raw)
-        },
-        message_count: map_get(m, "message_count").parse().unwrap_or(0),
+        project_id: m.get("project_id").cloned().unwrap_or_default(),
+        transcript_path: m.get("transcript_path").cloned().unwrap_or_default(),
+        memory_path: m.get("memory_path").cloned().unwrap_or_default(),
+        format: m.get("format").cloned().unwrap_or_default(),
+        wing,
+        hall,
+        room,
+        message_count: m
+            .get("message_count")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0),
     })
 }
 
@@ -184,7 +152,7 @@ fn parse_conv_hash(vals: &Value) -> Option<ConversationSourceRecord> {
 // ---------------------------------------------------------------------------
 
 pub struct RedisStateStore {
-    client: Client,
+    pool: RedisPool,
     project_id: String,
     prefix: String,
     config: RedisStateConfig,
@@ -205,18 +173,18 @@ impl RedisStateStore {
         url: &str,
         project_id: &str,
     ) -> Result<Self, CoreError> {
-        let redis_config = Config::from_url(url).map_err(|e| redis_err("invalid url", e))?;
-        let client = Client::new(redis_config, None, None, None);
-        client.init().await.map_err(|e| redis_err("connect", e))?;
+        let pool = RedisPool::new(PoolConfig::from_url(url))
+            .await
+            .map_err(|e| redis_err("pool init", e))?;
 
         let prefix = format!("{}:{}", config.prefix, project_id);
 
         if config.require_aof {
-            verify_aof(&client).await?;
+            verify_aof(&pool).await?;
         }
 
         let store = Self {
-            client,
+            pool,
             project_id: project_id.to_string(),
             prefix,
             config: config.clone(),
@@ -226,15 +194,15 @@ impl RedisStateStore {
         Ok(store)
     }
 
-    /// Phase 6 — build from an already-connected client.
-    pub async fn from_client(
-        client: Client,
+    /// Phase 6 — build from an already-connected pool.
+    pub async fn from_pool(
+        pool: RedisPool,
         config: &RedisStateConfig,
         project_id: &str,
     ) -> Result<Self, CoreError> {
         let prefix = format!("{}:{}", config.prefix, project_id);
         let store = Self {
-            client,
+            pool,
             project_id: project_id.to_string(),
             prefix,
             config: config.clone(),
@@ -243,8 +211,14 @@ impl RedisStateStore {
         Ok(store)
     }
 
+    pub fn pool(&self) -> &RedisPool {
+        &self.pool
+    }
+
     pub async fn close(&self) {
-        let _ = self.client.quit().await;
+        // redis-rs's multiplexed connection cleans up on Drop; no explicit
+        // close needed. Kept for API compatibility with the previous
+        // fred-based version.
     }
 
     /// Build a fully-qualified Redis key as `{prefix}:{project_id}:{suffix}`.
@@ -262,46 +236,28 @@ impl RedisStateStore {
         let prefix = format!("{}:diary:", self.prefix);
 
         // If FT.INFO succeeds, the index exists.
-        if self.client.ft_info::<Value, _>(&index_name).await.is_ok() {
+        if self.pool.search().ft_info(&index_name).await.is_ok() {
             return Ok(());
         }
 
-        let opts = FtCreateOptions {
-            on: Some(IndexKind::Hash),
-            prefixes: vec![prefix.into()],
-            ..Default::default()
+        let opts = CreateOptions {
+            on_json: false,
+            prefixes: vec![prefix],
         };
 
         let schema = vec![
-            SearchSchema {
-                field_name: "content".into(),
-                alias: None,
-                kind: SearchSchemaKind::Text {
-                    sortable: false,
-                    unf: false,
-                    nostem: true,
-                    phonetic: None,
-                    weight: None,
-                    withsuffixtrie: false,
-                    noindex: false,
-                },
+            SchemaField::Text {
+                name: "content".into(),
             },
-            SearchSchema {
-                field_name: "entry_date".into(),
-                alias: None,
-                kind: SearchSchemaKind::Tag {
-                    sortable: true,
-                    unf: false,
-                    separator: None,
-                    casesensitive: false,
-                    withsuffixtrie: false,
-                    noindex: false,
-                },
+            SchemaField::Tag {
+                name: "entry_date".into(),
+                separator: None,
             },
         ];
 
-        self.client
-            .ft_create::<(), _>(&index_name, opts, schema)
+        self.pool
+            .search()
+            .ft_create(&index_name, &opts, &schema)
             .await
             .map_err(|e| redis_err("FT.CREATE diary_idx", e))?;
         Ok(())
@@ -311,15 +267,15 @@ impl RedisStateStore {
 /// Verify that the Redis server has AOF persistence enabled.
 ///
 /// Single source of truth for the AOF check — also called by
-/// `the-one-mcp`'s combined-Redis client cache so both code paths
+/// `the-one-mcp`'s combined-Redis pool cache so both code paths
 /// agree on what counts as "AOF on".
 ///
 /// **Parse failure is treated as an error**, not as `aof_enabled=false`.
 /// A malformed `INFO persistence` response should never silently
 /// downgrade a `require_aof=true` deployment to cache mode.
-pub async fn verify_aof(client: &Client) -> Result<(), CoreError> {
-    let info: String = client
-        .info(Some(InfoKind::Persistence))
+pub async fn verify_aof(pool: &RedisPool) -> Result<(), CoreError> {
+    let info: String = pool
+        .raw_cmd(&["INFO", "persistence"])
         .await
         .map_err(|e| redis_err("INFO persistence", e))?;
 
@@ -374,10 +330,10 @@ impl StateStore for RedisStateStore {
 
     fn upsert_project_profile(&self, profile_json: &str) -> Result<(), CoreError> {
         let key = self.key("profile");
-        let val = profile_json.to_string();
         block_on(async {
-            self.client
-                .set::<(), _, _>(&key, val.as_str(), None, None, false)
+            self.pool
+                .keys()
+                .set(&key, profile_json)
                 .await
                 .map_err(|e| redis_err("SET profile", e))
         })
@@ -386,17 +342,11 @@ impl StateStore for RedisStateStore {
     fn latest_project_profile(&self) -> Result<Option<String>, CoreError> {
         let key = self.key("profile");
         block_on(async {
-            let v: Value = self
-                .client
-                .get(&key)
+            self.pool
+                .keys()
+                .get::<String>(&key)
                 .await
-                .map_err(|e| redis_err("GET profile", e))?;
-            match v {
-                Value::Null => Ok(None),
-                Value::String(s) => Ok(Some(s.to_string())),
-                Value::Bytes(b) => Ok(Some(String::from_utf8_lossy(&b).to_string())),
-                _ => Ok(None),
-            }
+                .map_err(|e| redis_err("GET profile", e))
         })
     }
 
@@ -416,15 +366,18 @@ impl StateStore for RedisStateStore {
         let key = self.key(&format!("approval:{action_key}:{scope_str}"));
         block_on(async {
             if approved {
-                self.client
-                    .set::<(), _, _>(&key, "1", None, None, false)
+                self.pool
+                    .keys()
+                    .set(&key, "1")
                     .await
                     .map_err(|e| redis_err("SET approval", e))
             } else {
-                self.client
-                    .del::<(), _>(&key)
+                self.pool
+                    .keys()
+                    .del(&key)
                     .await
-                    .map_err(|e| redis_err("DEL approval", e))
+                    .map_err(|e| redis_err("DEL approval", e))?;
+                Ok(())
             }
         })
     }
@@ -437,12 +390,11 @@ impl StateStore for RedisStateStore {
         };
         let key = self.key(&format!("approval:{action_key}:{scope_str}"));
         block_on(async {
-            let exists: bool = self
-                .client
+            self.pool
+                .keys()
                 .exists(&key)
                 .await
-                .map_err(|e| redis_err("EXISTS approval", e))?;
-            Ok(exists)
+                .map_err(|e| redis_err("EXISTS approval", e))
         })
     }
 
@@ -460,9 +412,11 @@ impl StateStore for RedisStateStore {
             ("project_id", &self.project_id),
         ];
         block_on(async {
-            self.client
-                .xadd::<(), _, _, _, _>(&key, false, None, "*", fields)
+            self.pool
+                .streams()
+                .xadd(&key, &fields, None)
                 .await
+                .map(|_| ())
                 .map_err(|e| redis_err("XADD audit", e))
         })
     }
@@ -481,9 +435,11 @@ impl StateStore for RedisStateStore {
             ("project_id", &self.project_id),
         ];
         block_on(async {
-            self.client
-                .xadd::<(), _, _, _, _>(&key, false, None, "*", fields)
+            self.pool
+                .streams()
+                .xadd(&key, &fields, None)
                 .await
+                .map(|_| ())
                 .map_err(|e| redis_err("XADD audit", e))
         })
     }
@@ -491,12 +447,11 @@ impl StateStore for RedisStateStore {
     fn audit_event_count_for_project(&self) -> Result<u64, CoreError> {
         let key = self.key("audit");
         block_on(async {
-            let len: u64 = self
-                .client
+            self.pool
+                .streams()
                 .xlen(&key)
                 .await
-                .map_err(|e| redis_err("XLEN audit", e))?;
-            Ok(len)
+                .map_err(|e| redis_err("XLEN audit", e))
         })
     }
 
@@ -507,13 +462,14 @@ impl StateStore for RedisStateStore {
         // For simplicity, fetch all and skip to offset.
         block_on(async {
             let count = (req.offset as usize) + limit + 1;
-            let entries: Value = self
-                .client
-                .xrevrange(&key, "+", "-", Some(count as u64))
+            let entries = self
+                .pool
+                .streams()
+                .xrevrange(&key, "+", "-", Some(count))
                 .await
                 .map_err(|e| redis_err("XREVRANGE audit", e))?;
 
-            let all = parse_audit_stream(&entries);
+            let all = entries_to_audit(&entries);
             let offset = req.offset as usize;
             let slice: Vec<AuditEvent> = all.into_iter().skip(offset).take(limit + 1).collect();
 
@@ -525,12 +481,13 @@ impl StateStore for RedisStateStore {
     fn list_audit_events(&self, limit: usize) -> Result<Vec<AuditEvent>, CoreError> {
         let key = self.key("audit");
         block_on(async {
-            let entries: Value = self
-                .client
-                .xrevrange(&key, "+", "-", Some(limit as u64))
+            let entries = self
+                .pool
+                .streams()
+                .xrevrange(&key, "+", "-", Some(limit))
                 .await
                 .map_err(|e| redis_err("XREVRANGE audit", e))?;
-            Ok(parse_audit_stream(&entries))
+            Ok(entries_to_audit(&entries))
         })
     }
 
@@ -549,25 +506,27 @@ impl StateStore for RedisStateStore {
         let idx = self.key("conv_idx");
         let ts = now_epoch_ms() as f64;
 
+        let mc_str = record.message_count.to_string();
+        let fields: [(&str, &[u8]); 8] = [
+            ("project_id", record.project_id.as_bytes()),
+            ("transcript_path", record.transcript_path.as_bytes()),
+            ("memory_path", record.memory_path.as_bytes()),
+            ("format", record.format.as_bytes()),
+            ("wing", record.wing.as_deref().unwrap_or("").as_bytes()),
+            ("hall", record.hall.as_deref().unwrap_or("").as_bytes()),
+            ("room", record.room.as_deref().unwrap_or("").as_bytes()),
+            ("message_count", mc_str.as_bytes()),
+        ];
+
         block_on(async {
-            self.client
-                .hset::<(), _, _>(
-                    &hk,
-                    [
-                        ("project_id", record.project_id.as_str()),
-                        ("transcript_path", record.transcript_path.as_str()),
-                        ("memory_path", record.memory_path.as_str()),
-                        ("format", record.format.as_str()),
-                        ("wing", record.wing.as_deref().unwrap_or("")),
-                        ("hall", record.hall.as_deref().unwrap_or("")),
-                        ("room", record.room.as_deref().unwrap_or("")),
-                        ("message_count", &record.message_count.to_string()),
-                    ],
-                )
+            self.pool
+                .hashes()
+                .hset_multi(&hk, &fields)
                 .await
                 .map_err(|e| redis_err("HSET conv", e))?;
-            self.client
-                .zadd::<(), _, _>(&idx, None, None, false, false, (ts, conv_id.as_str()))
+            self.pool
+                .sorted_sets()
+                .zadd(&idx, ts, conv_id.as_str())
                 .await
                 .map_err(|e| redis_err("ZADD conv_idx", e))?;
             Ok(())
@@ -583,21 +542,25 @@ impl StateStore for RedisStateStore {
     ) -> Result<Vec<ConversationSourceRecord>, CoreError> {
         let idx = self.key("conv_idx");
         block_on(async {
-            let ids: Vec<Value> = self
-                .client
-                .zrevrangebyscore(&idx, "+inf", "-inf", false, Some((0, limit as i64)))
+            // zrevrange with rank-based pagination is equivalent to
+            // zrevrangebyscore "+inf" "-inf" LIMIT 0 N since we never
+            // filter by score.
+            let ids: Vec<String> = self
+                .pool
+                .sorted_sets()
+                .zrevrange(&idx, 0, (limit as isize) - 1)
                 .await
-                .map_err(|e| redis_err("ZREVRANGEBYSCORE conv", e))?;
+                .map_err(|e| redis_err("ZREVRANGE conv", e))?;
 
             let mut results = Vec::new();
-            for id_val in &ids {
-                let id = val_to_string(id_val);
+            for id in &ids {
                 if id.is_empty() {
                     continue;
                 }
                 let hk = self.key(&format!("conv:{id}"));
-                let vals: Value = self
-                    .client
+                let vals = self
+                    .pool
+                    .hashes()
                     .hgetall(&hk)
                     .await
                     .map_err(|e| redis_err("HGETALL conv", e))?;
@@ -618,19 +581,14 @@ impl StateStore for RedisStateStore {
         let json = serde_json::to_string(lesson).map_err(|e| redis_err("serialize aaak", e))?;
 
         block_on(async {
-            self.client
-                .hset::<(), _, _>(&hk, [("json", json.as_str())])
+            self.pool
+                .hashes()
+                .hset(&hk, "json", json.as_str())
                 .await
                 .map_err(|e| redis_err("HSET aaak", e))?;
-            self.client
-                .zadd::<(), _, _>(
-                    &idx,
-                    None,
-                    None,
-                    false,
-                    false,
-                    (ts, lesson.lesson_id.as_str()),
-                )
+            self.pool
+                .sorted_sets()
+                .zadd(&idx, ts, lesson.lesson_id.as_str())
                 .await
                 .map_err(|e| redis_err("ZADD aaak", e))?;
             Ok(())
@@ -644,26 +602,28 @@ impl StateStore for RedisStateStore {
     ) -> Result<Vec<AaakLesson>, CoreError> {
         let idx = self.key("aaak_idx");
         block_on(async {
-            let ids: Vec<Value> = self
-                .client
-                .zrevrangebyscore(&idx, "+inf", "-inf", false, Some((0, limit as i64)))
+            let ids: Vec<String> = self
+                .pool
+                .sorted_sets()
+                .zrevrange(&idx, 0, (limit as isize) - 1)
                 .await
-                .map_err(|e| redis_err("ZREVRANGEBYSCORE aaak", e))?;
+                .map_err(|e| redis_err("ZREVRANGE aaak", e))?;
             let mut results = Vec::new();
-            for id_val in &ids {
-                let id = val_to_string(id_val);
+            for id in &ids {
                 if id.is_empty() {
                     continue;
                 }
                 let hk = self.key(&format!("aaak:{id}"));
-                let json_val: Value = self
-                    .client
+                let j: Option<String> = self
+                    .pool
+                    .hashes()
                     .hget(&hk, "json")
                     .await
                     .map_err(|e| redis_err("HGET aaak", e))?;
-                let j = val_to_string(&json_val);
-                if let Ok(l) = serde_json::from_str::<AaakLesson>(&j) {
-                    results.push(l);
+                if let Some(j) = j {
+                    if let Ok(l) = serde_json::from_str::<AaakLesson>(&j) {
+                        results.push(l);
+                    }
                 }
             }
             Ok(results)
@@ -674,13 +634,15 @@ impl StateStore for RedisStateStore {
         let hk = self.key(&format!("aaak:{lesson_id}"));
         let idx = self.key("aaak_idx");
         block_on(async {
-            let del: i64 = self
-                .client
+            let del = self
+                .pool
+                .keys()
                 .del(&hk)
                 .await
                 .map_err(|e| redis_err("DEL aaak", e))?;
-            self.client
-                .zrem::<(), _, _>(&idx, lesson_id)
+            self.pool
+                .sorted_sets()
+                .zrem(&idx, lesson_id)
                 .await
                 .map_err(|e| redis_err("ZREM aaak", e))?;
             Ok(del > 0)
@@ -695,38 +657,28 @@ impl StateStore for RedisStateStore {
         let tags_json = serde_json::to_string(&entry.tags).unwrap_or_else(|_| "[]".to_string());
         let ts = entry.updated_at_epoch_ms as f64;
 
+        let created = entry.created_at_epoch_ms.to_string();
+        let updated = entry.updated_at_epoch_ms.to_string();
+        let fields: [(&str, &[u8]); 8] = [
+            ("entry_id", entry.entry_id.as_bytes()),
+            ("project_id", entry.project_id.as_bytes()),
+            ("entry_date", entry.entry_date.as_bytes()),
+            ("mood", entry.mood.as_deref().unwrap_or("").as_bytes()),
+            ("tags_json", tags_json.as_bytes()),
+            ("content", entry.content.as_bytes()),
+            ("created_at_epoch_ms", created.as_bytes()),
+            ("updated_at_epoch_ms", updated.as_bytes()),
+        ];
+
         block_on(async {
-            self.client
-                .hset::<(), _, _>(
-                    &hk,
-                    [
-                        ("entry_id", entry.entry_id.as_str()),
-                        ("project_id", entry.project_id.as_str()),
-                        ("entry_date", entry.entry_date.as_str()),
-                        ("mood", entry.mood.as_deref().unwrap_or("")),
-                        ("tags_json", &tags_json),
-                        ("content", entry.content.as_str()),
-                        (
-                            "created_at_epoch_ms",
-                            &entry.created_at_epoch_ms.to_string(),
-                        ),
-                        (
-                            "updated_at_epoch_ms",
-                            &entry.updated_at_epoch_ms.to_string(),
-                        ),
-                    ],
-                )
+            self.pool
+                .hashes()
+                .hset_multi(&hk, &fields)
                 .await
                 .map_err(|e| redis_err("HSET diary", e))?;
-            self.client
-                .zadd::<(), _, _>(
-                    &idx,
-                    None,
-                    None,
-                    false,
-                    false,
-                    (ts, entry.entry_id.as_str()),
-                )
+            self.pool
+                .sorted_sets()
+                .zadd(&idx, ts, entry.entry_id.as_str())
                 .await
                 .map_err(|e| redis_err("ZADD diary", e))?;
             Ok(())
@@ -743,23 +695,23 @@ impl StateStore for RedisStateStore {
         block_on(async {
             // Fetch more than limit to account for date filtering.
             let fetch = (limit * 3).max(50);
-            let ids: Vec<Value> = self
-                .client
-                .zrevrangebyscore(&idx, "+inf", "-inf", false, Some((0, fetch as i64)))
+            let ids: Vec<String> = self
+                .pool
+                .sorted_sets()
+                .zrevrange(&idx, 0, (fetch as isize) - 1)
                 .await
-                .map_err(|e| redis_err("ZREVRANGEBYSCORE diary", e))?;
+                .map_err(|e| redis_err("ZREVRANGE diary", e))?;
 
             let mut results = Vec::new();
-            for id_val in &ids {
+            for id in &ids {
                 if results.len() >= limit {
                     break;
                 }
-                let id = val_to_string(id_val);
                 if id.is_empty() {
                     continue;
                 }
                 let hk = self.key(&format!("diary:{id}"));
-                if let Some(entry) = read_diary_hash(&self.client, &hk).await? {
+                if let Some(entry) = read_diary_hash(&self.pool, &hk).await? {
                     if let Some(sd) = start_date {
                         if entry.entry_date.as_str() < sd {
                             continue;
@@ -794,20 +746,15 @@ impl StateStore for RedisStateStore {
         };
 
         block_on(async {
-            let results: Value = self
-                .client
-                .ft_search(
-                    &index_name,
-                    &ft_query,
-                    FtSearchOptions {
-                        limit: Some((0, (limit * 3) as i64)),
-                        ..Default::default()
-                    },
-                )
+            let q = Query::new(ft_query).limit(0, limit * 3);
+            let reply = self
+                .pool
+                .search()
+                .ft_search(&index_name, &q)
                 .await
                 .map_err(|e| redis_err("FT.SEARCH diary", e))?;
 
-            Ok(parse_ft_diary(&results, start_date, end_date, limit))
+            Ok(reply_to_diary(&reply, start_date, end_date, limit))
         })
     }
 
@@ -820,12 +767,14 @@ impl StateStore for RedisStateStore {
         let json = serde_json::to_string(node).map_err(|e| redis_err("serialize nav", e))?;
 
         block_on(async {
-            self.client
-                .hset::<(), _, _>(&hk, [("json", json.as_str())])
+            self.pool
+                .hashes()
+                .hset(&hk, "json", json.as_str())
                 .await
                 .map_err(|e| redis_err("HSET nav", e))?;
-            self.client
-                .zadd::<(), _, _>(&idx, None, None, false, false, (ts, node.node_id.as_str()))
+            self.pool
+                .sorted_sets()
+                .zadd(&idx, ts, node.node_id.as_str())
                 .await
                 .map_err(|e| redis_err("ZADD nav", e))?;
             Ok(())
@@ -838,12 +787,13 @@ impl StateStore for RedisStateStore {
     ) -> Result<Option<MemoryNavigationNode>, CoreError> {
         let hk = self.key(&format!("nav:{node_id}"));
         block_on(async {
-            let v: Value = self
-                .client
+            let j: Option<String> = self
+                .pool
+                .hashes()
                 .hget(&hk, "json")
                 .await
                 .map_err(|e| redis_err("HGET nav", e))?;
-            let j = val_to_string(&v);
+            let Some(j) = j else { return Ok(None) };
             if j.is_empty() {
                 return Ok(None);
             }
@@ -860,40 +810,35 @@ impl StateStore for RedisStateStore {
         req: &PageRequest,
     ) -> Result<Page<MemoryNavigationNode>, CoreError> {
         let idx = self.key("nav_idx");
-        let offset = req.offset as i64;
+        let offset = req.offset as isize;
         let fetch = req.limit + 1;
 
         block_on(async {
             // Fetch extra to handle post-fetch filtering.
             let raw_limit = (fetch * 3).max(50);
-            let ids: Vec<Value> = self
-                .client
-                .zrevrangebyscore(
-                    &idx,
-                    "+inf",
-                    "-inf",
-                    false,
-                    Some((offset, raw_limit as i64)),
-                )
+            let ids: Vec<String> = self
+                .pool
+                .sorted_sets()
+                .zrevrange(&idx, offset, offset + (raw_limit as isize) - 1)
                 .await
-                .map_err(|e| redis_err("ZREVRANGEBYSCORE nav", e))?;
+                .map_err(|e| redis_err("ZREVRANGE nav", e))?;
 
             let mut items = Vec::new();
-            for id_val in &ids {
+            for id in &ids {
                 if items.len() >= fetch {
                     break;
                 }
-                let id = val_to_string(id_val);
                 if id.is_empty() {
                     continue;
                 }
                 let hk = self.key(&format!("nav:{id}"));
-                let v: Value = self
-                    .client
+                let j: Option<String> = self
+                    .pool
+                    .hashes()
                     .hget(&hk, "json")
                     .await
                     .map_err(|e| redis_err("HGET nav", e))?;
-                let j = val_to_string(&v);
+                let Some(j) = j else { continue };
                 if j.is_empty() {
                     continue;
                 }
@@ -924,16 +869,19 @@ impl StateStore for RedisStateStore {
         let json = serde_json::to_string(tunnel).map_err(|e| redis_err("serialize tunnel", e))?;
 
         block_on(async {
-            self.client
-                .hset::<(), _, _>(&hk, [("json", json.as_str())])
+            self.pool
+                .hashes()
+                .hset(&hk, "json", json.as_str())
                 .await
                 .map_err(|e| redis_err("HSET tunnel", e))?;
-            self.client
-                .sadd::<(), _, _>(&from_idx, hk.as_str())
+            self.pool
+                .sets()
+                .sadd(&from_idx, hk.as_str())
                 .await
                 .map_err(|e| redis_err("SADD tunnel from", e))?;
-            self.client
-                .sadd::<(), _, _>(&to_idx, hk.as_str())
+            self.pool
+                .sets()
+                .sadd(&to_idx, hk.as_str())
                 .await
                 .map_err(|e| redis_err("SADD tunnel to", e))?;
             Ok(())
@@ -948,13 +896,12 @@ impl StateStore for RedisStateStore {
         block_on(async {
             let keys: Vec<String> = if let Some(nid) = node_id {
                 let idx = self.key(&format!("tunnelidx:{nid}"));
-                let vals: Vec<Value> = self
-                    .client
-                    .smembers(&idx)
+                self.pool
+                    .sets()
+                    .smembers::<String>(&idx)
                     .await
-                    .map_err(|e| redis_err("SMEMBERS tunnel", e))?;
-                vals.iter()
-                    .map(val_to_string)
+                    .map_err(|e| redis_err("SMEMBERS tunnel", e))?
+                    .into_iter()
                     .filter(|s| !s.is_empty())
                     .collect()
             } else {
@@ -970,14 +917,16 @@ impl StateStore for RedisStateStore {
                 if items.len() > req.limit {
                     break;
                 }
-                let v: Value = self
-                    .client
+                let j: Option<String> = self
+                    .pool
+                    .hashes()
                     .hget(tkey, "json")
                     .await
                     .map_err(|e| redis_err("HGET tunnel", e))?;
-                let j = val_to_string(&v);
-                if let Ok(t) = serde_json::from_str::<MemoryNavigationTunnel>(&j) {
-                    items.push(t);
+                if let Some(j) = j {
+                    if let Ok(t) = serde_json::from_str::<MemoryNavigationTunnel>(&j) {
+                        items.push(t);
+                    }
                 }
             }
 
@@ -995,27 +944,29 @@ impl StateStore for RedisStateStore {
             let mut results = Vec::new();
             for nid in node_ids {
                 let idx = self.key(&format!("tunnelidx:{nid}"));
-                let vals: Vec<Value> = self
-                    .client
+                let vals: Vec<String> = self
+                    .pool
+                    .sets()
                     .smembers(&idx)
                     .await
                     .map_err(|e| redis_err("SMEMBERS tunnel", e))?;
-                for v in &vals {
-                    let tkey = val_to_string(v);
+                for tkey in vals {
                     if tkey.is_empty() || !seen.insert(tkey.clone()) {
                         continue;
                     }
                     if results.len() >= limit {
                         return Ok(results);
                     }
-                    let jv: Value = self
-                        .client
+                    let j: Option<String> = self
+                        .pool
+                        .hashes()
                         .hget(&tkey, "json")
                         .await
                         .map_err(|e| redis_err("HGET tunnel", e))?;
-                    let j = val_to_string(&jv);
-                    if let Ok(t) = serde_json::from_str::<MemoryNavigationTunnel>(&j) {
-                        results.push(t);
+                    if let Some(j) = j {
+                        if let Ok(t) = serde_json::from_str::<MemoryNavigationTunnel>(&j) {
+                            results.push(t);
+                        }
                     }
                 }
             }
@@ -1028,129 +979,80 @@ impl StateStore for RedisStateStore {
 // Stream / FT.SEARCH parsers
 // ---------------------------------------------------------------------------
 
-fn parse_audit_stream(entries: &Value) -> Vec<AuditEvent> {
-    let arr = match entries {
-        Value::Array(a) => a,
-        _ => return Vec::new(),
-    };
-
-    let mut events = Vec::new();
-    for entry in arr {
-        let pair = match entry {
-            Value::Array(a) if a.len() >= 2 => a,
-            _ => continue,
-        };
-        let fields = match &pair[1] {
-            Value::Array(f) => f,
-            Value::Map(m) => {
-                // fred may return a Map instead of flat array.
-                let ek = map_get(m, "error_kind");
-                events.push(AuditEvent {
-                    id: 0,
-                    event_type: map_get(m, "event_type"),
-                    payload_json: map_get(m, "payload"),
-                    project_id: map_get(m, "project_id"),
-                    outcome: map_get(m, "outcome"),
-                    error_kind: if ek.is_empty() { None } else { Some(ek) },
-                    created_at_epoch_ms: map_get(m, "ts").parse().unwrap_or(0),
-                });
-                continue;
-            }
-            _ => continue,
-        };
-
-        let mut evt = AuditEvent {
+/// Build [`AuditEvent`] values from a Vec<StreamEntry>. Each StreamEntry has
+/// a typed `HashMap<String, String>` of fields, so we just look up by name.
+fn entries_to_audit(entries: &[the_one_redis::streams::StreamEntry]) -> Vec<AuditEvent> {
+    let mut out = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let m = &entry.fields;
+        let ek = m.get("error_kind").cloned().unwrap_or_default();
+        out.push(AuditEvent {
             id: 0,
-            event_type: String::new(),
-            payload_json: String::new(),
-            project_id: String::new(),
-            outcome: String::new(),
-            error_kind: None,
-            created_at_epoch_ms: 0,
-        };
-        let mut i = 0;
-        while i + 1 < fields.len() {
-            let key = val_to_string(&fields[i]);
-            let val = val_to_string(&fields[i + 1]);
-            match key.as_str() {
-                "event_type" => evt.event_type = val,
-                "payload" => evt.payload_json = val,
-                "outcome" => evt.outcome = val,
-                "error_kind" if !val.is_empty() => {
-                    evt.error_kind = Some(val);
-                }
-                "ts" => evt.created_at_epoch_ms = val.parse().unwrap_or(0),
-                "project_id" => evt.project_id = val,
-                _ => {}
-            }
-            i += 2;
-        }
-        events.push(evt);
+            event_type: m.get("event_type").cloned().unwrap_or_default(),
+            payload_json: m.get("payload").cloned().unwrap_or_default(),
+            project_id: m.get("project_id").cloned().unwrap_or_default(),
+            outcome: m.get("outcome").cloned().unwrap_or_default(),
+            error_kind: if ek.is_empty() { None } else { Some(ek) },
+            created_at_epoch_ms: m.get("ts").and_then(|v| v.parse().ok()).unwrap_or(0),
+        });
     }
-    events
+    out
 }
 
-async fn read_diary_hash(client: &Client, key: &str) -> Result<Option<DiaryEntry>, CoreError> {
-    let vals: Value = client
+async fn read_diary_hash(pool: &RedisPool, key: &str) -> Result<Option<DiaryEntry>, CoreError> {
+    let m = pool
+        .hashes()
         .hgetall(key)
         .await
         .map_err(|e| redis_err("HGETALL diary", e))?;
 
-    let m = match &vals {
-        Value::Map(m) if !m.is_empty() => m,
-        _ => return Ok(None),
-    };
+    if m.is_empty() {
+        return Ok(None);
+    }
 
-    let tags: Vec<String> = serde_json::from_str(&map_get(m, "tags_json")).unwrap_or_default();
-    let mood_raw = map_get(m, "mood");
+    let tags: Vec<String> = m
+        .get("tags_json")
+        .and_then(|v| serde_json::from_str(v).ok())
+        .unwrap_or_default();
+    let mood = m.get("mood").cloned().filter(|s| !s.is_empty());
 
     Ok(Some(DiaryEntry {
-        entry_id: map_get(m, "entry_id"),
-        project_id: map_get(m, "project_id"),
-        entry_date: map_get(m, "entry_date"),
-        mood: if mood_raw.is_empty() {
-            None
-        } else {
-            Some(mood_raw)
-        },
+        entry_id: m.get("entry_id").cloned().unwrap_or_default(),
+        project_id: m.get("project_id").cloned().unwrap_or_default(),
+        entry_date: m.get("entry_date").cloned().unwrap_or_default(),
+        mood,
         tags,
-        content: map_get(m, "content"),
-        created_at_epoch_ms: map_get(m, "created_at_epoch_ms").parse().unwrap_or(0),
-        updated_at_epoch_ms: map_get(m, "updated_at_epoch_ms").parse().unwrap_or(0),
+        content: m.get("content").cloned().unwrap_or_default(),
+        created_at_epoch_ms: m
+            .get("created_at_epoch_ms")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0),
+        updated_at_epoch_ms: m
+            .get("updated_at_epoch_ms")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0),
     }))
 }
 
-fn parse_ft_diary(
-    results: &Value,
+/// Parse FT.SEARCH reply into DiaryEntry values, applying date-range filter
+/// after-the-fact and stopping at `limit` matches.
+fn reply_to_diary(
+    reply: &the_one_redis::search::SearchReply,
     start_date: Option<&str>,
     end_date: Option<&str>,
     limit: usize,
 ) -> Vec<DiaryEntry> {
-    let arr = match results {
-        Value::Array(a) if a.len() >= 2 => a,
-        _ => return Vec::new(),
-    };
-
     let mut entries = Vec::new();
-    let mut i = 1;
-    while i + 1 < arr.len() && entries.len() < limit {
-        // arr[i] = key, arr[i+1] = fields (flat array or map)
-        let fields = &arr[i + 1];
+    for hit in &reply.hits {
+        if entries.len() >= limit {
+            break;
+        }
         let get = |k: &str| -> String {
-            match fields {
-                Value::Array(f) => {
-                    let mut j = 0;
-                    while j + 1 < f.len() {
-                        if val_to_string(&f[j]) == k {
-                            return val_to_string(&f[j + 1]);
-                        }
-                        j += 2;
-                    }
-                    String::new()
-                }
-                Value::Map(m) => map_get(m, k),
-                _ => String::new(),
-            }
+            hit.fields
+                .iter()
+                .find(|(name, _)| name == k)
+                .map(|(_, v)| v.clone())
+                .unwrap_or_default()
         };
 
         let entry_date = get("entry_date");
@@ -1176,7 +1078,6 @@ fn parse_ft_diary(
                 updated_at_epoch_ms: get("updated_at_epoch_ms").parse().unwrap_or(0),
             });
         }
-        i += 2;
     }
     entries
 }

@@ -127,11 +127,13 @@ pub struct McpBroker {
     /// stable struct shape via `..Default::default()` patterns).
     #[cfg(all(feature = "pg-state", feature = "pg-vectors"))]
     combined_pg_pool_by_project: RwLock<HashMap<String, sqlx::postgres::PgPool>>,
-    /// v0.16.0 Phase 6 — per-project shared `fred::Client` cache for
-    /// the combined Redis+RediSearch backend. Same pattern as the
-    /// Postgres combined pool cache.
+    /// v0.16.0 Phase 6 — per-project shared `the_one_redis::RedisPool`
+    /// cache for the combined Redis+RediSearch backend. Same pattern
+    /// as the Postgres combined pool cache. Migrated from
+    /// `fred::clients::Client` in v0.17.0 (see
+    /// `docs/plans/2026-05-16-fred-removal-and-bug-fixes.md`).
     #[cfg(all(feature = "redis-state", feature = "redis-vectors"))]
-    combined_redis_client_by_project: RwLock<HashMap<String, fred::clients::Client>>,
+    combined_redis_client_by_project: RwLock<HashMap<String, the_one_redis::RedisPool>>,
     /// v0.16.0 Phase 2 — parsed once at broker construction from the
     /// four `THE_ONE_{STATE,VECTOR}_{TYPE,URL}` env vars. Every
     /// factory call site reads this instead of re-parsing the env
@@ -538,8 +540,8 @@ impl McpBroker {
 
     /// v0.16.0 Phase 6 — combined Redis+RediSearch state store.
     /// Same refined Option Y pattern as Phase 4's Postgres combined:
-    /// gets a shared fred::Client from a per-project cache, constructs
-    /// a `RedisStateStore::from_client` from the shared client.
+    /// gets a shared `the_one_redis::RedisPool` from the per-project
+    /// cache, constructs a `RedisStateStore::from_pool` from it.
     async fn construct_redis_combined_state_store(
         &self,
         project_root: &Path,
@@ -571,21 +573,20 @@ impl McpBroker {
                 db_number: app_config.state_redis.db_number,
             };
 
-            let store = RedisStateStore::from_client(client, &redis_config, project_id).await?;
+            let store = RedisStateStore::from_pool(client, &redis_config, project_id).await?;
             Ok(Box::new(store))
         }
     }
 
-    /// v0.16.0 Phase 6 — get or create a shared fred::Client for the
-    /// combined Redis+RediSearch backend.
+    /// v0.16.0 Phase 6 — get or create a shared `the_one_redis::RedisPool`
+    /// for the combined Redis+RediSearch backend. Migrated from
+    /// `fred::Client` in v0.17.0.
     #[cfg(all(feature = "redis-state", feature = "redis-vectors"))]
     async fn get_or_init_combined_redis_client(
         &self,
         _project_root: &Path,
         project_id: &str,
-    ) -> Result<fred::clients::Client, CoreError> {
-        use fred::interfaces::ClientLike;
-
+    ) -> Result<the_one_redis::RedisPool, CoreError> {
         let key = format!("redis_combined::{project_id}");
 
         // Fast path.
@@ -593,18 +594,14 @@ impl McpBroker {
             return Ok(existing.clone());
         }
 
-        // Cold path — build client from URL.
+        // Cold path — build pool from URL.
         let url = self.backend_selection.state_url.as_deref().ok_or_else(|| {
             CoreError::InvalidProjectConfig(
                 "THE_ONE_STATE_TYPE=redis-combined requires THE_ONE_STATE_URL".to_string(),
             )
         })?;
 
-        let config = fred::types::config::Config::from_url(url)
-            .map_err(|e| CoreError::Redis(format!("invalid url: {e}")))?;
-        let client = fred::clients::Client::new(config, None, None, None);
-        client
-            .init()
+        let pool = the_one_redis::RedisPool::new(the_one_redis::PoolConfig::from_url(url))
             .await
             .map_err(|e| CoreError::Redis(format!("connect: {e}")))?;
 
@@ -616,10 +613,7 @@ impl McpBroker {
             use the_one_core::config::AppConfig as AC;
             if let Ok(app_config) = AC::load(_project_root, RuntimeOverrides::default()) {
                 if app_config.state_redis.require_aof {
-                    if let Err(e) = the_one_core::storage::redis::verify_aof(&client).await {
-                        let _ = client.quit().await;
-                        return Err(e);
-                    }
+                    the_one_core::storage::redis::verify_aof(&pool).await?;
                 }
             }
         }
@@ -627,11 +621,10 @@ impl McpBroker {
         // Double-check under write lock.
         let mut map = self.combined_redis_client_by_project.write().await;
         if let Some(existing) = map.get(&key) {
-            let _ = client.quit().await;
             return Ok(existing.clone());
         }
-        map.insert(key, client.clone());
-        Ok(client)
+        map.insert(key, pool.clone());
+        Ok(pool)
     }
 
     /// Look up the cached state store for a project, constructing it on
@@ -751,11 +744,12 @@ impl McpBroker {
 
         #[cfg(all(feature = "redis-state", feature = "redis-vectors"))]
         {
-            use fred::interfaces::ClientLike;
-            let mut clients = self.combined_redis_client_by_project.write().await;
-            for (_, client) in clients.drain() {
-                let _ = client.quit().await;
-            }
+            // RedisPool clones share an internal Arc; dropping the cache
+            // releases the final reference per project, which runs
+            // redis-rs's connection teardown on Drop. No explicit quit
+            // needed (in contrast to fred's ClientLike::quit).
+            let mut pools = self.combined_redis_client_by_project.write().await;
+            pools.clear();
         }
 
         let mut map = self.state_by_project.write().await;
@@ -1498,8 +1492,9 @@ impl McpBroker {
 
     /// v0.16.0 Phase 6 — combined Redis+RediSearch memory engine.
     /// Same refined Option Y pattern as Phase 4's Postgres combined:
-    /// gets a shared fred::Client, builds a `RedisVectorStore::new`
-    /// from the shared client, wraps in a `MemoryEngine`.
+    /// gets a shared `the_one_redis::RedisPool` from the per-project
+    /// cache, builds a `RedisVectorStore::new` from it, wraps in a
+    /// `MemoryEngine`.
     async fn build_redis_combined_memory_engine(
         &self,
         config: &AppConfig,

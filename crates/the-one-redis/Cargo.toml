@@ -29,10 +29,13 @@ redis = { version = "1.2", features = ["tokio-comp", "streams"] }
 tokio = { version = "1", features = ["macros", "rt", "time", "sync"] }
 futures = { workspace = true }
 
-# Errors — domain error type lives in the-one-core, we provide
-# From<RedisError> for CoreError so callers can bubble through `?`.
+# Errors — the facade emits its own RedisError; callers map it to
+# their domain error type at the boundary (e.g. via
+# `.map_err(|e| CoreError::Redis(e.to_string()))`). No
+# the-one-core dep here, to keep the facade independent and break a
+# potential cycle (the-one-core has an optional dep on the-one-redis
+# through the `redis-state` feature).
 thiserror = { workspace = true }
-the-one-core = { workspace = true }
 
 # Observability
 tracing = { workspace = true }

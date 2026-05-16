@@ -24,14 +24,12 @@ default = []
 pg-state = ["dep:sqlx", "dep:tokio"]
 # v0.16.0 Phase 5 — Redis StateStore backend (two modes: cache-only +
 # persistent with AOF). Off by default; operators opt in via
-# `cargo build --features redis-state`. Uses `fred` (Redis client)
-# + `tokio` (for the sync-over-async bridge via `block_in_place`,
-# same pattern as the Postgres backend). The fred crate is declared
-# inline (not via workspace) for the same pattern-isolation reason
-# the pg-state/pg-vectors features use for sqlx — even though there's
-# no `links` conflict here, keeping redis deps fully gated means
-# zero resolution overhead when the feature is off.
-redis-state = ["dep:fred", "dep:tokio"]
+# `cargo build --features redis-state`. v0.17.0: migrated from `fred`
+# to `the-one-redis` (facade over `redis-rs 1.2`) — see
+# `docs/plans/2026-05-16-fred-removal-and-bug-fixes.md`. The facade
+# owns the `response_timeout = None` override that kept BLPOP/long
+# FT.SEARCH from being capped at 500ms.
+redis-state = ["dep:the-one-redis", "dep:tokio"]
 
 [dependencies]
 base64 = "0.22"
@@ -55,9 +53,10 @@ sqlx = { version = "0.8.6", default-features = false, features = [
     "macros",
 ], optional = true }
 tokio = { workspace = true, optional = true }
-# v0.16.0 Phase 5 — Redis StateStore deps. Same pattern as sqlx above:
-# declared inline + optional, gated on `redis-state` feature.
-fred = { workspace = true, optional = true }
+# v0.16.0 Phase 5 / v0.17.0 — Redis StateStore deps. Same pattern as
+# sqlx above: declared inline + optional, gated on `redis-state`
+# feature. Migrated from `fred` to `the-one-redis` in v0.17.0.
+the-one-redis = { workspace = true, optional = true }
 
 [dev-dependencies]
 temp-env = "0.3"

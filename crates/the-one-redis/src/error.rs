@@ -1,9 +1,12 @@
 //! Error types for `the-one-redis`. Wraps `redis::RedisError` so callers
-//! never have to import the upstream error type directly, and provides
-//! a `From<RedisError> for CoreError` conversion so the rest of the
-//! workspace can continue to bubble errors through `?` without ceremony.
+//! never have to import the upstream error type directly. Callers map
+//! `RedisError` to their domain error type at the boundary — typically
+//! `.map_err(|e| CoreError::Redis(e.to_string()))` in this workspace.
+//!
+//! No domain-error dep is intentional: it keeps the facade independent
+//! and avoids a cycle with `the-one-core`, which has the `redis-state`
+//! feature pulling this crate in.
 
-use the_one_core::error::CoreError;
 use thiserror::Error;
 
 /// Result alias used throughout the facade.
@@ -56,12 +59,6 @@ pub enum RedisError {
     /// replies, and any future module with a non-trivial reply format.
     #[error("Redis reply parse failed: {0}")]
     ReplyParse(String),
-}
-
-impl From<RedisError> for CoreError {
-    fn from(value: RedisError) -> Self {
-        CoreError::Redis(value.to_string())
-    }
 }
 
 /// Convenience: convert `redis::RedisError` directly. Most internal call

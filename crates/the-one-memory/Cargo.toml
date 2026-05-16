@@ -33,7 +33,7 @@ local-embeddings-dynamic = [
 
 image-embeddings = ["local-embeddings", "dep:image"]
 image-ocr = ["image-embeddings", "dep:tesseract"]
-redis-vectors = ["dep:fred"]
+redis-vectors = ["dep:the-one-redis"]
 
 # v0.16.0 Phase 2 — pgvector backend. Off by default; operators opt in via
 # `cargo build --features pg-vectors` (or by enabling it on the binary
@@ -98,7 +98,7 @@ serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 toml = { workspace = true }
-fred = { workspace = true, optional = true }
+the-one-redis = { workspace = true, optional = true }
 image = { workspace = true, optional = true }
 tesseract = { workspace = true, optional = true }
 notify = { workspace = true }
