@@ -37,9 +37,10 @@ pub enum CoreError {
     /// internal error text never leaks to clients.
     #[error("postgres failure: {0}")]
     Postgres(String),
-    /// v0.16.0 Phase 5 — `RedisStateStore` operation failed. Same
-    /// pattern as `Postgres(String)` — wraps fred client errors as
-    /// strings so the crate doesn't need to expose fred types
+    /// v0.16.0 Phase 5 / v0.17.0 — `RedisStateStore` operation failed.
+    /// Same pattern as `Postgres(String)` — wraps Redis client errors
+    /// as strings so the crate doesn't need to expose substrate types
+    /// (`the_one_redis::RedisError`, transitively `redis::RedisError`)
     /// unconditionally. Wire-level sanitizer maps this to `"redis"`.
     #[error("redis failure: {0}")]
     Redis(String),

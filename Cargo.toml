@@ -38,14 +38,15 @@ tesseract = "0.15"
 notify = "6.1"
 notify-debouncer-mini = "0.4"
 tokio-util = { version = "0.7", features = ["rt"] }
-fred = { version = "10", features = ["subscriber-client", "i-redisearch", "i-streams"] }
-# v0.16.2+ — the-one-redis facade crate. Wholesale port of mai-redis
-# on 2026-05-16 (see docs/plans/2026-05-16-fred-removal-and-bug-fixes.md).
-# Will replace `fred` entirely in v0.17.0 once all three fred-touching
-# modules migrate (storage/redis.rs, redis_vectors.rs, broker.rs).
+# v0.17.0 — the-one-redis facade crate (wholesale port of mai-redis on
+# 2026-05-16, replaced fred entirely on 2026-05-16). See
+# `docs/plans/2026-05-16-fred-removal-and-bug-fixes.md`. The load-bearing
+# correctness fix is `the_one_redis::pool::connection_config` setting
+# `response_timeout = None` so blocking commands aren't capped at 500ms.
 the-one-redis = { path = "crates/the-one-redis" }
-# Workspace-level handle to the-one-core so the-one-redis can map
-# RedisError → CoreError without a path duplication.
+# Workspace-level handle to the-one-core so workspace deps can map
+# domain errors uniformly. (The facade itself does NOT depend on
+# the-one-core — that cycle was broken in the migration.)
 the-one-core = { path = "crates/the-one-core" }
 futures = "0.3"
 # Tree-sitter parsing infrastructure for code-aware chunking (Task 1.2 / v0.9.0).

@@ -84,7 +84,8 @@ pub enum StateTypeChoice {
     /// in Phase 4.
     PostgresCombined,
     /// `THE_ONE_STATE_TYPE = "redis-combined"` — state and vectors
-    /// share ONE `fred::Client`. Ships in Phase 6.
+    /// share ONE `the_one_redis::RedisPool`. Shipped in Phase 6;
+    /// migrated from `fred::Client` to the facade in v0.17.0.
     RedisCombined,
 }
 
