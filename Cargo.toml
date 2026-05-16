@@ -5,6 +5,7 @@ members = [
     "crates/the-one-core",
     "crates/the-one-mcp",
     "crates/the-one-memory",
+    "crates/the-one-redis",
     "crates/the-one-registry",
     "crates/the-one-router",
     "crates/the-one-ui",
@@ -38,6 +39,15 @@ notify = "6.1"
 notify-debouncer-mini = "0.4"
 tokio-util = { version = "0.7", features = ["rt"] }
 fred = { version = "10", features = ["subscriber-client", "i-redisearch", "i-streams"] }
+# v0.16.2+ — the-one-redis facade crate. Wholesale port of mai-redis
+# on 2026-05-16 (see docs/plans/2026-05-16-fred-removal-and-bug-fixes.md).
+# Will replace `fred` entirely in v0.17.0 once all three fred-touching
+# modules migrate (storage/redis.rs, redis_vectors.rs, broker.rs).
+the-one-redis = { path = "crates/the-one-redis" }
+# Workspace-level handle to the-one-core so the-one-redis can map
+# RedisError → CoreError without a path duplication.
+the-one-core = { path = "crates/the-one-core" }
+futures = "0.3"
 # Tree-sitter parsing infrastructure for code-aware chunking (Task 1.2 / v0.9.0).
 # Each language grammar is a separate crate pulled in via features on the
 # `the-one-memory` crate so lean builds can opt out.

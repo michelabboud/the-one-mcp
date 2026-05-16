@@ -1,0 +1,52 @@
+[package]
+name = "the-one-redis"
+version = "0.16.2"
+edition.workspace = true
+
+# the-one-mcp's Redis facade. Owns every interaction with Redis behind a
+# stable, domain-shaped API so:
+#
+#   1. Library quirks (redis-rs's 500ms DEFAULT_RESPONSE_TIMEOUT for
+#      blocking commands; the various Ok(None) vs Err(Timeout) traps)
+#      live in ONE place and never leak into domain code.
+#   2. The connection pool is constructed exactly once with our chosen
+#      defaults — no other crate builds a redis::Client directly.
+#   3. Future library swaps (redis-rs → next-gen client) touch this
+#      crate only, not 30+ call sites across the workspace.
+#   4. Regression tests for known quirks live in tests/ — locking the
+#      contract in CI so future driver upgrades surface breakage loudly.
+#
+# Ported wholesale from `mai-redis` (sibling project) on 2026-05-16.
+# See docs/plans/2026-05-16-fred-removal-and-bug-fixes.md for the
+# architectural rationale and migration plan.
+
+[dependencies]
+# The substrate. Pinned to 1.2.x — see CHANGELOG and tests/ before any
+# version bump.
+redis = { version = "1.2", features = ["tokio-comp", "streams"] }
+
+# Async runtime + utilities
+tokio = { version = "1", features = ["macros", "rt", "time", "sync"] }
+futures = { workspace = true }
+
+# Errors — domain error type lives in the-one-core, we provide
+# From<RedisError> for CoreError so callers can bubble through `?`.
+thiserror = { workspace = true }
+the-one-core = { workspace = true }
+
+# Observability
+tracing = { workspace = true }
+
+# JSON parsing for stream payloads, vector queries, etc.
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Misc
+async-trait = { workspace = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
+anyhow = { workspace = true }
+# Used by tests/sentinel_ops.rs to generate unique Redis key suffixes
+# so parallel test runs against a shared Redis instance never collide.
+uuid = { version = "1", features = ["v4"] }
