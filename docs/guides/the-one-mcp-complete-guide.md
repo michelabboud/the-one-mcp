@@ -49,12 +49,16 @@ Shipping today:
 Also shipping in v0.16.0 GA:
 
 | `redis` | `qdrant` | `redis-state` | v0.16.0 Phase 5 (cache or persistent mode) |
-| `redis-combined` | `redis-combined` | `redis-state,redis-vectors` | v0.16.0 Phase 6 (ONE shared fred client, byte-identical URLs) |
+| `redis-combined` | `redis-combined` | `redis-state,redis-vectors` | v0.16.0 Phase 6 / v0.17.0 (ONE shared `RedisPool` from the-one-redis facade, byte-identical URLs) |
 
 Deep-dive guides:
 - [pgvector-backend.md](pgvector-backend.md) — Phase 2 standalone guide (split-pool vectors)
 - [postgres-state-backend.md](postgres-state-backend.md) — Phase 3 standalone guide (split-pool state)
 - [combined-postgres-backend.md](combined-postgres-backend.md) — Phase 4 standalone guide (shared-pool, one credential, one backup target)
+- [redis-state-backend.md](redis-state-backend.md) — Phase 5 / v0.17.0 standalone guide (cache + persistent modes via the-one-redis facade)
+- [redis-vector-backend.md](redis-vector-backend.md) — Phase 7 / v0.17.0 standalone guide (chunks/entities/relations via the-one-redis facade)
+- [combined-redis-backend.md](combined-redis-backend.md) — Phase 6 / v0.17.0 standalone guide (shared `RedisPool`, byte-identical URLs)
+- [the-one-redis-facade.md](the-one-redis-facade.md) — v0.17.0 substrate-layer guide (response-timeout override, sentinel tests, error mapping)
 - [multi-backend-operations.md](multi-backend-operations.md) — deployment matrix
 - [configuration.md § Multi-Backend Selection (v0.16.0+)](configuration.md#multi-backend-selection-v0160) — env var rules + field tables
 - [architecture.md § Multi-Backend Architecture (v0.16.0+)](architecture.md#multi-backend-architecture-v0160) — trait surface + broker factory

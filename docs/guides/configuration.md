@@ -337,7 +337,10 @@ block.
 | `require_aof` | `true` | When `true`, the backend verifies `aof_enabled:1` at startup and refuses to boot without AOF. Set to `false` for cache-only (volatile) mode. |
 
 On the **combined** path (Phase 6, `redis-combined`), the state-side
-`state_redis` config applies to the shared `fred::Client`.
+`state_redis` config applies to the shared `RedisPool` (from the v0.17.0
+[the-one-redis facade](the-one-redis-facade.md)). The vector-side
+`vector_redis` URL is still required and must be byte-identical, but
+its pool-sizing fields are ignored — the state side wins.
 
 ---
 

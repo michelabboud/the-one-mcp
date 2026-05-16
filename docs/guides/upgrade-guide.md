@@ -4,6 +4,122 @@
 
 ---
 
+## Upgrading to v0.17.0 (from v0.16.1 / v0.16.2)
+
+v0.17.0 is a **substrate swap** for everything Redis. The `fred` 10
+client is gone from the workspace; all Redis traffic now routes through
+the new `the-one-redis` facade crate, a wholesale port of MAI's
+sibling project `mai-redis` built on `redis-rs 1.2`.
+
+### Who needs to upgrade
+
+**Recommended for everyone**, but the urgency depends on your backend:
+
+- **SQLite + Qdrant default** (95% of deployments) — no behavioural
+  change, no config change. Upgrade at convenience.
+- **Postgres state and/or pgvector** — no behavioural change, no config
+  change. Upgrade at convenience.
+- **Redis state, Redis vector, or combined Redis** — **strongly
+  recommended**. v0.17.0 fixes a latent fred bug where blocking Redis
+  commands (`BLPOP`, `XREADGROUP`, long `FT.SEARCH`) were silently
+  capped at 500 ms via the redis-rs `response_timeout` default. The
+  facade overrides this to `None` in `the_one_redis::pool::connection_config`,
+  so server-side blocking timeouts are now the contract. If you saw
+  occasional phantom `Timeout` errors under load on v0.16.x Redis
+  backends, that was fred bug #4 — and v0.17.0 fixes it.
+
+### What changed (internal API)
+
+- `RedisStateStore::from_client(fred::Client)` → `from_pool(RedisPool)`
+- `verify_aof(&fred::Client)` → `verify_aof(&RedisPool)` (now
+  propagates parse errors)
+- `RedisVectorStore::new(fred::Client, ...)` → `new(RedisPool, ...)`
+- `RedisVectorStore::from_url(...)` is now `async fn`
+
+These are internal Rust signatures, not user-facing config. Operators
+are unaffected.
+
+### What did **not** change
+
+- `config.json` schema and every existing field
+- Env-var selection: `THE_ONE_STATE_TYPE=redis|redis-combined`,
+  `THE_ONE_STATE_URL`, etc. are byte-identical
+- MCP wire protocol (17 tools + 3 resource types)
+- JSON schemas
+- Persisted Redis data: FT indexes, AOF, hash keys, streams are the
+  same shape and consumed by the new code path
+
+### Required action
+
+- **Rebuild the binary** (the facade is statically linked):
+  ```bash
+  cargo build --release -p the-one-mcp --bin the-one-mcp \
+      --features redis-state,redis-vectors  # add the features you use
+  install -m 755 target/release/the-one-mcp ~/.the-one/bin/the-one-mcp
+  the-one-mcp --version   # expect: the-one-mcp 0.17.0
+  ```
+- **Restart MCP client sessions** so they spawn the new binary.
+- **No data migration.** Existing Redis AOF / FT indexes / hash keys
+  are consumed unchanged.
+
+### Verifying the upgrade
+
+Three fred-purity gates ship with the release. After upgrading, you
+can verify on the source tree (if you're building locally):
+
+```bash
+grep -rn 'fred::\|use fred\|fred = ' crates/ Cargo.toml   # empty
+cargo tree -e all --workspace --all-features | grep fred  # empty
+grep -c '^name = "fred' Cargo.lock                        # 0
+```
+
+If any of these return non-empty, the upgrade is incomplete (likely a
+stale build).
+
+### F1–F7 audit fixes (v0.16.2, bundled in the same release window)
+
+v0.17.0 ships immediately after v0.16.2 and inherits its seven surgical
+fixes:
+
+- **F1**: RediSearch tag escape now covers `*` and `,`
+- **F2**: Postgres `audit_events` column `audit_kind` → `error_kind`
+- **F3**: `RedisVectorStore::clone` preserves the `Arc<OnceCell<()>>`
+  startup guard
+- **F4**: `resources/list` and `resources/read` route serialization
+  errors through `public_error_message`
+- **F5**: `image_base64` extraction tightened with `as_deref`
+- **F6**: Audit log pagination over Redis uses `XREVRANGE` (not
+  `XREAD`) for newest-first ordering
+- **F7**: `RedisVectorStore::new` doc references `from_client` for
+  combined-mode callers
+
+All seven are operationally additive — no config or behavioural change
+beyond the documented fix.
+
+### Spotting fred bug #4 symptoms (motivation context)
+
+If you ran v0.16.x Redis backends under load and saw any of:
+
+- Audit log pagination returning empty intermittently
+- `BLPOP`/`XREADGROUP` calls failing after exactly ~500 ms with no
+  server-side timeout configured
+- RediSearch queries timing out where the server side reported
+  sub-second completion
+
+…those were symptoms of fred's `DEFAULT_RESPONSE_TIMEOUT = 500ms`
+capping the client side. The facade's
+`AsyncConnectionConfig::default().set_response_timeout(None)` removes
+the cap; the sentinel test `response_timeout_default.rs` locks the
+contract in CI so a future `redis-rs` upgrade can't silently
+re-introduce it.
+
+See the [the-one-redis facade guide](the-one-redis-facade.md) for the
+full architectural rationale and the migration plan at
+[`docs/plans/2026-05-16-fred-removal-and-bug-fixes.md`](../plans/2026-05-16-fred-removal-and-bug-fixes.md)
+for the surgical-fix catalogue.
+
+---
+
 ## Upgrading to v0.16.1 (from v0.16.0)
 
 v0.16.1 is a **strongly recommended** patch release for anyone running
@@ -86,10 +202,13 @@ After upgrading to v0.16.1, the same log shows a clean handshake,
   `CoreError::Redis(String)` variant. New `StateRedisConfig` in
   `config.json`.
 - **Phase 6 — Combined Redis+RediSearch** single-client backend.
-  Parallel shape to Phase 4's Postgres combined: one `fred::Client`
+  Parallel shape to Phase 4's Postgres combined: one shared `RedisPool`
+  (from the v0.17.0 [the-one-redis facade](the-one-redis-facade.md))
   shared between `RedisStateStore` and `RedisVectorStore`. Activated
   via `THE_ONE_STATE_TYPE=redis-combined` +
   `THE_ONE_VECTOR_TYPE=redis-combined` with byte-identical URLs.
+  See [combined-redis-backend.md](combined-redis-backend.md) for the
+  full setup.
 - **Phase 7 — Redis-Vector entity/relation parity.** `RedisVectorStore`
   now supports entities and relations (was chunks-only). Each type gets
   its own RediSearch index. Images remain unsupported on Redis (tracked

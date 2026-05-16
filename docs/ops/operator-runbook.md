@@ -214,7 +214,7 @@ Shipping in v0.16.0 GA:
 | `postgres` | `pgvector` | `pg-state,pg-vectors` | Phase 3 — split-pool on both axes |
 | `postgres-combined` | `postgres-combined` | `pg-state,pg-vectors` | Phase 4 — ONE shared sqlx pool |
 | `redis` | `qdrant`/`pgvector` | `redis-state` (+ vector feature) | Phase 5 — cache or persistent mode |
-| `redis-combined` | `redis-combined` | `redis-state,redis-vectors` | Phase 6 — ONE shared fred client |
+| `redis-combined` | `redis-combined` | `redis-state,redis-vectors` | Phase 6 / v0.17.0 — ONE shared `RedisPool` (the-one-redis facade) |
 
 **Tuning knobs** live in `config.json` under `vector_pgvector` (HNSW
 parameters + pool sizing) and `state_postgres` (statement timeout +

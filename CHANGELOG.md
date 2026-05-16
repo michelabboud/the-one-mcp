@@ -2,6 +2,232 @@
 
 All notable changes to this project are documented in this file.
 
+## [v0.17.0] - 2026-05-16
+
+### Changed — substrate swap
+
+- **`fred` 10 is gone. All Redis traffic now routes through the
+  new `the-one-redis` facade crate (`crates/the-one-redis/`), a
+  wholesale port of the sibling project `mai-redis` built on
+  `redis-rs 1.2`.** This is a substrate replacement, not a behaviour
+  change: every `RedisStateStore` / `RedisVectorStore` /
+  combined-Redis call site keeps its signature on the broker-facing
+  side. Three modules carry the migration:
+  `the-one-core/src/storage/redis.rs`,
+  `the-one-memory/src/redis_vectors.rs`, and
+  `the-one-mcp/src/broker.rs`. Cargo features `redis-state` and
+  `redis-vectors` now passthrough to `dep:the-one-redis` instead of
+  `dep:fred`.
+
+  The **load-bearing correctness fix** that motivated the migration
+  lives in `the_one_redis::pool::connection_config`:
+
+  ```rust
+  AsyncConnectionConfig::default().set_response_timeout(None)
+  ```
+
+  redis-rs defaults `response_timeout` to 500 ms — fine for `GET`/
+  `SET`, fatal for `BLPOP`/`XREADGROUP`/long `FT.SEARCH`/etc., where
+  the server-side blocking timeout is the contract and the client-
+  side cap silently shadows it. Without this override, every blocking
+  Redis call would surface a phantom `Timeout` after 500 ms with no
+  diagnostic. The fred retrospective at
+  `~/projects/mai/docs/guides/fred-retrospective.md` documents 11
+  fred bugs that motivated the substrate swap in MAI; this codebase
+  silently hit fred bug #4 (500 ms cap on blocking commands) and
+  benefited from the same correctness story.
+
+- **Signature changes (internal API, not user-facing config)**:
+  - `RedisStateStore::from_client(fred::Client)` →
+    `RedisStateStore::from_pool(RedisPool)`
+  - `verify_aof(&fred::Client)` →
+    `verify_aof(&RedisPool)` (now propagates parse errors)
+  - `RedisVectorStore::new(fred::Client, ...)` →
+    `RedisVectorStore::new(RedisPool, ...)`
+  - `RedisVectorStore::from_url(...)` is now `async fn` (pool
+    construction)
+
+- **Code reduction**: net **−1070 / +707 LOC** across the migrated
+  modules despite adding `xrevrange` to the facade plus the doc
+  comments documenting the cycle-break in `error.rs`. The shrink
+  comes from:
+  - Three local Value-walker helpers (`val_to_string`, `map_get`,
+    `parse_conv_hash`) collapsed into typed `HashMap<String,
+    String>` access since the facade returns typed values from
+    `HGETALL` and `XREVRANGE`.
+  - CustomCommand-based `FT.SEARCH` invocations replaced with the
+    facade's typed `Query` builder.
+
+- **`the-one-redis` cycle-break**: the facade depends only on
+  `redis = 1.2`, `tokio`, `thiserror`, `tracing`, `futures`, `serde`,
+  `serde_json`, `async-trait`. **No `the-one-core` dependency** — the
+  facade is independent so it can be reused by other workspace
+  crates, AND so `the-one-core`'s `redis-state` feature can pull this
+  crate in without a cycle. Callers map `RedisError` at the boundary
+  via `.map_err(|e| CoreError::Redis(e.to_string()))`. The cycle-
+  break dropped one impl (`From<RedisError> for MaiError`) and four
+  deps that weren't reachable from any facade call site
+  (`mai-types`, `metrics`, `chrono`, `uuid`). The `chrono` drop is
+  workspace-aligned: BIGINT epoch_ms is the timestamp format
+  everywhere (cargo `links` conflict between `chrono`'s feature graph
+  and `rusqlite 0.39`'s `libsqlite3-sys 0.37`).
+
+### Added
+
+- **New facade crate `the-one-redis`** (`crates/the-one-redis/`,
+  12 modules, 2,681 LOC, 27 sentinel tests). Module shape:
+  - `pool.rs` — `RedisPool` wrapper around `redis::aio::ConnectionManager`
+    with the `response_timeout = None` override.
+  - `keys.rs` — `GET`/`SET`/`DEL`/`MGET`/`MSET`/`KEYS`/`SCAN` and the
+    TTL family.
+  - `hashes.rs` — `HSET`/`HGET`/`HGETALL`/`HMGET`/`HEXISTS`/`HINCRBY`.
+  - `lists.rs` — `LPUSH`/`RPUSH`/`LPOP`/`RPOP`/`BLPOP`/`BRPOP`/
+    `LRANGE`/`LLEN`.
+  - `sets.rs` — `SADD`/`SMEMBERS`/`SISMEMBER`/`SREM`/`SCARD`.
+  - `sorted_sets.rs` — `ZADD`/`ZRANGE`/`ZREVRANGE`/`ZRANGEBYSCORE`/
+    `ZREMRANGEBYRANK`/`ZSCORE`/`ZINCRBY`.
+  - `streams.rs` — `XADD`/`XREAD`/`XREADGROUP`/`XAUTOCLAIM`/`XACK`/
+    `XPENDING`/`XLEN`/`XDEL`/`XRANGE`/`XREVRANGE` plus the typed
+    `StreamEntry` rows. **`XREVRANGE` is a facade extension over
+    mai-redis** — needed by `RedisStateStore::list_audit_events` for
+    newest-first pagination without setting up a consumer group.
+  - `pubsub.rs` — `PUBLISH`/`SUBSCRIBE`/`PSUBSCRIBE` on a dedicated
+    connection (Redis pub/sub can't share the multiplexed connection).
+  - `timeseries.rs` — `TS.CREATE`/`TS.ADD`/`TS.RANGE` for the
+    RedisTimeSeries module.
+  - `search.rs` — RediSearch typed surface: `VectorField` /
+    `TextField` / `NumericField` / `TagField` builders for `FT.CREATE`,
+    `Query` for `FT.SEARCH` (incl. KNN with binary `PARAMS`), and
+    `SearchReply` / `SearchHit` for typed reply parsing. Redis 8.6.2
+    has RediSearch in core (no module load).
+  - `error.rs` — `RedisError` enum (Command/PoolInit/PoolGet/Pool/
+    DecodeUtf8/ReplyParse) + `RedisResult<T>` alias.
+  - `lib.rs` — module re-exports.
+- **Sentinel-test suite** in `crates/the-one-redis/tests/`:
+  - `response_timeout_default.rs` — guards the 500 ms→`None`
+    override that motivated the migration. Locks the contract in CI
+    so a future redis-rs upgrade can't silently re-introduce the cap.
+  - `blpop_timeout.rs` — confirms `BLPOP` honours its server-side
+    timeout and returns `Ok(None)` (not `Err(Timeout)`) when no value
+    arrives.
+  - `dedicated_conn_for_blocking_commands.rs` — verifies blocking
+    commands don't starve the multiplexed connection.
+  - `sentinel_ops.rs` — Redis Sentinel failover ops.
+  - `streams_nil.rs` — `XREADGROUP` empty-reply decode (the bug that
+    forced manual RESP2 parsers on fred is now a typed `Ok(None)`).
+
+  All 27 tests are env-gated on `THE_ONE_REDIS_URL` and skip
+  gracefully when no Redis is present.
+- **New guide** `docs/guides/the-one-redis-facade.md` — facade
+  architecture, MAI provenance, deviations from the upstream, error
+  mapping at the boundary, the sentinel-test catalogue, troubleshooting.
+- **New guide** `docs/guides/redis-state-backend.md` — formerly a gap
+  (only `redis-vector-backend.md` existed). Covers `RedisStateStore`
+  modes (cache / persistent with `require_aof`), RediSearch FT indexes
+  for diary FTS, ZRANGE-based time ordering, env-var selection, schema
+  migration runner, troubleshooting.
+- **New guide** `docs/guides/combined-redis-backend.md` — parallel to
+  `combined-postgres-backend.md`. Covers the shared `RedisPool` design,
+  byte-identical URL constraint, factory branches, pool-sizing rule on
+  combined deployments, mutual feature gates.
+
+### Verified
+
+- Three fred-purity gates run clean:
+  1. `grep -rn "fred::\|use fred\|fred = " crates/ Cargo.toml` — empty
+  2. `cargo tree -e all --workspace --all-features | grep fred` — empty
+  3. `grep -c '^name = "fred' Cargo.lock` → `0`
+- Workspace tests: `cargo test --workspace` → **470 passing, 0
+  failed, 27 ignored** (default features).
+- Feature combos: `the-one-core --features pg-state,redis-state` →
+  143/0/0; `the-one-memory --features pg-vectors,redis-vectors` →
+  189/0/0; `the-one-mcp --features pg-state,pg-vectors,redis-state,
+  redis-vectors` → 146/0/1; `the-one-redis` → 3/0/26 (26 env-gated).
+- `cargo clippy --workspace --all-targets -- -D warnings` clean on
+  defaults AND with all backend features.
+
+### Compatibility
+
+- **No config or wire-format changes.** Every existing
+  `.the-one/config.json` works unchanged. Env-var selection
+  (`THE_ONE_STATE_TYPE`/`THE_ONE_VECTOR_TYPE`) is byte-identical to
+  v0.16.x. The MCP tool surface (17 tools + 3 resource types) and
+  JSON schemas are untouched.
+- **Build flag compatibility**: `--features redis-state` and
+  `--features redis-vectors` work the same on the CLI; they just
+  resolve to a different dep crate.
+- **Operational compatibility**: running brokers can be drop-replaced
+  with v0.17.0 binaries; persisted Redis data (FT indexes, AOF, hash
+  keys, streams) is the same shape and consumed by the new code path.
+
+---
+
+## [v0.16.2] - 2026-05-16
+
+### Fixed — F1-F7 surgical fixes from v0.16.1 audit
+
+Seven targeted fixes identified by a deep parallel-agent audit
+against the v0.16.1 GA codebase. None are showstoppers individually
+but together they remove sharp edges that an operator would hit
+under load:
+
+- **F1 — `redis_query_escape` missing two metacharacters.** The
+  RediSearch tag-query escaper in `RedisStateStore` covered most
+  metacharacters but not `*` (wildcard) or `,` (separator). Diary
+  tags or palace metadata containing either character would either
+  fail to match or match too broadly. Added to the escape set so
+  every reserved RediSearch token is now neutralised on tag lookup.
+- **F2 — `audit_record_outcome_audit_kind` column name bug.** A
+  Postgres migration referenced `audit_kind` while the broker write
+  path emitted `error_kind`, causing audit events on the Postgres
+  state backend to land with NULL kinds. Renamed to match the
+  emitter; rolling forward is idempotent (the column was added in
+  the v7 migration, not v6 or earlier).
+- **F3 — `RedisVectorStore::clone` lost the `started` `OnceCell`.**
+  `RedisVectorStore` uses `Arc<OnceCell<()>>` to dedupe FT.CREATE on
+  cold startup. The auto-derived `Clone` was substituted by hand at
+  some point in v0.16.x and accidentally created a fresh `OnceCell`
+  per clone, defeating dedupe and triggering benign-but-noisy
+  `FT.CREATE` `IndexAlreadyExists` warnings on every clone path.
+  Restored to `Arc::clone(&self.started)`.
+- **F4 — `resources/list` and `resources/read` swallowed
+  serialization errors silently.** Both handlers used the wrong arm
+  of `match`, producing an empty result on a serialize failure
+  instead of routing through `public_error_message`. Rewired to use
+  the v0.15.0 envelope so a serialize failure now lands as an
+  `InternalError` with the standard `corr=<id>` correlation ID
+  pattern.
+- **F5 — `image_base64` extraction missed `as_deref` on the
+  `Option<String>`.** Tightened the extraction path so the
+  `InvalidRequest` ("exactly one of `query` or `image_base64`
+  must be set") fires before the broker decodes a stray base64
+  string.
+- **F6 — Audit log pagination over Redis streams used XREAD instead
+  of XREVRANGE.** Pagination naturally requests newest-first, but
+  XREAD/XREADGROUP are tail-following primitives. Switched to
+  XREVRANGE for the audit list path; consumer-group semantics are
+  preserved for the live tail.
+- **F7 — `RedisVectorStore::new` documentation didn't reference the
+  shared-client mode.** Phase 6 added `from_client`; the
+  `RedisVectorStore::new` doc comment still implied
+  `RedisVectorStore::new` was the only constructor. Pointed at
+  `from_client` for combined-mode callers.
+
+### Chore — rust 1.95 clippy compliance + fmt drift
+
+Eight pre-existing lint hits that the v0.16.1 codebase shipped
+under a more permissive clippy. rust 1.95 tightened
+`useless_conversion`, `manual_checked_division`, and
+`collapsible_match`. All eight applied via clippy's auto-suggested
+fixes verbatim; no behavioural change. Committed separately from
+F1–F7 to keep the audit-driven fixes inspectable on their own.
+
+### Compatibility
+
+- No config, wire-format, or behavioural changes.
+
+---
+
 ## [v0.16.1] - 2026-04-19
 
 ### Fixed

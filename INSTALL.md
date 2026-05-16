@@ -100,18 +100,21 @@ cargo build --release -p the-one-mcp --bin the-one-mcp --features pg-state,pg-ve
 # Persistent mode enforces AOF via state_redis.require_aof=true in config.
 cargo build --release -p the-one-mcp --bin the-one-mcp --features redis-state
 
-# Combined Redis — ONE fred::Client for state + vectors (Phase 6):
+# Combined Redis — ONE shared RedisPool for state + vectors (Phase 6 / v0.17.0):
 #   THE_ONE_STATE_TYPE=redis-combined
 #   THE_ONE_VECTOR_TYPE=redis-combined
 #   THE_ONE_STATE_URL=redis://localhost:6379
 #   THE_ONE_VECTOR_URL=redis://localhost:6379   # byte-identical
+# Redis traffic routes through the v0.17.0 the-one-redis facade
+# (replaces fred 10). See docs/guides/the-one-redis-facade.md.
 cargo build --release -p the-one-mcp --bin the-one-mcp --features redis-state,redis-vectors
 ```
 
 Runtime selection happens through env vars, not config files, so
 the same binary can point at different backends across
-environments. Feature gates the sqlx/fred dependencies; without
-them those crates are not in the dep tree.
+environments. Feature gates the `sqlx` and `the-one-redis` (the
+v0.17.0 facade over `redis-rs 1.2`) dependencies; without those
+features, the dep tree skips them entirely.
 
 - See [docs/guides/configuration.md § Multi-Backend Selection](docs/guides/configuration.md#multi-backend-selection-v0160)
   for the full `THE_ONE_{STATE,VECTOR}_{TYPE,URL}` surface and

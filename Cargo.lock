@@ -4215,7 +4215,7 @@ dependencies = [
 
 [[package]]
 name = "the-one-claude"
-version = "0.16.1"
+version = "0.17.0"
 dependencies = [
  "tempfile",
  "the-one-codex",
@@ -4226,7 +4226,7 @@ dependencies = [
 
 [[package]]
 name = "the-one-codex"
-version = "0.16.1"
+version = "0.17.0"
 dependencies = [
  "tempfile",
  "the-one-core",
@@ -4236,7 +4236,7 @@ dependencies = [
 
 [[package]]
 name = "the-one-core"
-version = "0.16.1"
+version = "0.17.0"
 dependencies = [
  "base64 0.22.1",
  "rusqlite",
@@ -4255,7 +4255,7 @@ dependencies = [
 
 [[package]]
 name = "the-one-mcp"
-version = "0.16.1"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4282,7 +4282,7 @@ dependencies = [
 
 [[package]]
 name = "the-one-memory"
-version = "0.16.1"
+version = "0.17.0"
 dependencies = [
  "async-trait",
  "fastembed",
@@ -4322,7 +4322,7 @@ dependencies = [
 
 [[package]]
 name = "the-one-redis"
-version = "0.16.2"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4338,7 +4338,7 @@ dependencies = [
 
 [[package]]
 name = "the-one-registry"
-version = "0.16.1"
+version = "0.17.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -4348,7 +4348,7 @@ dependencies = [
 
 [[package]]
 name = "the-one-router"
-version = "0.16.1"
+version = "0.17.0"
 dependencies = [
  "async-trait",
  "httpmock",
@@ -4362,7 +4362,7 @@ dependencies = [
 
 [[package]]
 name = "the-one-ui"
-version = "0.16.1"
+version = "0.17.0"
 dependencies = [
  "axum",
  "reqwest",

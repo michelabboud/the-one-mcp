@@ -739,18 +739,60 @@ complete backend matrix and config examples.
 
 Phase 6 ships the combined Redis+RediSearch backend following the
 same refined Option Y pattern as Phase 4's Postgres combined. One
-`fred::Client` shared between `RedisStateStore` and
-`RedisVectorStore`. See
+shared `RedisPool` (from the v0.17.0
+[the-one-redis facade](the-one-redis-facade.md)) shared between
+`RedisStateStore` and `RedisVectorStore`. See
 [multi-backend-operations.md](multi-backend-operations.md) for
-activation via `redis-combined`.
+activation via `redis-combined` and
+[combined-redis-backend.md](combined-redis-backend.md) for the
+standalone setup guide.
 
 ## 20. Redis-Vector entity/relation parity (Phase 7 — v0.16.0 GA)
 
 Phase 7 closes the capability gap on `RedisVectorStore`: entities
 and relations are now supported (was chunks-only). Each type gets
 its own RediSearch index. Images remain unsupported on Redis
-(tracked for v0.16.2). Decision D (pgvector hybrid search) is
+(tracked post-v0.17.0). Decision D (pgvector hybrid search) is
 deferred to post-GA.
+
+## 21. v0.16.2 F1-F7 surgical fixes
+
+Seven targeted fixes identified by a deep parallel-agent audit
+against the v0.16.1 GA codebase. None individually a showstopper, but
+together they remove sharp edges that an operator would hit under
+load. See [CHANGELOG](../../CHANGELOG.md) v0.16.2 entry for the full
+catalogue (F1: RediSearch tag escape `*`/`,`; F2: Postgres
+`audit_kind` → `error_kind`; F3: `RedisVectorStore::clone` preserves
+`OnceCell`; F4: `resources/*` error envelope; F5: `image_base64`
+extraction; F6: `XREVRANGE` audit pagination; F7: `RedisVectorStore::new`
+doc comment).
+
+## 22. fred → the-one-redis substrate swap (v0.17.0)
+
+v0.17.0 retires `fred 10` from the workspace and routes every Redis
+call through the new `the-one-redis` facade crate
+(`crates/the-one-redis/`), a wholesale port of the sibling project
+`mai-redis` on `redis-rs 1.2`. **Load-bearing correctness fix**: the
+facade sets `response_timeout = None` in
+`the_one_redis::pool::connection_config`, removing redis-rs's default
+500 ms cap on blocking commands. Without this override, every
+`BLPOP`/`XREADGROUP`/long `FT.SEARCH` call would silently time out
+client-side at 500 ms regardless of the server-side timeout —
+documented as fred bug #4 in MAI's retrospective.
+
+Three migration commits ship together:
+- `RedisStateStore::from_client(fred::Client)` → `from_pool(RedisPool)`
+- `verify_aof(&fred::Client)` → `verify_aof(&RedisPool)`
+- `RedisVectorStore::new(fred::Client, ...)` → `new(RedisPool, ...)`
+- `RedisVectorStore::from_url(...)` is now `async fn`
+
+The facade has **no `the-one-core` dep** (cycle-break) — callers map
+`RedisError` at the boundary via
+`.map_err(|e| CoreError::Redis(e.to_string()))`. Sentinel-test suite
+(`crates/the-one-redis/tests/`) locks the correctness contract in CI.
+See the [the-one-redis facade guide](the-one-redis-facade.md) for the
+full architectural rationale and the migration plan at
+[`docs/plans/2026-05-16-fred-removal-and-bug-fixes.md`](../plans/2026-05-16-fred-removal-and-bug-fixes.md).
 
 ---
 

@@ -114,7 +114,7 @@ export THE_ONE_STATE_TYPE=redis THE_ONE_VECTOR_TYPE=qdrant
 export THE_ONE_STATE_URL=redis://localhost:6379 THE_ONE_VECTOR_URL=http://localhost:6333
 cargo build --release -p the-one-mcp --bin the-one-mcp --features redis-state
 
-# Combined Redis — ONE fred::Client serving both roles:
+# Combined Redis — ONE shared RedisPool serving both roles (v0.17.0 uses the the-one-redis facade):
 export THE_ONE_STATE_TYPE=redis-combined THE_ONE_VECTOR_TYPE=redis-combined
 export THE_ONE_STATE_URL=redis://localhost:6379 THE_ONE_VECTOR_URL=redis://localhost:6379
 cargo build --release -p the-one-mcp --bin the-one-mcp --features redis-state,redis-vectors
@@ -124,7 +124,11 @@ See the [multi-backend operations guide](docs/guides/multi-backend-operations.md
 for the full matrix, tuning surface, and decision flowchart. Backend-specific
 guides: [pgvector](docs/guides/pgvector-backend.md),
 [Postgres state](docs/guides/postgres-state-backend.md),
-[combined Postgres](docs/guides/combined-postgres-backend.md).
+[combined Postgres](docs/guides/combined-postgres-backend.md),
+[Redis state](docs/guides/redis-state-backend.md),
+[Redis vector](docs/guides/redis-vector-backend.md),
+[combined Redis](docs/guides/combined-redis-backend.md),
+[the-one-redis facade](docs/guides/the-one-redis-facade.md).
 
 ## 30 MCP Tools
 
@@ -190,8 +194,12 @@ Enable with `"image_embedding_enabled": true` in config. OCR text extraction ava
 | [MemPalace Operations Guide](docs/guides/mempalace-operations.md) | AAAK lessons, diary flows, drawers/closets/tunnels, and profile presets |
 | [pgvector Backend](docs/guides/pgvector-backend.md) | **v0.16.0 Phase 2** — Postgres + `vector` extension for semantic search. HNSW tuning, managed-Postgres setup, migration ownership |
 | [Postgres State Backend](docs/guides/postgres-state-backend.md) | **v0.16.0 Phase 3** — Full `StateStore` trait on Postgres. tsvector FTS, schema v7, sync-over-async bridge, pool sizing |
-| [Multi-Backend Operations](docs/guides/multi-backend-operations.md) | **v0.16.0** — Backend matrix, env-var selection (`THE_ONE_STATE_TYPE`/`THE_ONE_VECTOR_TYPE`), deployment topologies |
-| [Redis Vector Backend](docs/guides/redis-vector-backend.md) | Optional Redis/RediSearch backend settings and persistence expectations |
+| [Combined Postgres Backend](docs/guides/combined-postgres-backend.md) | **v0.16.0 Phase 4** — One `sqlx::PgPool` serves both `StateStore` and `VectorBackend`. Byte-identical URLs, pool-sizing rule |
+| [Redis State Backend](docs/guides/redis-state-backend.md) | **v0.16.0 Phase 5 / v0.17.0** — `RedisStateStore` cache + persistent modes via the the-one-redis facade. AOF enforcement, RediSearch diary FTS |
+| [Redis Vector Backend](docs/guides/redis-vector-backend.md) | **v0.16.0 Phase 7 / v0.17.0** — `RedisVectorStore` chunks + entities + relations via the the-one-redis facade. HNSW tuning, persistence expectations |
+| [Combined Redis Backend](docs/guides/combined-redis-backend.md) | **v0.16.0 Phase 6 / v0.17.0** — One shared `RedisPool` serves both `StateStore` and `VectorBackend`. Byte-identical URLs, mutual feature gates |
+| [the-one-redis Facade](docs/guides/the-one-redis-facade.md) | **v0.17.0** — `crates/the-one-redis/` substrate over redis-rs 1.2 (replaces fred). Response-timeout override, sentinel tests, error mapping |
+| [Multi-Backend Operations](docs/guides/multi-backend-operations.md) | **v0.16.0 / v0.17.0** — Backend matrix, env-var selection (`THE_ONE_STATE_TYPE`/`THE_ONE_VECTOR_TYPE`), deployment topologies |
 | [Conversation Memory Benchmarking](docs/benchmarks/conversation-memory-benchmark.md) | Repro checklist for long-memory evaluation runs |
 | [MCP Resources Guide](docs/guides/mcp-resources.md) | `resources/list`, `resources/read`, `the-one://` URI scheme |
 | [Code Chunking Guide](docs/guides/code-chunking.md) | Tree-sitter AST chunking for 13 languages |
@@ -211,9 +219,10 @@ Enable with `"image_embedding_enabled": true` in config. OCR text extraction ava
 
 | Crate | Purpose |
 |-------|---------|
-| `the-one-core` | Config, storage, policy, profiler, docs manager, limits, **tool catalog** |
-| `the-one-mcp` | Async broker, API types, JSON-RPC transport, CLI binary |
-| `the-one-memory` | RAG: chunker, embeddings (fastembed + API), async Qdrant, **model registry** |
+| `the-one-core` | Config, storage, policy, profiler, docs manager, limits, **tool catalog**, `StateStore` trait |
+| `the-one-mcp` | Async broker, API types, JSON-RPC transport, CLI binary, combined-backend wiring |
+| `the-one-memory` | RAG: chunker, embeddings (fastembed + API), async Qdrant/pgvector/Redis-Vector, `VectorBackend` trait, **model registry** |
+| `the-one-redis` | **v0.17.0** — Redis facade over `redis-rs 1.2`. Single chokepoint for every Redis command. Replaces `fred 10`. See [the-one-redis facade guide](docs/guides/the-one-redis-facade.md) |
 | `the-one-router` | Rules-first routing, provider pool, health tracking |
 | `the-one-registry` | Capability catalog with risk-tier filtering |
 | `the-one-claude` | Claude Code adapter |
@@ -236,24 +245,25 @@ bash scripts/build.sh release --status # check workflow progress
 
 Releases are **manual only** — tagging does not auto-trigger builds. You decide when to build artifacts.
 
-## Stats (v0.16.0 GA)
+## Stats (v0.17.0)
 
 | Metric | Count |
 |--------|-------|
 | MCP Tools | 30 |
 | MCP Resource Types | 3 (`docs`, `project`, `catalog`) |
 | Admin UI Pages | 8 (home, dashboard, ingest, graph, images, config, audit, swagger) |
-| Tests (default build) | 466 passing (+1 ignored) |
-| Tests (all features) | 521 passing (+1 ignored) |
-| Rust LOC | ~32,000 |
+| Tests (default build) | 470 passing, 0 failed, 27 ignored |
+| Tests (all backend features) | 504+ (gated tests skip without a live backend; counts: core 143, memory 189, mcp 146, redis 3) |
+| Rust LOC | ~32,000 + ~2,700 (the-one-redis facade) |
 | JSON Schemas | 35 |
 | Catalog Tools | 365 across 10 languages + 8 categories |
 | Supported Code Languages (chunker) | 13 |
 | `maintain` actions | 15 |
 | Metrics counters | 15 |
-| Vector Backends | 4 (Qdrant default, pgvector split/combined, Redis-Vector with entity/relation support) |
+| Vector Backends | 4 (Qdrant default, pgvector split/combined, Redis-Vector chunks/entities/relations) |
 | State Store Backends | 5 (SQLite default, Postgres split/combined, Redis cache/persistent) |
-| Combined single-pool backends | 2 shipped (Postgres+pgvector, Redis+RediSearch) |
+| Combined single-pool backends | 2 shipped (Postgres+pgvector, Redis+RediSearch via shared `RedisPool`) |
+| Workspace Crates | 9 (added `the-one-redis` facade in v0.17.0) |
 | Supported Platforms | 6 (Linux/macOS/Windows x86-64 + ARM64) |
 | Supported AI CLIs | 4 (Claude Code, Gemini CLI, OpenCode, Codex) |
 

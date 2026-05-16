@@ -1,19 +1,31 @@
 # Progress Report
 
-## Current Version: v0.16.1
+## Current Version: v0.17.0
 
-**Shipped:** v0.16.1 MCP protocol patch on top of v0.16.0 multi-backend
-support. Fixes a post-handshake session-drop bug where the stdio
-transport replied to the client's `notifications/initialized` with an
-out-of-spec `{"jsonrpc":"2.0","result":null}` frame, tripping strict
-clients (Claude Code) into a Zod validation error and closing the
-pipe. Also corrects `--version` and `serverInfo.version` to report
-the real release string instead of the default `0.1.0` and the schema
-tag `v1beta`. v0.16.0's full multi-backend surface (SQLite, Postgres,
-Redis for state; Qdrant, pgvector, Redis-Vector for vectors; combined
-single-pool/single-client modes for Postgres+pgvector and
-Redis+RediSearch) is unchanged. Historical execution plan archived
-at `docs/plans/historical/2026-04-11-resume-phase1-onwards.md`.
+**Shipped:** v0.17.0 substrate swap — `fred` 10 is gone from the
+workspace; every Redis call now routes through the new
+`crates/the-one-redis/` facade, a wholesale port of the sibling
+project `mai-redis` built on `redis-rs 1.2`. The load-bearing
+correctness fix is `the_one_redis::pool::connection_config` setting
+`response_timeout = None` so blocking commands (`BLPOP`,
+`XREADGROUP`, long `FT.SEARCH`) aren't silently capped at 500 ms —
+a fred quirk the MAI retrospective catalogues as bug #4. Three
+modules carry the migration (`storage/redis.rs`, `redis_vectors.rs`,
+`broker.rs`); three fred-purity gates pass cleanly. No config, wire-
+format, or behavioural change for operators — running brokers can
+be drop-replaced and existing Redis data is consumed unchanged.
+
+**Also shipped (v0.16.2, same release window):** F1–F7 surgical fixes
+identified by a deep audit of the v0.16.1 codebase (RediSearch tag
+escape, Postgres audit column rename, `RedisVectorStore::clone`
+`OnceCell` preservation, `resources/*` error envelope routing,
+`image_base64` extraction tightening, audit-log `XREVRANGE`
+pagination, `RedisVectorStore::new` doc fix) plus rust 1.95 clippy
+compliance (8 lint hits auto-fixed).
+
+Historical execution plan archived at
+`docs/plans/historical/2026-04-11-resume-phase1-onwards.md`.
+v0.17.0 plan at `docs/plans/2026-05-16-fred-removal-and-bug-fixes.md`.
 
 ## Overall Status
 
@@ -51,6 +63,8 @@ All planned stages complete. Twenty-four tracked releases shipped
 - **v0.16.0-phase6** — Combined Redis+RediSearch backend. One `fred::Client` shared between `RedisStateStore` and `RedisVectorStore`. Broker gains `combined_redis_client_by_project` cache. Factory branches for `RedisCombined` on both axes. `fred` as direct optional dep on `the-one-mcp`.
 - **v0.16.0-phase7 / v0.16.0 GA** — Redis-Vector entity/relation parity. `RedisVectorStore` gains entities + relations (was chunks-only); each type gets its own RediSearch index. Images remain unsupported on Redis (tracked for v0.16.2). Decision D (pgvector hybrid) deferred to post-GA. Final test count: **466 base, 521 all features**.
 - **v0.16.1** — **MCP protocol fix + version-display fix.** Structural repair of the JSON-RPC notification path: `dispatch` now returns `Option<JsonRpcResponse>` and any id-less message short-circuits to `None`, so notifications (starting with the client's `notifications/initialized` after handshake) no longer produce a `{"jsonrpc":"2.0","result":null}` frame that strict clients (Claude Code's Zod-validated stdio transport) reject. Both HTTP transports (`sse`, `stream`) now return `202 Accepted` with empty body for notifications per MCP's HTTP mapping. Separately, workspace `Cargo.toml` version `0.1.0` → `0.16.1` so `--version` reports the real release, and MCP `serverInfo.version` switches from the schema tag `"v1beta"` to `env!("CARGO_PKG_VERSION")` so clients surface the release string. Two regression tests guard the fix — `test_dispatch_notifications_initialized_emits_no_response` (rewrite of the pre-existing test that had asserted the buggy behaviour) and the new `test_dispatch_any_notification_emits_no_response`. No breaking changes. `the-one-mcp --lib` test count: **113 → 114 passing** (net +1 after the rewrite + add).
+- **v0.16.2** — **F1–F7 surgical fixes from v0.16.1 audit + rust 1.95 clippy compliance.** Two commits shipped together. F1: RediSearch tag-query escape now covers `*` and `,`. F2: Postgres migration column `audit_kind` renamed to `error_kind` to match the broker emitter. F3: `RedisVectorStore::clone` preserves the `Arc<OnceCell<()>>` startup guard. F4: `resources/list` and `resources/read` route serialize failures through the `public_error_message` envelope. F5: `image_base64` extraction uses `as_deref` so the `InvalidRequest` fires before base64 decode. F6: audit-log pagination over Redis switched from `XREAD` to `XREVRANGE` (consumer-group semantics preserved on the live tail). F7: `RedisVectorStore::new` doc comment references `from_client` for combined-mode callers. Separate commit for rust 1.95 clippy compliance — 8 lint hits (6× `useless_conversion`, 1× `manual_checked_division`, 1× `collapsible_match`) plus fmt drift. Commits `b21644e` (F1–F7) and `3f167aa` (clippy). No behavioural change beyond the 7 documented fixes.
+- **v0.17.0** — **fred → the-one-redis substrate swap.** `fred` 10 removed from the workspace; every Redis interaction now routes through `crates/the-one-redis/`, a wholesale port of MAI's sibling crate `mai-redis` on `redis-rs 1.2`. **Load-bearing fix**: `the_one_redis::pool::connection_config` sets `response_timeout = None` — without this override, every blocking Redis call would silently cap at 500 ms (fred bug #4 in MAI's retrospective). Three modules migrated: `the-one-core/src/storage/redis.rs` (RedisStateStore), `the-one-memory/src/redis_vectors.rs` (RedisVectorStore — chunks + entities + relations), `the-one-mcp/src/broker.rs` (combined-Redis shared-pool cache). **Signature deltas (internal only)**: `RedisStateStore::from_client(fred::Client)` → `from_pool(RedisPool)`; `verify_aof(&fred::Client)` → `verify_aof(&RedisPool)`; `RedisVectorStore::new(fred::Client, ...)` → `new(RedisPool, ...)`; `from_url` is now `async fn`. **Cycle-break**: the facade has zero `the-one-core` dep — callers map `RedisError` at the boundary via `.map_err(|e| CoreError::Redis(e.to_string()))`. Three Value-walker helpers collapsed into typed `HashMap<String, String>` / `StreamEntry` access; CustomCommand `FT.SEARCH` replaced with typed `Query` builder. **Net code reduction**: -1070 / +707 LOC despite adding `xrevrange` to the facade. **Cargo features** `redis-state` and `redis-vectors` now passthrough to `dep:the-one-redis`. **Three purity gates** verified empty: `grep -rn "fred::\|use fred\|fred = " crates/ Cargo.toml`, `cargo tree -e all --workspace --all-features | grep fred`, `grep -c '^name = "fred' Cargo.lock`. **Tests**: 470/0/27 default; 143 core+pg-state,redis-state; 189 memory+pg-vectors,redis-vectors; 146 mcp+all; 3+26 facade sentinel suite. **Three new guides** ship with the release: `docs/guides/the-one-redis-facade.md`, `docs/guides/redis-state-backend.md`, `docs/guides/combined-redis-backend.md`. Migration plan at `docs/plans/2026-05-16-fred-removal-and-bug-fixes.md`. Five commits on main: `b21644e` (F1-F7) → `3f167aa` (clippy) → `c688973` (facade port) → `00c55d8` (call-site migration) → `dad472b` (drop fred, purity audit). No config, wire-format, or operator-visible behavioural change — running brokers drop-replace cleanly.
 - **MemPalace phase 2** — completed production feature set:
   - AAAK compression + lesson persistence (`memory.aaak.*`)
   - explicit drawers/closets/tunnels primitives (`memory.navigation.*`)
@@ -193,14 +207,18 @@ All complete: Claude Code + Gemini CLI + OpenCode + Codex auto-detection, tiered
 
 ## Verification Snapshot
 
-**Captured at:** commit `7857647` (tag `v0.16.0`), 2026-04-12.
+**Captured at:** commit `dad472b` (tag `v0.17.0`), 2026-05-16.
 
 - `cargo fmt --check` — passing
-- `cargo clippy --workspace --all-targets -- -D warnings` — passing
-- `cargo test --workspace` — **466 passing, 1 ignored** (the 1 ignored is the Lever 2 async-batching deferred guard from v0.15.1 — intentional)
-- `cargo test --workspace` with all features — **521 passing, 1 ignored**
+- `cargo clippy --workspace --all-targets -- -D warnings` — passing on defaults
+- `cargo clippy --workspace --all-targets --features pg-state,pg-vectors,redis-state,redis-vectors -- -D warnings` — passing
+- `cargo test --workspace` — **470 passing, 0 failed, 27 ignored** (env-gated backend integration suites skip without `THE_ONE_*_URL`)
+- Feature-gated counts: core+pg-state,redis-state → **143/0/0**; memory+pg-vectors,redis-vectors → **189/0/0**; mcp+all backends → **146/0/1**; the-one-redis sentinels → **3/0/26**
 - `cargo build --release -p the-one-mcp --bin the-one-mcp` — passing
-- `bash scripts/release-gate.sh` — passing
+- Three fred-purity gates (added v0.17.0): all empty
+  - `grep -rn "fred::\|use fred\|fred = " crates/ Cargo.toml`
+  - `cargo tree -e all --workspace --all-features | grep fred`
+  - `grep -c '^name = "fred' Cargo.lock`
 
 ## Tool Consolidation (v0.5.0) — 6 Tasks
 
@@ -360,11 +378,12 @@ Phase 4 resume prompt (`2026-04-11-resume-phase4-prompt.md`) are
 archived in `docs/plans/historical/` as reference for the decision
 trail behind the v0.16.0 multi-backend architecture.
 
-## What's Next (post-v0.16.0)
+## What's Next (post-v0.17.0)
 
 ### Near-Term
 
-- **v0.16.1** — Redis-Vector image support (tracked gap from Phase 7). Close the last capability gap so `RedisVectorStore` reaches full parity with Qdrant.
+- **CI feature-matrix wiring** — flagged out-of-scope in the v0.17.0 migration plan. Add GitHub Actions services jobs that provision Postgres + pgvector and Redis Stack so the 27 env-gated integration tests (workspace) and 26 facade sentinel tests run on every PR rather than only locally.
+- **Redis-Vector image support** — tracked gap from Phase 7. Close the last capability gap so `RedisVectorStore` reaches full parity with Qdrant.
 - **Decision D — pgvector hybrid search** — deferred throughout v0.16.0. Benchmark tsvector+GIN vs sparse-array rewrites before shipping. Tracked for a post-GA release.
 
 ### Deferred

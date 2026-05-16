@@ -26,8 +26,8 @@ combination.
 | **Qdrant**     | First-class         | chunks, hybrid, entities, relations, images              | default            |
 | **pgvector (split)**   | **First-class (Phase 2)** | chunks, entities, relations (hybrid = Decision D, deferred) | `pg-vectors`       |
 | **pgvector (combined)** | **First-class (Phase 4)** | same as split; shares one `sqlx::PgPool` with `PostgresStateStore` | `pg-state,pg-vectors` |
-| **Redis-Vector** | **First-class (Phase 7)** | chunks, entities, relations (+ persistence check). Images unsupported (v0.16.1). | `redis-vectors`    |
-| **Redis-Vector (combined)** | **First-class (Phase 6)** | same as above; shares one `fred::Client` with `RedisStateStore` | `redis-state,redis-vectors` |
+| **Redis-Vector** | **First-class (Phase 7)** | chunks, entities, relations (+ persistence check). Images unsupported (tracked post-v0.17.0). | `redis-vectors`    |
+| **Redis-Vector (combined)** | **First-class (Phase 6 / v0.17.0)** | same as above; shares one `RedisPool` (the-one-redis facade) with `RedisStateStore` | `redis-state,redis-vectors` |
 | **In-memory**  | Fallback            | keyword search only                                      | always available   |
 
 ### State store backends
@@ -39,7 +39,7 @@ combination.
 | **Postgres (combined)** | **First-class (Phase 4)** | same as split; shares one `sqlx::PgPool` with `PgVectorBackend` | `pg-state,pg-vectors` |
 | **Redis persistent** | **First-class (Phase 5)** | RediSearch FTS, HSET objects, Redis Streams, AOF enforced | `redis-state` |
 | **Redis cache** | **First-class (Phase 5)** | same data structures, volatile (no AOF check) | `redis-state` |
-| **Redis (combined)** | **First-class (Phase 6)** | same as above; shares one `fred::Client` with `RedisVectorStore` | `redis-state,redis-vectors` |
+| **Redis (combined)** | **First-class (Phase 6 / v0.17.0)** | same as above; shares one `RedisPool` (the-one-redis facade) with `RedisVectorStore` | `redis-state,redis-vectors` |
 
 ### Combined single-connection backends
 
@@ -48,7 +48,7 @@ combination.
 | SQLite + Qdrant sidecar    | First-class         | Default deployment                    |
 | SQLite + Redis-Vector      | Supported           | Low-latency small deployments         |
 | **Postgres + pgvector**    | **First-class (Phase 4)** | One DB, one `sqlx::PgPool`, one credential, one backup target |
-| **Redis + RediSearch + AOF** | **First-class (Phase 6)** | One Redis, one `fred::Client`, everything in one process |
+| **Redis + RediSearch + AOF** | **First-class (Phase 6 / v0.17.0)** | One Redis, one shared `RedisPool` from the [the-one-redis facade](the-one-redis-facade.md), everything in one process |
 
 ---
 
@@ -313,10 +313,15 @@ export THE_ONE_VECTOR_TYPE=redis-combined
 export THE_ONE_VECTOR_URL=redis://localhost:6379   # byte-identical
 ```
 
-One `fred::Client` handles both the `StateStore` and `VectorBackend`
-trait roles. Same refined Option Y pattern as Postgres combined.
-Rebuild: `cargo build --release -p the-one-mcp --bin the-one-mcp
---features redis-state,redis-vectors`.
+One shared `RedisPool` (from the [the-one-redis facade](the-one-redis-facade.md))
+handles both the `StateStore` and `VectorBackend` trait roles. Same
+refined Option Y pattern as Postgres combined: `RedisPool` is cheap to
+clone (internally `Arc`-counted), so both trait-role sub-backends hold
+a handle to the same underlying connection set. Rebuild:
+`cargo build --release -p the-one-mcp --bin the-one-mcp --features
+redis-state,redis-vectors`. See the
+[combined Redis guide](combined-redis-backend.md) for the full setup,
+pool-sizing rule on combined deployments, and troubleshooting.
 
 ---
 

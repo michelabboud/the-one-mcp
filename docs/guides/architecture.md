@@ -21,13 +21,15 @@ architectural decision flows from five core goals:
 
 ## Workspace Layout
 
-The repository is a Cargo workspace with 8 crates:
+The repository is a Cargo workspace with **9 crates** (v0.17.0 added
+the-one-redis):
 
 ```
 the-one-mcp/
 ├── crates/
-│   ├── the-one-core/       # Storage, config, policy, catalog, profiler
-│   ├── the-one-memory/     # RAG: chunker, embeddings, Qdrant, reranker, graph
+│   ├── the-one-core/       # Storage, config, policy, catalog, profiler, StateStore trait
+│   ├── the-one-memory/     # RAG: chunker, embeddings, Qdrant/pgvector/Redis, VectorBackend trait
+│   ├── the-one-redis/      # v0.17.0 — Redis facade over redis-rs 1.2 (replaces fred)
 │   ├── the-one-mcp/        # Broker, API types, JSON-RPC transport, CLI binary
 │   ├── the-one-router/     # Request routing, provider pool, health tracking
 │   ├── the-one-registry/   # Capability registry
@@ -50,6 +52,10 @@ the-one-ui ──────────> the-one-mcp ────────�
                              +──> the-one-memory ─────┤ (error types only)
                              +──> the-one-registry ───+
                              +──> the-one-router ─────+
+                             +──> the-one-redis ┐     │
+                                                │     │
+the-one-core ─(redis-state feature)─> the-one-redis (no cycle: facade has no the-one-core dep)
+the-one-memory ─(redis-vectors feature)─> the-one-redis
 
 the-one-claude ──> the-one-mcp
 the-one-codex  ──> the-one-mcp
@@ -57,6 +63,16 @@ the-one-codex  ──> the-one-mcp
 
 `the-one-core` is the shared foundation — nothing depends on `the-one-mcp` except
 the adapters and UI. This keeps the domain logic independently testable.
+
+**`the-one-redis` is the second cycle-free leaf** (alongside
+`the-one-core` from a different angle): the facade depends only on
+`redis = 1.2`, `tokio`, `thiserror`, `tracing`, `futures`, `serde`,
+`serde_json`, `async-trait`. By **not** depending on `the-one-core`,
+the facade can be pulled in by `the-one-core`'s `redis-state` feature
+gate without forming a dependency cycle. Callers map `RedisError` to
+their domain error type at the boundary — see the [the-one-redis
+facade guide](the-one-redis-facade.md) for the rationale and migration
+context.
 
 ## Crate Responsibilities
 
@@ -110,6 +126,55 @@ Key modules:
 
 Embedding downloads happen on first use and cache in `.fastembed_cache/` (gitignored).
 Model sizes range from ~23 MB (fast) to ~220 MB (quality).
+
+### `the-one-redis` (v0.17.0)
+
+The Redis facade. Single chokepoint for every Redis command the
+workspace makes. Wholesale port of the sibling project `mai-redis` on
+`redis-rs 1.2`, ported on 2026-05-16 to retire `fred 10` from the
+workspace. See the [the-one-redis facade guide](the-one-redis-facade.md)
+for the full architectural rationale.
+
+Key modules (12 total, ~2,700 LOC):
+- `pool.rs` — `RedisPool` wrapping `redis::aio::ConnectionManager` with
+  the **load-bearing** `response_timeout = None` override. Without
+  this override, `BLPOP`/`XREADGROUP`/long `FT.SEARCH` calls would
+  silently cap at 500 ms (redis-rs default).
+- `keys.rs` / `hashes.rs` / `lists.rs` / `sets.rs` / `sorted_sets.rs` —
+  the typed surface for each Redis data structure.
+- `streams.rs` — `XADD`/`XREAD`/`XREADGROUP`/`XAUTOCLAIM`/`XACK`/
+  `XPENDING`/`XLEN`/`XDEL`/`XRANGE`/`XREVRANGE` with typed
+  `StreamEntry` rows. `XREVRANGE` is a facade extension over upstream
+  mai-redis — needed by `RedisStateStore::list_audit_events` for
+  newest-first audit pagination.
+- `pubsub.rs` — dedicated-connection pub/sub (Redis pub/sub can't
+  multiplex).
+- `search.rs` — RediSearch typed surface (`VectorField` / `TextField` /
+  `Query` / `SearchReply`). Redis 8.6.2 has RediSearch in core (no
+  module load).
+- `timeseries.rs` — RedisTimeSeries (`TS.*`).
+- `error.rs` — `RedisError` enum + `RedisResult<T>` alias. **No
+  `the-one-core` dep** — the cycle break that lets `the-one-core`'s
+  `redis-state` feature pull this crate in. Callers map `RedisError`
+  to their domain error type at the boundary via
+  `.map_err(|e| CoreError::Redis(e.to_string()))`.
+
+Cargo features `redis-state` (on `the-one-core`) and `redis-vectors`
+(on `the-one-memory`) both passthrough to `dep:the-one-redis`. The
+facade itself has no feature flags — every module is always available.
+
+Sentinel-test suite in `crates/the-one-redis/tests/` locks the
+correctness contract in CI:
+- `response_timeout_default.rs` — guards the `None` override.
+- `blpop_timeout.rs` — `BLPOP` returns `Ok(None)` on timeout, not
+  `Err(Timeout)`.
+- `dedicated_conn_for_blocking_commands.rs` — blocking commands don't
+  starve the multiplexed connection.
+- `sentinel_ops.rs` — Redis Sentinel failover.
+- `streams_nil.rs` — `XREADGROUP` empty-reply decode.
+
+All 27 sentinel tests are env-gated on `THE_ONE_REDIS_URL` and skip
+gracefully when no Redis is present.
 
 ### `the-one-mcp`
 
@@ -516,15 +581,20 @@ legacy `config.vector_backend` string-based path.
 | 3 | PostgresStateStore + `state_store_factory` async | Alternative state backend; cross-axis deployment |
 | 4 (shipped) | Combined Postgres+pgvector (one `sqlx::PgPool`, two trait roles) via `from_pool` constructors + `combined_pg_pool_by_project` cache | Operational unity (one credential, one pgbouncer entry, one PITR window); foundation for future cross-trait transactions |
 | 5 (shipped) | Redis `StateStore` with cache/persistent modes + `require_aof` enforcement | Cache + persistent AOF deployments on the state axis |
-| 6 (shipped) | Combined Redis+RediSearch (one `fred::Client`, two trait roles) via `from_client` + `combined_redis_client_by_project` cache | Operational unity for Redis-first infrastructure |
-| 7 (shipped, v0.16.0 GA) | Redis-Vector entity/relation parity | Close the capability gap; images deferred to v0.16.1 |
+| 6 (shipped) | Combined Redis+RediSearch (one `RedisPool` from the [the-one-redis facade](the-one-redis-facade.md), two trait roles) via `from_pool` + `combined_redis_client_by_project` cache | Operational unity for Redis-first infrastructure |
+| 7 (shipped, v0.16.0 GA) | Redis-Vector entity/relation parity | Close the capability gap; images deferred to v0.16.2 |
+| **v0.17.0 substrate** | Wholesale fred → the-one-redis facade port (`crates/the-one-redis/`); `the_one_redis::pool::connection_config` sets `response_timeout = None` so blocking commands aren't silently capped at 500 ms | Substrate independence from fred quirks; sentinel-test suite locks contract in CI; cycle-free facade reusable across the workspace |
 
 See [multi-backend-operations.md](multi-backend-operations.md) for
-the operator-facing deployment matrix and
-[pgvector-backend.md](pgvector-backend.md) /
-[postgres-state-backend.md](postgres-state-backend.md) /
-[combined-postgres-backend.md](combined-postgres-backend.md) for the
-per-backend setup guides.
+the operator-facing deployment matrix and the per-backend setup
+guides:
+[pgvector](pgvector-backend.md),
+[Postgres state](postgres-state-backend.md),
+[combined Postgres](combined-postgres-backend.md),
+[Redis state](redis-state-backend.md),
+[Redis vector](redis-vector-backend.md),
+[combined Redis](combined-redis-backend.md),
+[the-one-redis facade](the-one-redis-facade.md).
 
 ## Tool Dispatch Architecture
 

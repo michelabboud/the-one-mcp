@@ -1,16 +1,24 @@
 # AGENTS.md - The-One MCP Development Guide
 
-Rust MCP broker system (v0.16.0-phase3). All agents should follow these guidelines.
+Rust MCP broker system (v0.17.0). All agents should follow these guidelines.
 
-**Multi-backend (v0.16.0):** the broker supports pluggable state and vector
-backends via four env vars (`THE_ONE_{STATE,VECTOR}_{TYPE,URL}`) and two
-Cargo features (`pg-state`, `pg-vectors`). Default builds stay on
-SQLite + Qdrant. Phase 2 shipped pgvector, Phase 3 shipped
-PostgresStateStore, Phase 4 (combined single-pool Postgres) is pending.
-See `docs/guides/architecture.md § Multi-Backend Architecture (v0.16.0+)`
-for the trait surface and broker factory shape; the canonical execution
-plan lives in `docs/plans/2026-04-11-resume-phase1-onwards.md` with
-per-phase DONE blocks.
+**Multi-backend (v0.16.0 — GA):** the broker supports pluggable state and
+vector backends via four env vars (`THE_ONE_{STATE,VECTOR}_{TYPE,URL}`)
+and four Cargo features (`pg-state`, `pg-vectors`, `redis-state`,
+`redis-vectors`). Default builds stay on SQLite + Qdrant. All seven
+phases (rc1 → phase7) shipped in v0.16.0 GA, including the combined
+single-pool/single-client modes for both Postgres+pgvector and
+Redis+RediSearch. See `docs/guides/architecture.md` for the trait surface
+and broker factory shape.
+
+**Substrate (v0.17.0):** Redis traffic routes through the new
+`crates/the-one-redis/` facade crate (replaces `fred 10`). Wholesale
+port of sibling project `mai-redis` on `redis-rs 1.2`. **Load-bearing
+fix**: `the_one_redis::pool::connection_config` sets
+`response_timeout = None` so blocking commands aren't silently capped at
+500 ms. The facade has no `the-one-core` dep — callers map errors at
+the boundary via `.map_err(|e| CoreError::Redis(e.to_string()))`. See
+`docs/guides/the-one-redis-facade.md`.
 
 ## Build Commands
 
