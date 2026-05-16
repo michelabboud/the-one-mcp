@@ -1076,10 +1076,8 @@ fn parse_audit_stream(entries: &Value) -> Vec<AuditEvent> {
                 "event_type" => evt.event_type = val,
                 "payload" => evt.payload_json = val,
                 "outcome" => evt.outcome = val,
-                "error_kind" => {
-                    if !val.is_empty() {
-                        evt.error_kind = Some(val);
-                    }
+                "error_kind" if !val.is_empty() => {
+                    evt.error_kind = Some(val);
                 }
                 "ts" => evt.created_at_epoch_ms = val.parse().unwrap_or(0),
                 "project_id" => evt.project_id = val,

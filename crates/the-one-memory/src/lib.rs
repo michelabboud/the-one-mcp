@@ -650,8 +650,8 @@ impl MemoryEngine {
                         let hybrid_points: Vec<HybridVectorPoint> = self.chunks
                             [batch_start..batch_end]
                             .iter()
-                            .zip(vectors.into_iter())
-                            .zip(sparse_vecs.into_iter())
+                            .zip(vectors)
+                            .zip(sparse_vecs)
                             .map(|((chunk, dense_vec), sv)| HybridVectorPoint {
                                 id: chunk.id.clone(),
                                 dense: dense_vec,
@@ -684,7 +684,7 @@ impl MemoryEngine {
                 // Dense-only upsert (default path).
                 let points: Vec<VectorPoint> = self.chunks[batch_start..batch_end]
                     .iter()
-                    .zip(vectors.into_iter())
+                    .zip(vectors)
                     .map(|(chunk, vector)| VectorPoint {
                         id: chunk.id.clone(),
                         vector,
@@ -1210,8 +1210,8 @@ impl MemoryEngine {
                     let sparse_vecs = sparse_prov.embed_batch(&texts)?;
                     let hybrid_points: Vec<HybridVectorPoint> = batch
                         .iter()
-                        .zip(vectors.into_iter())
-                        .zip(sparse_vecs.into_iter())
+                        .zip(vectors)
+                        .zip(sparse_vecs)
                         .map(|((chunk, dense), sparse)| HybridVectorPoint {
                             id: chunk.id.clone(),
                             dense,
@@ -1240,7 +1240,7 @@ impl MemoryEngine {
 
             let points: Vec<VectorPoint> = batch
                 .iter()
-                .zip(vectors.into_iter())
+                .zip(vectors)
                 .map(|(chunk, vector)| VectorPoint {
                     id: chunk.id.clone(),
                     vector,

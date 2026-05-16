@@ -1352,7 +1352,9 @@ mod tests {
             method: "initialize".to_string(),
             params: None,
         };
-        let response = dispatch(&broker, request).await.expect("dispatch returned None for a request with id");
+        let response = dispatch(&broker, request)
+            .await
+            .expect("dispatch returned None for a request with id");
         assert!(response.error.is_none());
         let result = response.result.unwrap();
         assert_eq!(result["serverInfo"]["name"], "the-one-mcp");
@@ -1377,7 +1379,9 @@ mod tests {
                 "project_id": "resources-test",
             })),
         };
-        let response = dispatch(&broker, request).await.expect("dispatch returned None for a request with id");
+        let response = dispatch(&broker, request)
+            .await
+            .expect("dispatch returned None for a request with id");
         assert!(
             response.error.is_none(),
             "resources/list dispatch errored: {:?}",
@@ -1401,7 +1405,9 @@ mod tests {
             method: "resources/list".to_string(),
             params: None,
         };
-        let response = dispatch(&broker, request).await.expect("dispatch returned None for a request with id");
+        let response = dispatch(&broker, request)
+            .await
+            .expect("dispatch returned None for a request with id");
         assert!(response.error.is_some());
         assert_eq!(response.error.unwrap().code, INVALID_PARAMS);
     }
@@ -1421,7 +1427,9 @@ mod tests {
                 "uri": "the-one://docs/../../etc/passwd",
             })),
         };
-        let response = dispatch(&broker, request).await.expect("dispatch returned None for a request with id");
+        let response = dispatch(&broker, request)
+            .await
+            .expect("dispatch returned None for a request with id");
         assert!(
             response.error.is_some(),
             "path traversal should be rejected"
@@ -1437,7 +1445,9 @@ mod tests {
             method: "tools/list".to_string(),
             params: None,
         };
-        let response = dispatch(&broker, request).await.expect("dispatch returned None for a request with id");
+        let response = dispatch(&broker, request)
+            .await
+            .expect("dispatch returned None for a request with id");
         assert!(response.error.is_none());
         let tools = response.result.unwrap()["tools"].as_array().unwrap().len();
         assert_eq!(tools, crate::transport::tools::tool_definitions().len());
@@ -1452,7 +1462,9 @@ mod tests {
             method: "nonexistent".to_string(),
             params: None,
         };
-        let response = dispatch(&broker, request).await.expect("dispatch returned None for a request with id");
+        let response = dispatch(&broker, request)
+            .await
+            .expect("dispatch returned None for a request with id");
         assert!(response.error.is_some());
         assert_eq!(response.error.unwrap().code, -32601);
     }
@@ -1466,7 +1478,9 @@ mod tests {
             method: "tools/call".to_string(),
             params: None,
         };
-        let response = dispatch(&broker, request).await.expect("dispatch returned None for a request with id");
+        let response = dispatch(&broker, request)
+            .await
+            .expect("dispatch returned None for a request with id");
         assert!(response.error.is_some());
         assert_eq!(response.error.unwrap().code, INVALID_PARAMS);
     }
@@ -1480,7 +1494,9 @@ mod tests {
             method: "tools/call".to_string(),
             params: Some(serde_json::json!({})),
         };
-        let response = dispatch(&broker, request).await.expect("dispatch returned None for a request with id");
+        let response = dispatch(&broker, request)
+            .await
+            .expect("dispatch returned None for a request with id");
         assert!(response.error.is_some());
         assert_eq!(response.error.unwrap().code, INVALID_PARAMS);
     }
@@ -1497,7 +1513,9 @@ mod tests {
                 "arguments": {}
             })),
         };
-        let response = dispatch(&broker, request).await.expect("dispatch returned None for a request with id");
+        let response = dispatch(&broker, request)
+            .await
+            .expect("dispatch returned None for a request with id");
         assert!(response.error.is_some());
         assert_eq!(response.error.unwrap().code, INTERNAL_ERROR);
     }
@@ -1556,7 +1574,9 @@ mod tests {
                 }
             })),
         };
-        let response = dispatch(&broker, request).await.expect("dispatch returned None for a request with id");
+        let response = dispatch(&broker, request)
+            .await
+            .expect("dispatch returned None for a request with id");
         assert!(response.error.is_none());
     }
 
@@ -1576,7 +1596,9 @@ mod tests {
                 }
             })),
         };
-        let response = dispatch(&broker, request).await.expect("dispatch returned None for a request with id");
+        let response = dispatch(&broker, request)
+            .await
+            .expect("dispatch returned None for a request with id");
         // Will fail at broker level (no project), but should not be "unknown tool"
         assert!(
             response.error.is_none() || response.error.as_ref().unwrap().code != INVALID_PARAMS
@@ -1600,7 +1622,9 @@ mod tests {
                 }
             })),
         };
-        let response = dispatch(&broker, request).await.expect("dispatch returned None for a request with id");
+        let response = dispatch(&broker, request)
+            .await
+            .expect("dispatch returned None for a request with id");
         assert!(
             response.error.is_none() || response.error.as_ref().unwrap().code != INVALID_PARAMS
         );
@@ -1623,7 +1647,9 @@ mod tests {
                 }
             })),
         };
-        let response = dispatch(&broker, request).await.expect("dispatch returned None for a request with id");
+        let response = dispatch(&broker, request)
+            .await
+            .expect("dispatch returned None for a request with id");
         assert!(
             response.error.is_none() || response.error.as_ref().unwrap().code != INVALID_PARAMS
         );
@@ -1652,7 +1678,9 @@ mod tests {
             })),
         };
 
-        let response = dispatch(&broker, request).await.expect("dispatch returned None for a request with id");
+        let response = dispatch(&broker, request)
+            .await
+            .expect("dispatch returned None for a request with id");
         assert!(
             response.error.is_none(),
             "config profile.set dispatch errored: {:?}",
@@ -1691,7 +1719,9 @@ mod tests {
             })),
         };
 
-        let response = dispatch(&broker, request).await.expect("dispatch returned None for a request with id");
+        let response = dispatch(&broker, request)
+            .await
+            .expect("dispatch returned None for a request with id");
         assert!(
             response.error.is_some(),
             "expected invalid profile to produce an error response"
@@ -1737,7 +1767,9 @@ mod tests {
             })),
         };
 
-        let response = dispatch(&broker, request).await.expect("dispatch returned None for a request with id");
+        let response = dispatch(&broker, request)
+            .await
+            .expect("dispatch returned None for a request with id");
         assert!(
             response.error.is_none(),
             "memory.ingest_conversation dispatch errored: {:?}",
@@ -1782,7 +1814,9 @@ mod tests {
                 }
             })),
         };
-        let compress_response = dispatch(&broker, compress_request).await.expect("dispatch returned None for a request with id");
+        let compress_response = dispatch(&broker, compress_request)
+            .await
+            .expect("dispatch returned None for a request with id");
         assert!(
             compress_response.error.is_none(),
             "memory.aaak.compress dispatch errored: {:?}",
@@ -1803,7 +1837,9 @@ mod tests {
                 }
             })),
         };
-        let teach_response = dispatch(&broker, teach_request).await.expect("dispatch returned None for a request with id");
+        let teach_response = dispatch(&broker, teach_request)
+            .await
+            .expect("dispatch returned None for a request with id");
         assert!(
             teach_response.error.is_none(),
             "memory.aaak.teach dispatch errored: {:?}",
@@ -1823,7 +1859,9 @@ mod tests {
                 }
             })),
         };
-        let list_response = dispatch(&broker, list_request).await.expect("dispatch returned None for a request with id");
+        let list_response = dispatch(&broker, list_request)
+            .await
+            .expect("dispatch returned None for a request with id");
         assert!(
             list_response.error.is_none(),
             "memory.aaak.list_lessons dispatch errored: {:?}",
@@ -1860,7 +1898,9 @@ mod tests {
                 }
             })),
         };
-        let add_response = dispatch(&broker, add_request).await.expect("dispatch returned None for a request with id");
+        let add_response = dispatch(&broker, add_request)
+            .await
+            .expect("dispatch returned None for a request with id");
         assert!(
             add_response.error.is_none(),
             "memory.diary.add dispatch errored: {:?}",
@@ -1882,7 +1922,9 @@ mod tests {
                 }
             })),
         };
-        let list_response = dispatch(&broker, list_request).await.expect("dispatch returned None for a request with id");
+        let list_response = dispatch(&broker, list_request)
+            .await
+            .expect("dispatch returned None for a request with id");
         assert!(
             list_response.error.is_none(),
             "memory.diary.list dispatch errored: {:?}",
@@ -1903,7 +1945,9 @@ mod tests {
                 }
             })),
         };
-        let search_response = dispatch(&broker, search_request).await.expect("dispatch returned None for a request with id");
+        let search_response = dispatch(&broker, search_request)
+            .await
+            .expect("dispatch returned None for a request with id");
         assert!(
             search_response.error.is_none(),
             "memory.diary.search dispatch errored: {:?}",
@@ -1925,7 +1969,9 @@ mod tests {
                 }
             })),
         };
-        let summarize_response = dispatch(&broker, summarize_request).await.expect("dispatch returned None for a request with id");
+        let summarize_response = dispatch(&broker, summarize_request)
+            .await
+            .expect("dispatch returned None for a request with id");
         assert!(
             summarize_response.error.is_none(),
             "memory.diary.summarize dispatch errored: {:?}",
@@ -1962,7 +2008,9 @@ mod tests {
             })),
         };
 
-        let response = dispatch(&broker, request).await.expect("dispatch returned None for a request with id");
+        let response = dispatch(&broker, request)
+            .await
+            .expect("dispatch returned None for a request with id");
         assert!(response.error.is_some(), "expected invalid tags to error");
         let error = response.error.expect("error should exist");
         assert_eq!(error.code, INTERNAL_ERROR);
@@ -2002,7 +2050,9 @@ mod tests {
                 }
             })),
         };
-        let upsert_response = dispatch(&broker, upsert_request).await.expect("dispatch returned None for a request with id");
+        let upsert_response = dispatch(&broker, upsert_request)
+            .await
+            .expect("dispatch returned None for a request with id");
         assert!(
             upsert_response.error.is_none(),
             "memory.navigation.upsert_node dispatch errored: {:?}",
@@ -2025,7 +2075,9 @@ mod tests {
                 }
             })),
         };
-        let second_upsert_response = dispatch(&broker, second_upsert_request).await.expect("dispatch returned None for a request with id");
+        let second_upsert_response = dispatch(&broker, second_upsert_request)
+            .await
+            .expect("dispatch returned None for a request with id");
         assert!(
             second_upsert_response.error.is_none(),
             "second navigation upsert dispatch errored: {:?}",
@@ -2046,7 +2098,9 @@ mod tests {
                 }
             })),
         };
-        let link_response = dispatch(&broker, link_request).await.expect("dispatch returned None for a request with id");
+        let link_response = dispatch(&broker, link_request)
+            .await
+            .expect("dispatch returned None for a request with id");
         assert!(
             link_response.error.is_none(),
             "memory.navigation.link_tunnel dispatch errored: {:?}",
@@ -2066,7 +2120,9 @@ mod tests {
                 }
             })),
         };
-        let list_response = dispatch(&broker, list_request).await.expect("dispatch returned None for a request with id");
+        let list_response = dispatch(&broker, list_request)
+            .await
+            .expect("dispatch returned None for a request with id");
         assert!(
             list_response.error.is_none(),
             "memory.navigation.list dispatch errored: {:?}",
@@ -2087,7 +2143,9 @@ mod tests {
                 }
             })),
         };
-        let traverse_response = dispatch(&broker, traverse_request).await.expect("dispatch returned None for a request with id");
+        let traverse_response = dispatch(&broker, traverse_request)
+            .await
+            .expect("dispatch returned None for a request with id");
         assert!(
             traverse_response.error.is_none(),
             "memory.navigation.traverse dispatch errored: {:?}",
@@ -2138,7 +2196,9 @@ mod tests {
             })),
         };
 
-        let response = dispatch(&broker, request).await.expect("dispatch returned None for a request with id");
+        let response = dispatch(&broker, request)
+            .await
+            .expect("dispatch returned None for a request with id");
         assert!(
             response.error.is_none(),
             "memory.wake_up dispatch errored: {:?}",
@@ -2187,7 +2247,9 @@ mod tests {
             })),
         };
 
-        let response = dispatch(&broker, request).await.expect("dispatch returned None for a request with id");
+        let response = dispatch(&broker, request)
+            .await
+            .expect("dispatch returned None for a request with id");
         assert!(
             response.error.is_none(),
             "maintain memory.capture_hook dispatch errored: {:?}",
@@ -2212,7 +2274,9 @@ mod tests {
                 }
             })),
         };
-        let response = dispatch(&broker, request).await.expect("dispatch returned None for a request with id");
+        let response = dispatch(&broker, request)
+            .await
+            .expect("dispatch returned None for a request with id");
         assert!(
             response.error.is_none() || response.error.as_ref().unwrap().code != INVALID_PARAMS
         );
@@ -2236,7 +2300,9 @@ mod tests {
                 }
             })),
         };
-        let response = dispatch(&broker, request).await.expect("dispatch returned None for a request with id");
+        let response = dispatch(&broker, request)
+            .await
+            .expect("dispatch returned None for a request with id");
         assert!(
             response.error.is_none() || response.error.as_ref().unwrap().code != INVALID_PARAMS
         );
@@ -2256,7 +2322,9 @@ mod tests {
                 }
             })),
         };
-        let response = dispatch(&broker, request).await.expect("dispatch returned None for a request with id");
+        let response = dispatch(&broker, request)
+            .await
+            .expect("dispatch returned None for a request with id");
         assert!(response.error.is_none());
     }
 
@@ -2275,7 +2343,9 @@ mod tests {
                 }
             })),
         };
-        let response = dispatch(&broker, request).await.expect("dispatch returned None for a request with id");
+        let response = dispatch(&broker, request)
+            .await
+            .expect("dispatch returned None for a request with id");
         assert!(response.error.is_some());
     }
 }

@@ -4562,11 +4562,9 @@ impl McpBroker {
             .metrics
             .memory_search_latency_ms_total
             .load(Ordering::Relaxed);
-        let memory_search_latency_avg_ms = if memory_search_calls > 0 {
-            memory_search_latency_ms_total / memory_search_calls
-        } else {
-            0
-        };
+        let memory_search_latency_avg_ms = memory_search_latency_ms_total
+            .checked_div(memory_search_calls)
+            .unwrap_or(0);
         MetricsSnapshotResponse {
             project_init_calls: self.metrics.project_init_calls.load(Ordering::Relaxed),
             project_refresh_calls: self.metrics.project_refresh_calls.load(Ordering::Relaxed),
