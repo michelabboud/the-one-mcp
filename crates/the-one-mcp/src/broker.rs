@@ -608,27 +608,17 @@ impl McpBroker {
             .await
             .map_err(|e| CoreError::Redis(format!("connect: {e}")))?;
 
-        // AOF check if configured.
+        // AOF check if configured. Delegates to the_one_core::storage::redis::verify_aof
+        // so the parse logic lives in exactly one place — a malformed INFO
+        // response surfaces as a hard error here instead of silently
+        // downgrading to cache mode.
         {
             use the_one_core::config::AppConfig as AC;
             if let Ok(app_config) = AC::load(_project_root, RuntimeOverrides::default()) {
                 if app_config.state_redis.require_aof {
-                    // Reuse the verify_aof logic from the state store module.
-                    let info: String = client
-                        .info(Some(fred::types::InfoKind::Persistence))
-                        .await
-                        .map_err(|e| CoreError::Redis(format!("INFO persistence: {e}")))?;
-                    let aof_on = info
-                        .lines()
-                        .find(|l| l.starts_with("aof_enabled:"))
-                        .and_then(|l| l.strip_prefix("aof_enabled:"))
-                        .map(|v| v.trim() == "1")
-                        .unwrap_or(false);
-                    if !aof_on {
+                    if let Err(e) = the_one_core::storage::redis::verify_aof(&client).await {
                         let _ = client.quit().await;
-                        return Err(CoreError::InvalidProjectConfig(
-                            "redis-combined with require_aof=true but aof_enabled:0".to_string(),
-                        ));
+                        return Err(e);
                     }
                 }
             }
@@ -5068,7 +5058,11 @@ impl McpBroker {
                 .map_err(CoreError::Embedding)?
         } else {
             // image_base64 path: decode → validate → write to temp file → embed
-            let b64 = request.image_base64.as_deref().unwrap();
+            let b64 = request.image_base64.as_deref().ok_or_else(|| {
+                CoreError::InvalidRequest(
+                    "memory.search_images requires either `query` or `image_base64`".to_string(),
+                )
+            })?;
 
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(b64)

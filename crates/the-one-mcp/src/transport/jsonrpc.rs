@@ -223,7 +223,13 @@ async fn handle_resources_list(
         .resources_list(std::path::Path::new(project_root), project_id)
         .await
     {
-        Ok(resp) => JsonRpcResponse::success(id, serde_json::to_value(resp).unwrap_or(Value::Null)),
+        Ok(resp) => match serde_json::to_value(resp) {
+            Ok(v) => JsonRpcResponse::success(id, v),
+            Err(e) => {
+                let (code, msg) = public_error_message(&CoreError::Json(e));
+                JsonRpcResponse::error(id, code, msg)
+            }
+        },
         Err(e) => {
             let (code, msg) = public_error_message(&e);
             JsonRpcResponse::error(id, code, msg)
@@ -263,7 +269,13 @@ async fn handle_resources_read(
         .resources_read(std::path::Path::new(project_root), project_id, uri)
         .await
     {
-        Ok(resp) => JsonRpcResponse::success(id, serde_json::to_value(resp).unwrap_or(Value::Null)),
+        Ok(resp) => match serde_json::to_value(resp) {
+            Ok(v) => JsonRpcResponse::success(id, v),
+            Err(e) => {
+                let (code, msg) = public_error_message(&CoreError::Json(e));
+                JsonRpcResponse::error(id, code, msg)
+            }
+        },
         Err(e) => {
             let (code, msg) = public_error_message(&e);
             JsonRpcResponse::error(id, code, msg)

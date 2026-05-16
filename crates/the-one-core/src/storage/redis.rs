@@ -95,6 +95,32 @@ fn val_to_string(v: &Value) -> String {
     }
 }
 
+/// Escape a user-supplied query string for RediSearch FT.SEARCH.
+///
+/// Covers the full RediSearch special-character set including `*`
+/// (wildcard) and `,` (term delimiter in tag/numeric filters) — both
+/// previously missed, which let unescaped user input flip a diary
+/// search into a wildcard or split a single term into a multi-term
+/// query.
+fn redis_query_escape(input: &str) -> String {
+    input
+        .replace('\\', "\\\\")
+        .replace('@', "\\@")
+        .replace('{', "\\{")
+        .replace('}', "\\}")
+        .replace('(', "\\(")
+        .replace(')', "\\)")
+        .replace('[', "\\[")
+        .replace(']', "\\]")
+        .replace('|', "\\|")
+        .replace('-', "\\-")
+        .replace('~', "\\~")
+        .replace('!', "\\!")
+        .replace('*', "\\*")
+        .replace(',', "\\,")
+        .replace('"', "\\\"")
+}
+
 /// Simple FNV-1a hash for generating deterministic conversation keys.
 fn md5_lite(input: &str) -> u64 {
     let mut hash: u64 = 0xcbf29ce484222325;
@@ -221,6 +247,12 @@ impl RedisStateStore {
         let _ = self.client.quit().await;
     }
 
+    /// Build a fully-qualified Redis key as `{prefix}:{project_id}:{suffix}`.
+    ///
+    /// **Invariant:** `self.prefix` was constructed at `new()` from a
+    /// sanitised `project_id` (see `the_one_core::naming::sanitize_project_id`,
+    /// which forbids `:`). Callers MUST route every key through this method
+    /// so the namespace separator stays unambiguous.
     fn key(&self, suffix: &str) -> String {
         format!("{}:{suffix}", self.prefix)
     }
@@ -276,7 +308,16 @@ impl RedisStateStore {
     }
 }
 
-async fn verify_aof(client: &Client) -> Result<(), CoreError> {
+/// Verify that the Redis server has AOF persistence enabled.
+///
+/// Single source of truth for the AOF check — also called by
+/// `the-one-mcp`'s combined-Redis client cache so both code paths
+/// agree on what counts as "AOF on".
+///
+/// **Parse failure is treated as an error**, not as `aof_enabled=false`.
+/// A malformed `INFO persistence` response should never silently
+/// downgrade a `require_aof=true` deployment to cache mode.
+pub async fn verify_aof(client: &Client) -> Result<(), CoreError> {
     let info: String = client
         .info(Some(InfoKind::Persistence))
         .await
@@ -287,7 +328,13 @@ async fn verify_aof(client: &Client) -> Result<(), CoreError> {
         .find(|l| l.starts_with("aof_enabled:"))
         .and_then(|l| l.strip_prefix("aof_enabled:"))
         .map(|v| v.trim() == "1")
-        .unwrap_or(false);
+        .ok_or_else(|| {
+            CoreError::Redis(
+                "INFO persistence response missing aof_enabled line — \
+                 cannot verify durability"
+                    .to_string(),
+            )
+        })?;
 
     if !aof_enabled {
         return Err(CoreError::InvalidProjectConfig(
@@ -738,20 +785,7 @@ impl StateStore for RedisStateStore {
         limit: usize,
     ) -> Result<Vec<DiaryEntry>, CoreError> {
         let index_name = self.key("diary_idx");
-        let escaped = query
-            .replace('\\', "\\\\")
-            .replace('@', "\\@")
-            .replace('{', "\\{")
-            .replace('}', "\\}")
-            .replace('(', "\\(")
-            .replace(')', "\\)")
-            .replace('[', "\\[")
-            .replace(']', "\\]")
-            .replace('|', "\\|")
-            .replace('-', "\\-")
-            .replace('~', "\\~")
-            .replace('!', "\\!")
-            .replace('"', "\\\"");
+        let escaped = redis_query_escape(query);
 
         let ft_query = if escaped.trim().is_empty() {
             "*".to_string()

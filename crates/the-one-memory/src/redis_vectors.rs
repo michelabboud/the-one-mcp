@@ -24,7 +24,13 @@ impl Clone for RedisVectorStore {
             client: self.client.clone(),
             index_name: self.index_name.clone(),
             embedding_dim: self.embedding_dim,
-            started: Arc::new(OnceCell::new()),
+            // SHARE the OnceCell across clones rather than allocating a
+            // fresh empty one. Arc::clone is a refcount bump; Arc::new
+            // would defeat the whole point of the guard and force every
+            // clone to re-run startup() (FT.CREATE, schema migration).
+            // Reached via the combined-Redis shared-client cache in the
+            // broker, which clones the store per call site.
+            started: Arc::clone(&self.started),
         }
     }
 }
@@ -792,8 +798,18 @@ fn parse_entity_results(
                 String::new()
             };
             let _ = key_str.strip_prefix(prefix);
-            let source_chunks: Vec<String> =
-                serde_json::from_str(&get("source_chunks")).unwrap_or_default();
+            let raw_chunks = get("source_chunks");
+            let source_chunks: Vec<String> = match serde_json::from_str(&raw_chunks) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(
+                        entity_key = %key_str,
+                        error = %e,
+                        "corrupt source_chunks JSON on entity hit — falling back to empty list",
+                    );
+                    Vec::new()
+                }
+            };
             results.push(EntityHit {
                 name: get("name"),
                 entity_type: get("entity_type"),
@@ -848,8 +864,18 @@ fn parse_relation_results(
                 String::new()
             };
             let _ = key_str.strip_prefix(prefix);
-            let source_chunks: Vec<String> =
-                serde_json::from_str(&get("source_chunks")).unwrap_or_default();
+            let raw_chunks = get("source_chunks");
+            let source_chunks: Vec<String> = match serde_json::from_str(&raw_chunks) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(
+                        relation_key = %key_str,
+                        error = %e,
+                        "corrupt source_chunks JSON on relation hit — falling back to empty list",
+                    );
+                    Vec::new()
+                }
+            };
             results.push(RelationHit {
                 source: get("source"),
                 target: get("target"),
